@@ -1,0 +1,16 @@
+services:
+  agents:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: join_us_agents
+    volumes:
+      # 整個 monorepo 掛到 /repo（程式碼同步，不需重建 image）
+      - ../:/repo
+      # 掛載 Claude Code 的認證資料與 skills（對應非 root 的 agent 使用者家目錄）
+      - ${USERPROFILE}/.claude:/home/agent/.claude
+      # 主設定檔（避免 "configuration file not found" 警告）
+      - ${USERPROFILE}/.claude.json:/home/agent/.claude.json
+    env_file:
+      - .env
+    working_dir: /repo
