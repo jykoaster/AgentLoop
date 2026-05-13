@@ -1,6 +1,6 @@
 from langgraph.graph import StateGraph, END
 from .state import AgentState
-from .nodes import analyze_plan_node, execute_node, review_node
+from .nodes import analyze_plan_node, execute_node, review_node, human_confirm_node
 from .nodes.review import has_blocking_issues
 
 MAX_ITERATIONS = 3
@@ -25,27 +25,42 @@ def increment_iteration(state: AgentState) -> dict:
     }
 
 
+def route_after_confirm(state: AgentState) -> str:
+    """人工確認通過 → execute；中止或錯誤 → end。"""
+    if state.get("status") == "confirmed":
+        return "execute"
+    return "end"  # covers "aborted", "error", unexpected values
+
+
 def build_workflow() -> StateGraph:
     graph = StateGraph(AgentState)
 
     graph.add_node("analyze_plan", analyze_plan_node)
+    graph.add_node("human_confirm", human_confirm_node)
     graph.add_node("execute", execute_node)
     graph.add_node("review", review_node)
     graph.add_node("increment", increment_iteration)
 
     # 流程：
-    #   analyze_plan → execute → review → [pass] → END
-    #                    ↑           |
-    #                    |       [fail, iter < MAX]
-    #                    |           ↓
-    #                    └─────── increment → analyze_plan
+    #   analyze_plan → human_confirm → [y] → execute → review → [pass] → END
+    #                       |                   ↑           |
+    #                      [N]                  |       [fail, iter < MAX]
+    #                       ↓                  |           ↓
+    #                      END      increment → analyze_plan → human_confirm
     #
+    # - human_confirm：規劃後人工審閱，輸入 y 才繼續，否則中止
     # - execute 內部自動修復測試失敗（最多重試 3 次），再交給 review 判定
-    # - review 失敗回到 analyze_plan 重新規劃
-    # - analyze_plan 根據 review_level（重寫/修補）決定是否 rollback
+    # - review 失敗回到 analyze_plan 重新規劃（需再次人工確認）
 
     graph.set_entry_point("analyze_plan")
-    graph.add_edge("analyze_plan", "execute")
+    graph.add_edge("analyze_plan", "human_confirm")
+
+    graph.add_conditional_edges(
+        "human_confirm",
+        route_after_confirm,
+        {"execute": "execute", "end": END},
+    )
+
     graph.add_edge("execute", "review")
 
     graph.add_conditional_edges(
