@@ -3,6 +3,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 from dataclasses import dataclass
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -32,8 +33,27 @@ class ClaudeResult:
     total_cost_usd: float = 0.0
 
 
-_DIM   = "\033[90m"
-_RESET = "\033[0m"
+_DIM    = "\033[90m"
+_YELLOW = "\033[1;33m"
+_RESET  = "\033[0m"
+
+_TOKEN_LIMIT_KEYWORDS = [
+    "rate limit",
+    "usage limit",
+    "quota exceeded",
+    "too many requests",
+    "429",
+    "overloaded",
+    "insufficient_quota",
+    "has exceeded",
+    "credit balance",
+    "billing",
+]
+
+
+def _is_token_limit_error(text: str) -> bool:
+    lower = text.lower()
+    return any(kw in lower for kw in _TOKEN_LIMIT_KEYWORDS)
 
 
 def _log_event(event: dict) -> None:
@@ -97,30 +117,11 @@ def format_usage_stats(result: ClaudeResult, elapsed: float) -> str:
     return "\n".join(lines)
 
 
-def call_claude(
-    prompt: str,
-    tools: str = "readonly",
-    timeout: int = 300,
-    model: str | None = None,
+def _run_claude_once(
+    timeout: int,
+    cmd: list[str],
 ) -> ClaudeResult:
-    """以非互動模式執行 `claude -p`，回傳結果及 token 用量。"""
-    allowed = TOOL_PRESETS.get(tools, tools)
-
-    if not shutil.which("claude"):
-        raise RuntimeError(
-            "找不到 `claude` 指令。請確認 Claude Code CLI 已安裝並在 PATH 中。"
-        )
-
-    cmd = [
-        "claude", "-p", prompt,
-        "--allowedTools", allowed,
-        "--output-format", "stream-json",
-        "--verbose",
-        "--dangerously-skip-permissions",
-    ]
-    if model:
-        cmd += ["--model", MODEL_IDS.get(model, model)]
-
+    """單次執行 claude subprocess，不含重試邏輯。"""
     lines: list[str] = []
     stderr_out = ""
     with subprocess.Popen(
@@ -193,3 +194,57 @@ def call_claude(
             continue
 
     return ClaudeResult(text="".join(lines).strip())
+
+
+def call_claude(
+    prompt: str,
+    tools: str = "readonly",
+    timeout: int = 300,
+    model: str | None = None,
+) -> ClaudeResult:
+    """以非互動模式執行 `claude -p`，回傳結果及 token 用量。
+    偵測到 token / rate limit 錯誤時暫停，等人工確認 token 已更新後再重試。
+    """
+    allowed = TOOL_PRESETS.get(tools, tools)
+
+    if not shutil.which("claude"):
+        raise RuntimeError(
+            "找不到 `claude` 指令。請確認 Claude Code CLI 已安裝並在 PATH 中。"
+        )
+
+    cmd = [
+        "claude", "-p", prompt,
+        "--allowedTools", allowed,
+        "--output-format", "stream-json",
+        "--verbose",
+        "--dangerously-skip-permissions",
+    ]
+    if model:
+        cmd += ["--model", MODEL_IDS.get(model, model)]
+
+    while True:
+        result = _run_claude_once(timeout, cmd)
+
+        if result.is_error and _is_token_limit_error(result.text):
+            print(f"\n{_YELLOW}{'═'*60}", flush=True)
+            print(f"  ⚠  偵測到 Token / Rate Limit 錯誤，工作流程已暫停", flush=True)
+            print(f"  錯誤訊息：{result.text[:300]}", flush=True)
+            print(f"{'═'*60}", flush=True)
+            print(f"  請等待 token 配額更新後，按 Enter 繼續；", flush=True)
+            print(f"  或輸入 q 後按 Enter 中止程序。{_RESET}", flush=True)
+            print(f"{_YELLOW}  > {_RESET}", end="", flush=True)
+            try:
+                user_input = sys.stdin.readline()
+            except (KeyboardInterrupt, EOFError):
+                print(f"\n{_YELLOW}  已中止{_RESET}\n", flush=True)
+                return result
+            if not user_input:  # stdin 已關閉（非 TTY / pipe EOF）
+                print(f"\n{_YELLOW}  stdin 已關閉，中止{_RESET}\n", flush=True)
+                return result
+            if user_input.strip().lower() == "q":
+                print(f"{_YELLOW}  已中止{_RESET}\n", flush=True)
+                return result
+            print(f"{_YELLOW}  重新呼叫 Claude...{_RESET}\n", flush=True)
+            continue
+
+        return result
