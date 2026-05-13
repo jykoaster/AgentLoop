@@ -60,5 +60,16 @@ def human_confirm_node(state: AgentState) -> dict:
         print(f"\n{_GREEN}  [人工確認] 確認，開始執行。{_RESET}\n", flush=True)
         return {"status": "confirmed"}
 
+    # User rejected — ask for revision comments before aborting
+    print(f"\n{_YELLOW}  請輸入修改意見，讓 Agent 調整計畫（直接按 Enter 則中止執行）：{_RESET}", flush=True)
+    try:
+        feedback = input(f"{_YELLOW}  > {_RESET}").strip()
+    except (EOFError, KeyboardInterrupt):
+        feedback = ""
+
+    if feedback:
+        print(f"\n{_CYAN}  [人工確認] 已收到意見，交由 Agent 重新規劃。{_RESET}\n", flush=True)
+        return {"status": "needs_revision", "human_feedback": feedback}
+
     print(f"\n{_RED}  [人工確認] 已中止，工作流結束。{_RESET}\n", flush=True)
     return {"status": "aborted"}

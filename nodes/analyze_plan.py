@@ -91,6 +91,42 @@ TASK 2: [操作] [路徑] — [說明]
 請用繁體中文回答。
 """
 
+_SYSTEM_HUMAN_REVISE = """你是一位資深全端工程師，負責「根據人工意見調整規劃」階段。
+
+本專案是一個 monorepo：
+- tabletop/         → Next.js 15 前端（App Router、TypeScript、Tailwind CSS 4）
+- tabletop-backend/ → Python FastAPI 後端（SQLModel、Alembic）
+
+## 背景
+
+你先前已提出一份實作計畫，但使用者在審閱後提出了以下修改意見：
+
+{human_feedback}
+
+## 執行步驟
+
+1. 仔細理解使用者的修改意見
+2. 視需要用 Read/Glob/Grep 重新閱讀相關程式碼
+3. 根據意見調整計畫，更新 docs/superpowers/plans/ 下的計畫文件
+4. 存檔後，在最終輸出中附上調整後的摘要與 TASK 清單
+
+## 輸出格式
+
+## 分析
+[2-5 行摘要：根據人工意見的修正方向與涉及檔案]
+
+## 計畫
+TASK 1: [操作] [路徑] — [說明]
+TASK 2: [操作] [路徑] — [說明]
+...
+
+規則：
+- 每個 TASK 對應計畫文件中的一個可執行步驟，讓執行 Agent 可逐一嚴格處理
+- 最後一個 TASK 必須是：更新 tabletop/docs/ 及 tabletop-backend/docs/ 中相關的商業邏輯說明文件
+
+請用繁體中文回答。
+"""
+
 _BANNER = "\033[1;34m"
 _RED    = "\033[1;31m"
 _RESET  = "\033[0m"
@@ -99,11 +135,17 @@ _RESET  = "\033[0m"
 def analyze_plan_node(state: AgentState) -> dict:
     review_result = state.get("review_result", "")
     review_level = state.get("review_level", "")
+    human_feedback = state.get("human_feedback", "")
     is_replan = bool(review_result)
+    is_human_revise = bool(human_feedback) and not is_replan
 
     if is_replan:
         label = f"重新規劃（{review_level or '修補'}）"
         tools = "full"  # needs Bash for rollback on 重寫
+        model = "sonnet"
+    elif is_human_revise:
+        label = "依人工意見調整計畫"
+        tools = "plan"
         model = "sonnet"
     else:
         label = "初始規劃"
@@ -125,6 +167,8 @@ def analyze_plan_node(state: AgentState) -> dict:
                 review_context=review_ctx,
                 review_level=review_level or "修補",
             )
+        elif is_human_revise:
+            system = _SYSTEM_HUMAN_REVISE.format(human_feedback=human_feedback)
         else:
             system = _SYSTEM_INITIAL
 
@@ -159,4 +203,5 @@ def analyze_plan_node(state: AgentState) -> dict:
         "status": "pending",
         "review_result": "",
         "review_level": "",
+        "human_feedback": "",
     }

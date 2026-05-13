@@ -26,9 +26,12 @@ def increment_iteration(state: AgentState) -> dict:
 
 
 def route_after_confirm(state: AgentState) -> str:
-    """人工確認通過 → execute；中止或錯誤 → end。"""
-    if state.get("status") == "confirmed":
+    """人工確認通過 → execute；有修改意見 → analyze_plan；中止或錯誤 → end。"""
+    status = state.get("status")
+    if status == "confirmed":
         return "execute"
+    if status == "needs_revision":
+        return "replan"
     return "end"  # covers "aborted", "error", unexpected values
 
 
@@ -58,7 +61,7 @@ def build_workflow() -> StateGraph:
     graph.add_conditional_edges(
         "human_confirm",
         route_after_confirm,
-        {"execute": "execute", "end": END},
+        {"execute": "execute", "replan": "analyze_plan", "end": END},
     )
 
     graph.add_edge("execute", "review")

@@ -91,7 +91,11 @@ START
        │                                   與 review_level）
        │                                    再次等待人工確認
        │
-       └─── 非 y (aborted / error) ────────────→ END 🛑
+       ├─── 輸入 N + 填寫修改意見 ──────────→ analyze_plan
+       │    (needs_revision + human_feedback)  （帶入 human_feedback
+       │                                        重新規劃後再次確認）
+       │
+       └─── 輸入 N + 空白 (aborted) ────────→ END 🛑
 ```
 
 > 有阻塞問題且已達 iteration 上限 (3) 時，`route_after_review` 亦路由至 END ⚠️。
@@ -156,7 +160,8 @@ TASK N: 更新 tabletop/docs/ 與 tabletop-backend/docs/（必要項目）
 - 列印分析摘要、TASK 清單（含數量），以及最新計畫文件路徑
 - 偵測到非互動式 stdin（如管道重導向）時自動中止，避免無限等待
 - 輸入 `y`（不區分大小寫）→ 返回 `status: "confirmed"` → 工作流程繼續至 `execute`
-- 輸入任何其他值、EOFError、KeyboardInterrupt → 返回 `status: "aborted"` → 工作流程結束
+- 輸入非 `y` 後，再輸入修改意見（非空白）→ 返回 `status: "needs_revision"` + `human_feedback` → 回到 `analyze_plan` 重新規劃
+- 輸入非 `y` 後，直接按 Enter（空白）、EOFError、KeyboardInterrupt → 返回 `status: "aborted"` → 工作流程結束
 
 **注意：** review 失敗觸發重新規劃時，下一輪 `analyze_plan` 完成後同樣需要再次人工確認。
 
