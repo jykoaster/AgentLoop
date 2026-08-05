@@ -1,9 +1,11 @@
 """偵測工作區內各專案的 CLAUDE.md / AGENT.md，讓 Agent 依任務需求自行選擇並讀取，
 而不是把單一專案的結構寫死在 prompt 裡。"""
+import glob
 import os
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 _CANDIDATE_FILES = ("CLAUDE.md", "AGENT.md", "AGENTS.md")
+_PLANS_DIR = os.path.join(REPO_ROOT, "docs", "superpowers", "plans")
 
 
 def list_project_docs() -> list[str]:
@@ -39,3 +41,13 @@ def build_project_docs_hint() -> str:
         "若任務同時涉及多個專案（例如前後端），須分別讀取各自的說明檔。"
         "若說明檔未涵蓋的細節，比對該專案現有程式碼風格。"
     )
+
+
+def latest_plan_file() -> str | None:
+    """回傳 docs/superpowers/plans/ 下最新的規格／計畫文件路徑
+    （analyze_plan 依 to-spec 產生；human_confirm 顯示給使用者，review 讀取作為 Spec 依據），
+    找不到則回傳 None。"""
+    files = glob.glob(os.path.join(_PLANS_DIR, "*.md"))
+    if not files:
+        return None
+    return max(files, key=os.path.getmtime)

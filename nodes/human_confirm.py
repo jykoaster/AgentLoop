@@ -1,22 +1,12 @@
 import sys
-import glob
-import os
 from ..state import AgentState
+from ..project_context import latest_plan_file
 
 _CYAN   = "\033[1;36m"
 _YELLOW = "\033[1;33m"
 _GREEN  = "\033[1;32m"
 _RED    = "\033[1;31m"
 _RESET  = "\033[0m"
-
-
-def _latest_plan_file() -> str | None:
-    """回傳 docs/superpowers/plans/ 下最新的計畫文件路徑，找不到則回傳 None。"""
-    pattern = os.path.join("docs", "superpowers", "plans", "*.md")
-    files = glob.glob(pattern)
-    if not files:
-        return None
-    return max(files, key=os.path.getmtime)
 
 
 def human_confirm_node(state: AgentState) -> dict:
@@ -39,7 +29,7 @@ def human_confirm_node(state: AgentState) -> dict:
         for i, task in enumerate(plan, 1):
             print(f"  TASK {i}: {task}", flush=True)
 
-    plan_file = _latest_plan_file()
+    plan_file = latest_plan_file()
     if plan_file:
         print(f"\n{_YELLOW}## 計畫文件{_RESET}", flush=True)
         print(f"  {plan_file}", flush=True)

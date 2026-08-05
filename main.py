@@ -3,15 +3,15 @@ CLI 入口點：執行 LangGraph 四 Agent 工作流，或單獨呼叫任一 nod
 
 用法：
   # 完整工作流
-  python -m agents.main "幫我在後端新增一個 GET /tables/featured 端點，同時在前端首頁顯示精選桌遊"
+  python -m AgentLoop.main "幫我在後端新增一個 GET /tables/featured 端點，同時在前端首頁顯示精選桌遊"
 
   # 單獨呼叫 node
-  python -m agents.main --node review "任務描述"
-  python -m agents.main --node execute "任務描述"
-  python -m agents.main --node analyze_plan "任務描述"
+  python -m AgentLoop.main --node review "任務描述"
+  python -m AgentLoop.main --node execute "任務描述"
+  python -m AgentLoop.main --node analyze_plan "任務描述"
 
   # 帶前置狀態的單獨呼叫（JSON 檔案）
-  python -m agents.main --node review --state-file /tmp/state.json "任務描述"
+  python -m AgentLoop.main --node review --state-file /tmp/state.json "任務描述"
 """
 import sys
 import os
@@ -105,7 +105,7 @@ def run_node(node_name: str, task: str, state_file: str | None = None) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        prog="python -m agents.main",
+        prog="python -m AgentLoop.main",
         description="執行 LangGraph 工作流或單獨呼叫 node",
     )
     parser.add_argument("task", help="任務描述")
