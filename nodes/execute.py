@@ -2,14 +2,10 @@ import time
 from ..state import AgentState
 from ..claude_runner import call_claude, format_usage_stats
 from ..skill_loader import build_skills_block
+from ..project_context import build_project_docs_hint
 
 _SKILLS = [
-    "frontend-design",
-    "next-best-practices",
-    "vercel-react-best-practices",
-    "vercel-composition-patterns",
-    "test-driven-development",
-    "docker-expert",
+    "implement",
 ]
 
 _SYSTEM = """你是一位資深全端工程師，負責「執行」階段。
@@ -19,46 +15,51 @@ _SYSTEM = """你是一位資深全端工程師，負責「執行」階段。
 ## 執行前準備（必須完成）
 
 在開始任何修改前，必須先：
-1. 讀取 tabletop/docs/ 目錄下所有現有文件，了解前端商業邏輯說明
-2. 讀取 tabletop-backend/docs/ 目錄下所有現有文件，了解後端商業邏輯說明
-3. 若 docs/ 目錄不存在，自行建立並繼續
+1. 依下方「專案說明檔」判斷本次任務涉及的專案目錄，用 Read 讀取其 CLAUDE.md / AGENT.md，
+   了解該專案的架構、指令（測試、lint、build 等）、目錄慣例、程式碼規範，以及**技術棧**
+   - 若任務同時涉及多個專案（例如前後端），須分別讀取各自的說明檔
+   - 若找不到 CLAUDE.md / AGENT.md，自行用 Read/Glob/Grep 探索程式碼並比對現有風格
+2. 依偵測到的技術棧，自行從你可用的 skills 中挑選並使用適合的其他 skill
+   （例如 Vue 專案適用 vue-best-practices、Nuxt + Vitest 專案適用 nuxt-vitest-msw、
+   需要測試優先開發時適用 tdd 等）——不要假設任何特定技術棧，依實際偵測結果選用
+3. 讀取該專案 docs/ 目錄下所有現有文件，了解商業邏輯說明；若 docs/ 目錄不存在，自行建立並繼續
 
-## 執行規則
+<<PROJECT_CONTEXT>>
+
+## 執行方式
+
+本階段以 implement skill 的流程為主軸執行下列 TASK 清單，但有以下覆蓋規則：
+- **不要**執行 implement 流程中「commit 到目前分支」的步驟——修改是否提交由使用者事後決定
+- **不要**自行呼叫 /code-review——後續有獨立的 Review Agent 依專案規格審查本次修改，此處只需完成實作與測試
+- 其餘步驟（優先在既有 seam 使用 /tdd、定期執行型別檢查與單一測試檔案、最後執行完整測試）依 implement skill 原本的流程進行
 
 根據下列 TASK 清單，**嚴格依序**完成所有修改：
 - 逐一執行每個 TASK，不跳過、不重排順序
 - 用 Read 工具讀取現有內容，再用 Write/Edit 工具寫入修改
-- 用 Bash 執行必要指令（alembic、npm run lint 等）
+- 用 Bash 執行必要指令
+- 程式碼風格、命名慣例、目錄結構、i18n／型別／auto-generated 檔案等規則，一律依照該專案
+  CLAUDE.md / AGENT.md 的說明；說明檔未涵蓋的細節，比對該專案現有程式碼風格
 
 ## 重要規範
 
-- 前後端 TypeScript 型別必須與 Python 模型保持一致
-- 新增 UI 文字必須同時更新 tabletop/messages/zh.json 與 en.json
 - 寫入前先讀取原始內容，避免覆蓋不相關程式碼
+- 不修改任何 auto-generated 檔案（CLAUDE.md / AGENT.md 通常會標示這類目錄）
 
 ## 文件同步要求
 
-每次修改程式碼後，必須同步更新相關的商業邏輯說明文件：
-- 前端修改 → 新增或修改 tabletop/docs/ 下對應的說明文件
-- 後端修改 → 新增或修改 tabletop-backend/docs/ 下對應的說明文件
-- 說明文件應涵蓋：功能說明、資料流、API 規格、業務規則
+每次修改程式碼後，必須同步更新該專案 docs/ 下相關的商業邏輯說明文件：
+- 說明文件應涵蓋：功能說明、資料流、模組／元件結構、業務規則
 
 此要求由最後一個 TASK 統一處理。若 TASK 清單未包含文件更新步驟，在所有 TASK 完成後自行補充。
 
 ## 強制測試與自動修復（所有 TASK 及文件同步完成後執行）
 
-所有 TASK 完成後，依序用 Bash 執行以下三個測試：
-
-```
-cd tabletop && npm run test
-cd tabletop && npm run test:e2e
-cd tabletop-backend && pytest
-```
-（若偵測到 Docker 環境，pytest 改用 `docker exec $(docker ps -q --filter ancestor=tabletop-backend) bash -c "cd /app && pytest"`）
+依照該專案 CLAUDE.md / AGENT.md 中列出的測試指令執行測試；若說明檔未列出，
+探索 package.json / pyproject.toml 等設定檔判斷正確的測試指令。
 
 ### 測試失敗的處理
 
-若任一測試失敗，分析錯誤訊息並修復，然後重新執行所有測試，**最多重試 3 次**。
+若測試失敗，分析錯誤訊息並修復，然後重新執行測試，**最多重試 3 次**。
 3 次之後不論結果如何，繼續輸出最終摘要（測試輸出已由 Bash 工具印出，無需在文字摘要中重複）。
 
 ## 最終輸出格式（文字摘要，不含測試輸出）
@@ -83,8 +84,9 @@ def execute_node(state: AgentState) -> dict:
         plan_text = "\n".join(
             f"TASK {i+1}: {s}" for i, s in enumerate(state["plan"])
         )
+        system = _SYSTEM.replace("<<PROJECT_CONTEXT>>", build_project_docs_hint())
         prompt = (
-            f"{_SYSTEM}\n\n{skills_block}\n\n"
+            f"{system}\n\n{skills_block}\n\n"
             f"任務：{state['task']}\n\n"
             f"執行 TASK 清單（嚴格依序執行，不得跳過）：\n{plan_text}"
         )

@@ -4,8 +4,12 @@ import os
 SKILLS_DIR = os.path.expanduser("~/.claude/skills")
 
 # 只注入完整內容的 skill 白名單；其餘只列名稱
-# writing-plans 的存檔路徑 (docs/superpowers/plans/) 定義在 SKILL.md 內，需完整注入
-_FULL_CONTENT_SKILLS: set[str] = {"writing-plans"}
+# 這些 skill 的確切流程（提問方式、文件存放規則、平行 sub-agent 呼叫方式等）必須完整注入才能正確遵循。
+# 其中 grill-with-docs / to-spec / implement 設有 disable-model-invocation，
+# Claude 不會自動觸發，更是非注入不可
+_FULL_CONTENT_SKILLS: set[str] = {
+    "grill-with-docs", "grilling", "domain-modeling", "to-spec", "implement", "code-review",
+}
 
 
 def load_skill(name: str) -> str:

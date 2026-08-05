@@ -1,6 +1,7 @@
 """呼叫本機 `claude -p` CLI，不需要 Anthropic API 額度。"""
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -13,6 +14,8 @@ TOOL_PRESETS = {
     "plan":     "Read,Write,Glob,Grep",
     "full":     "Read,Write,Edit,Bash,Glob,Grep",
     "check":    "Read,Glob,Grep,Bash",
+    # code-review skill 需要 Task 工具以平行呼叫 Standards / Spec 兩個 sub-agent
+    "review":   "Read,Glob,Grep,Bash,Task",
 }
 
 MODEL_IDS = {
@@ -31,11 +34,16 @@ class ClaudeResult:
     cache_read_tokens: int = 0
     cache_write_tokens: int = 0
     total_cost_usd: float = 0.0
+    session_id: str = ""
 
 
-_DIM    = "\033[90m"
-_YELLOW = "\033[1;33m"
-_RESET  = "\033[0m"
+_DIM     = "\033[90m"
+_YELLOW  = "\033[1;33m"
+_MAGENTA = "\033[1;35m"
+_RESET   = "\033[0m"
+
+QUESTION_MARKER = "QUESTION:"
+_QUESTION_LINE_RE = re.compile(r"(?:^|\n)\s*" + re.escape(QUESTION_MARKER))
 
 _TOKEN_LIMIT_KEYWORDS = [
     "rate limit",
@@ -64,9 +72,18 @@ def _log_event(event: dict) -> None:
         for block in event.get("message", {}).get("content", []):
             btype = block.get("type")
             if btype == "text":
-                first = block.get("text", "").strip().splitlines()
-                if first:
-                    print(f"{_DIM}  {first[0][:120]}{_RESET}", flush=True)
+                text = block.get("text", "").strip()
+                match = _QUESTION_LINE_RE.search(text)
+                if match:
+                    question = text[match.end():].strip()
+                    print(f"\n{_MAGENTA}{'┄'*50}", flush=True)
+                    print(f"  ❓ Agent 提問，等待回覆", flush=True)
+                    print(f"{'┄'*50}{_RESET}", flush=True)
+                    print(f"  {question}\n", flush=True)
+                elif text:
+                    first = text.splitlines()
+                    if first:
+                        print(f"{_DIM}  {first[0][:120]}{_RESET}", flush=True)
             elif btype == "tool_use":
                 name = block.get("name", "?")
                 inp  = block.get("input", {})
@@ -124,6 +141,7 @@ def _run_claude_once(
     """單次執行 claude subprocess，不含重試邏輯。"""
     lines: list[str] = []
     stderr_out = ""
+    session_id = ""
     with subprocess.Popen(
         cmd,
         stdin=subprocess.DEVNULL,
@@ -139,9 +157,11 @@ def _run_claude_once(
                 stripped = line.strip()
                 if stripped:
                     try:
-                        _log_event(json.loads(stripped))
+                        event = json.loads(stripped)
                     except json.JSONDecodeError:
-                        pass
+                        continue
+                    session_id = event.get("session_id") or session_id
+                    _log_event(event)
             process.wait(timeout=timeout)
             # 在 with 結束前讀取 stderr，避免 pipe 關閉後 I/O error
             stderr_out = process.stderr.read().strip()
@@ -171,6 +191,7 @@ def _run_claude_once(
         return ClaudeResult(
             text=f"[claude 執行失敗 exit={process.returncode}]{detail}",
             is_error=True,
+            session_id=session_id,
         )
 
     # 從 stream-json 的最後一個 result event 取出文字與 token 用量
@@ -189,11 +210,12 @@ def _run_claude_once(
                     cache_read_tokens=usage.get("cache_read_input_tokens", 0),
                     cache_write_tokens=usage.get("cache_creation_input_tokens", 0),
                     total_cost_usd=event.get("total_cost_usd", 0.0),
+                    session_id=event.get("session_id") or session_id,
                 )
         except json.JSONDecodeError:
             continue
 
-    return ClaudeResult(text="".join(lines).strip())
+    return ClaudeResult(text="".join(lines).strip(), session_id=session_id)
 
 
 def call_claude(
@@ -201,9 +223,13 @@ def call_claude(
     tools: str = "readonly",
     timeout: int = 300,
     model: str | None = None,
+    resume: str | None = None,
 ) -> ClaudeResult:
     """以非互動模式執行 `claude -p`，回傳結果及 token 用量。
     偵測到 token / rate limit 錯誤時暫停，等人工確認 token 已更新後再重試。
+
+    resume：帶入先前呼叫回傳的 session_id，以同一個 session 延續對話
+    （用於一問一答式的多輪互動，例如 grilling 式提問）。
     """
     allowed = TOOL_PRESETS.get(tools, tools)
 
@@ -221,6 +247,8 @@ def call_claude(
     ]
     if model:
         cmd += ["--model", MODEL_IDS.get(model, model)]
+    if resume:
+        cmd += ["--resume", resume]
 
     while True:
         result = _run_claude_once(timeout, cmd)
