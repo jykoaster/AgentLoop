@@ -3,14 +3,37 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: join_us_agents
+    container_name: agent_loop
     volumes:
-      # 整個 monorepo 掛到 /repo（程式碼同步，不需重建 image）
-      - ../:/repo
-      # 掛載 Claude Code 的認證資料與 skills（對應非 root 的 agent 使用者家目錄）
-      - ${USERPROFILE}/.claude:/home/agent/.claude
-      # 主設定檔（避免 "configuration file not found" 警告）
-      - ${USERPROFILE}/.claude.json:/home/agent/.claude.json
+      # AgentLoop 與目標專案一律用「與 host 相同的絕對路徑」掛載（而非重新映射到
+      # /workspace/...）。原因：容器內執行的 docker compose 是透過下方 docker.sock
+      # 操控 host 上同一顆 daemon，daemon 建立目標專案的 bind mount 時，用的是這裡
+      # 掛載路徑本身的字串，該路徑必須在 host 上真實存在，否則會掛載到空目錄
+      - ${HOST_WORKSPACE_ROOT}/AgentLoop:${HOST_WORKSPACE_ROOT}/AgentLoop
+      # 目標專案掛載，資料夾名稱由 .env 的 TARGET_PROJECT 決定。
+      # 需要同時掛載多個目標專案時，在 .env 新增 TARGET_PROJECT_2、TARGET_PROJECT_3...，
+      # 並在這裡依樣加一行 ${HOST_WORKSPACE_ROOT}/${TARGET_PROJECT_2}:${HOST_WORKSPACE_ROOT}/${TARGET_PROJECT_2}
+      - ${HOST_WORKSPACE_ROOT}/${TARGET_PROJECT}:${HOST_WORKSPACE_ROOT}/${TARGET_PROJECT}
+      # 讓容器內的 docker CLI 操控 host 的 docker engine（Docker outside of Docker）
+      - /var/run/docker.sock:/var/run/docker.sock
+      # 容器專屬的 Claude Code 登入狀態（.claude/ 其餘內容、.claude.json 等），
+      # 存在獨立的 named volume，刻意不與 host 的 ~/.claude 共用。
+      # 原因：host 若同時在跑 claude，跟容器內的 claude subprocess 共用同一份憑證檔，
+      # OAuth token refresh 會互相搶寫，導致容器執行到一半認證失效報錯，
+      # 或剛啟動時讀到寫入中的檔案而顯示未登入。首次使用需在容器內執行
+      # `docker exec -it agent_loop claude login`（或改設 ANTHROPIC_API_KEY 環境變數），
+      # 登入狀態會保存在這個 volume 裡，容器重建也不會遺失，但不會同步 host 的登入狀態
+      - agent_home:/home/agent
+      # skills 內容維持從 host 讀取，僅唯讀掛載——純靜態內容，不受上面的憑證 race 影響
+      - ${HOME}/.claude/skills:/home/agent/.claude/skills:ro
+      # ~/.claude/skills 底下多為指向 ~/.agents/skills 的符號連結，需一併掛載才能解析
+      - ${HOME}/.agents:/home/agent/.agents:ro
     env_file:
       - .env
-    working_dir: /repo
+    # 停在 AgentLoop 的上層目錄，讓 `python -m AgentLoop.main ...` 能把 AgentLoop
+    # 當成頂層 package 解析（原本掛在 /workspace/agentloop 時也是靠 working_dir
+    # 停在其上層 /workspace 達成同樣效果）
+    working_dir: ${HOST_WORKSPACE_ROOT}
+
+volumes:
+  agent_home:
