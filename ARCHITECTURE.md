@@ -42,7 +42,7 @@ class AgentState(TypedDict):
     execution_result: str  # 執行節點的輸出
     review_result: str     # 審查節點的完整報告
     review_level: str      # "重寫" | "修補" | ""
-    status: str            # "pending" | "approved" | "needs_revision" | "error" | "confirmed" | "aborted"
+    status: str            # "pending" | "needs_revision" | "error" | "confirmed" | "aborted"
     iteration: int         # 重試計數器（上限 3）
     human_feedback: str    # 使用者在 human_confirm 拒絕計畫時填寫的修改意見
 ```
@@ -249,7 +249,7 @@ TASK N: 更新該任務所屬專案 docs/ 下相關的商業邏輯說明文件�
 **審查依據：**
 
 - **Fixed point**：本次修改尚未 commit，固定為 `HEAD`（`git diff HEAD` 取得完整異動）
-- **Spec 來源**：優先讀取 `analyze_plan` 依 to-spec 產生、`docs/superpowers/plans/` 下最新的規格文件（`_latest_spec_file()`）；找不到則以任務描述與 TASK 清單為 fallback
+- **Spec 來源**：優先讀取 `analyze_plan` 依 to-spec 產生、`docs/superpowers/plans/` 下最新的規格文件（`project_context.latest_plan_file()`）；找不到則以任務描述與 TASK 清單為 fallback
 - **Standards 來源**：依 `project_context.py` 判斷本次任務涉及的專案，讀取其 `CLAUDE.md` / `AGENT.md`，以及其中提及或專案根目錄下的 `CODING_STANDARDS.md` / `CONTRIBUTING.md`（若有）；涉及多個專案時分別讀取
 
 **額外操作指示：**
@@ -382,10 +382,11 @@ MODEL_IDS = {
     "haiku":  "claude-haiku-4-5-20251001",
     "sonnet": "claude-sonnet-4-6",
     "opus":   "claude-opus-4-7",
+    "fable":  "claude-fable-5",
 }
 ```
 
-`analyze_plan` 三種模式一律指定 `model="opus"`；`execute` 與 `review` 不指定 model，使用 Claude CLI 的預設模型。
+每個 Agent 節點檔案最上方都有一個 `_MODEL` 常數，值為 `MODEL_IDS` 的其中一個 key，或 `None`（沿用 Claude CLI 本身的預設模型）。要調整某節點使用的模型，直接改該節點檔案的 `_MODEL` 即可。
 
 ---
 
@@ -431,15 +432,15 @@ AgentLoop 容器本身不跑 Docker daemon，而是讓容器內的 Docker CLI �
 ### 完整工作流程模式
 
 ```bash
-python -m agents.main "幫我在後端新增一個 GET /tables/featured 端點"
+python -m AgentLoop.main "幫我在後端新增一個 GET /tables/featured 端點"
 ```
 
 ### 單節點偵錯模式
 
 ```bash
-python -m agents.main --node analyze_plan "任務描述"
-python -m agents.main --node execute --state-file /tmp/state.json "任務描述"
-python -m agents.main --node review "任務描述"
+python -m AgentLoop.main --node analyze_plan "任務描述"
+python -m AgentLoop.main --node execute --state-file /tmp/state.json "任務描述"
+python -m AgentLoop.main --node review "任務描述"
 ```
 
 State file 可預載 `plan`、`execution_result` 等欄位，便於針對單一節點除錯。`human_confirm` 不在 `--node` 可選清單中，只能作為完整工作流程的一部分執行。

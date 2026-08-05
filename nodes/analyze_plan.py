@@ -14,6 +14,9 @@ _SKILLS = [
     "tdd",
 ]
 
+# 使用的模型（"haiku" | "sonnet" | "opus" | "fable"，見 claude_runner.MODEL_IDS）
+_MODEL = "opus"
+
 _QUESTION_PROTOCOL = """## 提問規則（grill-with-docs 互動式釐清）
 
 依照 grill-with-docs：以 grilling 對本任務逐一提問、以 domain-modeling 即時記錄詞彙與 ADR。
@@ -236,18 +239,16 @@ def analyze_plan_node(state: AgentState) -> dict:
     is_replan = bool(review_result)
     is_human_revise = bool(human_feedback) and not is_replan
 
+    model = _MODEL
     if is_replan:
         label = f"重新規劃（{review_level or '修補'}）"
         tools = "full"  # needs Bash for rollback on 重寫
-        model = "opus"
     elif is_human_revise:
         label = "依人工意見調整計畫"
         tools = "plan"
-        model = "opus"
     else:
         label = "初始規劃"
         tools = "plan"
-        model = "opus"
 
     print(f"\n{_BANNER}{'═'*50}\n  [分析+規劃 Agent] 開始 — {label}\n{'═'*50}{_RESET}\n", flush=True)
 

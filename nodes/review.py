@@ -1,13 +1,16 @@
 import re
 import time
 import os
-import glob
 from pathlib import Path
 from datetime import datetime
 from ..state import AgentState
-from ..claude_runner import call_claude, format_usage_stats, REPO_ROOT
+from ..claude_runner import call_claude, format_usage_stats
 from ..skill_loader import build_skills_block
-from ..project_context import build_project_docs_hint
+from ..project_context import build_project_docs_hint, latest_plan_file
+
+# 使用的模型（"haiku" | "sonnet" | "opus" | "fable"，見 claude_runner.MODEL_IDS；
+# None 則沿用 claude CLI 本身的預設模型）
+_MODEL = "sonnet"
 
 _SYSTEM = """你是一位資深程式碼審查者，負責「Code Review」階段。
 
@@ -102,15 +105,6 @@ def _save_review_report(task: str, review_text: str, review_level: str, iteratio
         print(f"{_RED}  [Review Agent] 儲存報告失敗：{e}{_RESET}", flush=True)
 
 
-def _latest_spec_file() -> str | None:
-    """回傳 docs/superpowers/plans/ 下最新的規格文件路徑（analyze_plan 階段依 to-spec 產生），找不到則回傳 None。"""
-    pattern = os.path.join(REPO_ROOT, "docs", "superpowers", "plans", "*.md")
-    files = glob.glob(pattern)
-    if not files:
-        return None
-    return max(files, key=os.path.getmtime)
-
-
 def review_node(state: AgentState) -> dict:
     if state.get("status") == "error":
         print(f"\n{_BANNER}{'═'*50}\n  [Review Agent] 上游發生錯誤，跳過\n{'═'*50}{_RESET}\n", flush=True)
@@ -131,7 +125,7 @@ def review_node(state: AgentState) -> dict:
         f"TASK {i+1}: {s}" for i, s in enumerate(state.get("plan", []))
     )
 
-    spec_file = _latest_spec_file()
+    spec_file = latest_plan_file()
     spec_source = (
         f"{spec_file}（由分析規劃階段依 to-spec 產生，請用 Read 讀取）"
         if spec_file
@@ -150,7 +144,7 @@ def review_node(state: AgentState) -> dict:
             .replace("<<SPEC_SOURCE>>", spec_source)
             .replace("<<PROJECT_CONTEXT>>", build_project_docs_hint())
         )
-        result = call_claude(prompt, tools="review", timeout=600)
+        result = call_claude(prompt, tools="review", timeout=600, model=_MODEL)
     except Exception as e:
         print(f"{_RED}  [Review Agent] 發生例外：{e}{_RESET}\n", flush=True)
         return {"status": "error", "review_result": f"Review 發生例外：{e}", "review_level": ""}

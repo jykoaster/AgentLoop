@@ -8,6 +8,10 @@ _SKILLS = [
     "implement",
 ]
 
+# 使用的模型（"haiku" | "sonnet" | "opus" | "fable"，見 claude_runner.MODEL_IDS；
+# None 則沿用 claude CLI 本身的預設模型）
+_MODEL = "sonnet"
+
 _SYSTEM = """你是一位資深全端工程師，負責「執行」階段。
 
 請用繁體中文回答。
@@ -90,7 +94,7 @@ def execute_node(state: AgentState) -> dict:
             f"任務：{state['task']}\n\n"
             f"執行 TASK 清單（嚴格依序執行，不得跳過）：\n{plan_text}"
         )
-        result = call_claude(prompt, tools="full", timeout=900)
+        result = call_claude(prompt, tools="full", timeout=900, model=_MODEL)
     except Exception as e:
         print(f"{_RED}  [執行 Agent] 發生例外：{e}{_RESET}\n", flush=True)
         return {"status": "error", "execution_result": f"執行階段發生例外：{e}"}
