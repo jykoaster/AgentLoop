@@ -38,8 +38,11 @@ def _empty_state(task: str) -> AgentState:
         "execution_result": "",
         "review_result": "",
         "review_level": "",
+        "review_blocking": False,
         "status": "pending",
         "iteration": 0,
+        "human_feedback": "",
+        "plan_filename": "",
     }
 
 

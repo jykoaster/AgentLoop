@@ -58,13 +58,37 @@ docker exec -it agent_loop bash
 
 ### 首次使用：容器內登入 Claude Code
 
-容器內的 Claude Code 登入狀態**刻意不與 host 共用**（存在獨立的 `agent_home` named volume），所以即使你 host 上已經登入過 `claude`，容器內第一次仍需要另外登入一次：
+容器內的 Claude Code 登入狀態**刻意不與 host 共用**（存在獨立的 `agent_home` named volume），所以即使你 host 上已經登入過 `claude`，容器內第一次仍需要另外設定一次認證。
+
+**建議做法：用 `claude setup-token` 產生長效 token**，而不是在容器內跑互動式 `claude login`——`docker exec -it` 是嵌套 TTY，貼上瀏覽器給的授權碼時常因終端機的 paste 處理（多帶換行符、截斷）或碼過期而顯示 `Invalid code`。改用 token 可以完全避開這段互動貼碼流程：
+
+1. 在 **host**（瀏覽器登入沒問題的地方）執行：
+
+   ```bash
+   claude setup-token
+   ```
+
+   走一次瀏覽器授權後，會印出一個長效 token。
+
+2. 把這個 token 寫進 `AgentLoop/.env`：
+
+   ```bash
+   CLAUDE_CODE_OAUTH_TOKEN=<setup-token 產生的 token>
+   ```
+
+   `docker-compose.yml` 的 `env_file: .env` 會自動把它帶進容器，之後容器內的 `claude` 不需要再另外登入。
+
+3. 若之前已經跑過互動式 `claude login` 而積了一份登入狀態在 `agent_home` volume 裡也沒關係，兩者可以並存；`.env` 裡的 `CLAUDE_CODE_OAUTH_TOKEN` 會被讀取使用。
+
+**替代做法**：也可以改用專屬的 `ANTHROPIC_API_KEY` 環境變數（同樣寫進 `.env`）取代登入——差別是這條路走 API 用量計費，而非 Claude 訂閱額度。
+
+**若仍想用互動式登入**（例如沒有 Claude 訂閱、只能走 OAuth 免費額度），可以跑：
 
 ```bash
 docker exec -it agent_loop claude login
 ```
 
-登入狀態會保存在 `agent_home` volume 裡，容器重建（`docker compose up`/`down`）不會遺失，只有主動 `docker compose down -v` 才會清掉。也可以改用專屬的 `ANTHROPIC_API_KEY` 環境變數（寫進 `.env`）取代登入，兩種方式擇一即可。
+登入狀態會保存在 `agent_home` volume 裡，容器重建（`docker compose up`/`down`）不會遺失，只有主動 `docker compose down -v` 才會清掉。但如上述，這條路在 `docker exec -it` 底下貼授權碼容易失敗，優先用 `setup-token` 或 `ANTHROPIC_API_KEY`。
 
 > 為什麼不能跟 host 共用登入狀態：如果容器直接掛載 host 的 `~/.claude`，host 與容器內的 `claude` process 會共用同一份 OAuth 憑證檔。兩邊同時使用 `claude` 時，token refresh 會互相搶寫，可能導致容器執行到一半認證失效報錯，或剛啟動時讀到寫入中的檔案而顯示未登入。獨立登入後這兩個問題都不會再發生，代價是多佔用一個 session／可能產生額外的 API 用量。
 
@@ -84,6 +108,8 @@ python -m AgentLoop.main --node review "任務描述"
 
 完整工作流跑到 `human_confirm` 時會暫停，在終端機顯示規劃摘要與 TASK 清單，輸入 `y` 才會繼續往下執行。
 
+執行過程中，`analyze_plan` 第一次進行初始規劃時會先在終端機詢問規劃文件的檔名（不含副檔名）：直接輸入想要的檔名即可自訂 `docs/superpowers/plans/<檔名>.md`；若直接按 Enter 留空，則改用當時的 git branch 名稱作為檔名。此值會沿用到同一個任務後續的重新規劃／依人工意見調整計畫，不會重複問、也不會重新命名既有檔案。
+
 ---
 
 ## Agent 流程簡介
@@ -97,7 +123,9 @@ python -m AgentLoop.main --node review "任務描述"
 | `execute`       | 執行 Agent | 依序完成計畫中的每個 TASK：改程式碼、同步商業邏輯文件、跑測試並修復失敗                                       |
 | `review`        | 審查 Agent | 唯讀方式比對 `git diff HEAD`，從 Standards（是否符合專案規範）與 Spec（是否符合規格）兩軸審查，判定是否可合併 |
 
-審查沒通過時，依問題嚴重程度標記「重寫」或「修補」，回到 `analyze_plan` 針對審查意見重新規劃，再次經過人工確認後重跑 `execute` → `review`，最多重試 3 輪，超過即強制結束。
+審查只有在發現**嚴重影響功能**的問題時（核心邏輯錯誤、功能無法正常運作、架構根本偏差等）才自動標記「重寫」或「修補」、直接回到 `analyze_plan` 重新規劃；其餘不影響功能的修改建議會逐條列出，在終端機讓使用者選擇要修哪幾條（或全部不修，直接放行），只有選中至少一條才會回到 `analyze_plan` 針對選中的建議重新規劃。重新規劃後再次經過人工確認才重跑 `execute` → `review`，最多重試 3 輪，超過即強制結束。
+
+任務剛開始、進入第一次 `analyze_plan` 時，終端機會先問一次規劃文件檔名（可直接按 Enter 留空，改用目前 git branch 名稱），之後同一個任務的重新規劃／依人工意見調整計畫都會沿用這個檔名，不會重複問、也不會重新命名。
 
 ![image](https://hackmd.io/_uploads/BJrOA-xLGx.png)
 ![image](https://hackmd.io/_uploads/r1DKCZxLGl.png)
@@ -120,6 +148,6 @@ python -m AgentLoop.main --node review "任務描述"
 - **目錄慣例**：新檔案該放哪裡、命名規則
 - **程式碼規範**：風格、i18n、型別、auto-generated 檔案等哪些可改、哪些不可改的規則（若另有 `CODING_STANDARDS.md` / `CONTRIBUTING.md`，`review` 節點也會一併讀取）
 
-此外，目標專案根目錄下需要有 **`docs/` 目錄**存放商業邏輯說明文件（功能說明、資料流、模組/元件結構、業務規則）。`execute` 節點每次修改程式碼後都必須同步更新這些文件（若 `docs/` 不存在會自動建立），`review` 節點會驗證是否確實同步。
+是否需要在 `docs/` 目錄維護商業邏輯說明文件（功能說明、資料流、模組/元件結構、業務規則），由目標專案自己的說明檔決定：說明檔裡若有要求同步維護，`analyze_plan` 會排入對應的文件更新 TASK、`execute` 照做、`review` 驗證是否確實同步；說明檔未提及此類慣例時，AgentLoop 不會強制新增或更新文件。
 
 找不到任何說明檔時，Agent 會退回用 Read/Glob/Grep 自行探索程式碼風格，但規劃與審查的準確度會下降，建議每個目標專案都補上 `CLAUDE.md`。

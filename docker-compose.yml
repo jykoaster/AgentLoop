@@ -20,9 +20,10 @@ services:
       # 存在獨立的 named volume，刻意不與 host 的 ~/.claude 共用。
       # 原因：host 若同時在跑 claude，跟容器內的 claude subprocess 共用同一份憑證檔，
       # OAuth token refresh 會互相搶寫，導致容器執行到一半認證失效報錯，
-      # 或剛啟動時讀到寫入中的檔案而顯示未登入。首次使用需在容器內執行
-      # `docker exec -it agent_loop claude login`（或改設 ANTHROPIC_API_KEY 環境變數），
-      # 登入狀態會保存在這個 volume 裡，容器重建也不會遺失，但不會同步 host 的登入狀態
+      # 或剛啟動時讀到寫入中的檔案而顯示未登入。首次使用建議在 host 執行
+      # `claude setup-token`，把產出的 token 寫進 .env 的 CLAUDE_CODE_OAUTH_TOKEN
+      # （或改設 ANTHROPIC_API_KEY），細節見 README；容器內互動式 `claude login`
+      # 仍可用但不是首選，因為 docker exec -it 的嵌套 TTY 貼授權碼常顯示 Invalid code
       - agent_home:/home/agent
       # skills 內容維持從 host 讀取，僅唯讀掛載——純靜態內容，不受上面的憑證 race 影響
       - ${HOME}/.claude/skills:/home/agent/.claude/skills:ro

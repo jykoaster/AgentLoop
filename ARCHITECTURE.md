@@ -42,6 +42,7 @@ class AgentState(TypedDict):
     execution_result: str  # 執行節點的輸出
     review_result: str     # 審查節點的完整報告
     review_level: str      # "重寫" | "修補" | ""
+    review_blocking: bool  # review_node 的最終路由結論：True → 重新規劃；False → 通過
     status: str            # "pending" | "needs_revision" | "error" | "confirmed" | "aborted"
     iteration: int         # 重試計數器（上限 3）
     human_feedback: str    # 使用者在 human_confirm 拒絕計畫時填寫的修改意見
@@ -77,11 +78,14 @@ START
        │                                           ▼
        │                                    ┌─────────────┐
        │                                    │   review    │  以唯讀方式驗證實作完整性與程式碼品質
+       │                                    │             │  （嚴重影響功能的問題自動判定；
+       │                                    │             │   非嚴重的修改建議則列出讓人工
+       │                                    │             │   勾選要修哪幾條，見下方說明）
        │                                    └──────┬──────┘
        │                                           │
        │                      ┌────────────────────┤
        │                      │                    │
-       │              通過 (Pass)         有阻塞問題 + 未達上限
+       │           review_blocking=False   review_blocking=True + 未達上限
        │                      │                    │
        │                      ▼                    ▼
        │                   END ✅         increment_iteration
@@ -100,14 +104,14 @@ START
        └─── 輸入 N + 空白 (aborted) ────────→ END 🛑
 ```
 
-> 有阻塞問題且已達 iteration 上限 (3) 時，`route_after_review` 亦路由至 END ⚠️。
+> `review_blocking=True` 且已達 iteration 上限 (3) 時，`route_after_review` 亦路由至 END ⚠️。
 
 ### 關鍵函式
 
 | 函式                    | 所在檔案      | 說明                                                                                  |
 | ----------------------- | ------------- | ------------------------------------------------------------------------------------- |
 | `route_after_confirm()` | `workflow.py` | 條件路由：`confirmed` → execute；`needs_revision` → replan；`aborted` / `error` → END |
-| `route_after_review()`  | `workflow.py` | 條件路由：判斷是否通過、是否需要重試                                                  |
+| `route_after_review()`  | `workflow.py` | 條件路由：只讀取 `review_node` 已判定好的 `review_blocking`（不再自行解析 review 文字），配合 iteration 上限決定是否重試 |
 | `increment_iteration()` | `workflow.py` | 增加重試計數，重設 status 為 `pending`                                                |
 | `build_workflow()`      | `workflow.py` | 編譯 `StateGraph`，回傳可執行的 app                                                   |
 
@@ -137,10 +141,16 @@ START
 | 重新規劃（review 觸發） | `review_result` 非空                         | `full` | opus |
 | 依人工意見調整計畫      | `human_feedback` 非空且 `review_result` 為空 | `plan` | opus |
 
-重新規劃額外開放 `Bash` 是因為需要依 `review_level` 決定是否執行 git 回滾：
+重新規劃額外開放 `Edit` 是因為需要依 `review_level` 決定是否執行 git 回滾：
 
 - **重寫（rewrite）**：`git stash`（失敗則 `git checkout -- .`）丟棄現有變更，重頭規劃
 - **修補（patch）**：保留現有變更，僅追加差異修補計畫
+
+`plan` 工具集本身也含 `Bash`（`claude_runner.TOOL_PRESETS`），供初始規劃用 `git branch --show-current` 判斷規格文件檔名裡的 branch name，不含 `Edit`（規劃階段只新增規格文件，不改既有程式碼）。
+
+**任務開始時詢問規劃文件檔名：**
+
+初始規劃模式進入 `analyze_plan_node()` 時，若 `state["plan_filename"]` 尚未設定，會在呼叫 Claude 之前先用 `_ask_plan_filename()` 直接向終端機使用者提問（不透過 Claude、不是 grilling 機制的一部分），取得的值全程保存在 `AgentState["plan_filename"]`，供本次任務所有輪次（含後續 replan／human-revise）的規格檔名沿用。若使用者留空，交由 Claude 改用 `git branch --show-current` 取得的目前 branch 名稱作為檔名。非互動式環境或使用者直接按 Enter／中止時留空繼續，不阻塞流程。
 
 **互動式釐清（grilling）機制：**
 
@@ -160,7 +170,7 @@ START
 
 | 版本                   | 用途                                                                                                                                                                               |
 | ---------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `_SYSTEM_INITIAL`      | 全新任務規劃：Read/Glob/Grep 探索 → grill-with-docs 互動釐清（同步 domain-modeling）→ 依 to-spec 範本撰寫規格文件 → 轉譯為 TASK 清單                                               |
+| `_SYSTEM_INITIAL`      | 全新任務規劃：Read/Glob/Grep 探索 → grill-with-docs 互動釐清（同步 domain-modeling）→ 依 `_SPEC_TEMPLATE`（覆蓋 to-spec 原本範本，見下方「規格文件範本」）撰寫規格文件 → 轉譯為 TASK 清單 |
 | `_SYSTEM_REPLAN`       | 帶入 `<<REVIEW_CONTEXT>>`（`review_result`，截斷至最後 3000 字）與 `<<REVIEW_LEVEL>>`；依「重寫／修補」分流見上，並用專屬的 `_REVIEW_QUESTION_PROTOCOL` 針對 review 結果逐點 grill |
 | `_SYSTEM_HUMAN_REVISE` | 帶入 `<<HUMAN_FEEDBACK>>`（`human_confirm` 收到的使用者修改意見）：理解意見（不夠明確則提問）→ 視需要重讀程式碼 → 視需要更新 domain-modeling → 更新既有規格文件                    |
 
@@ -174,16 +184,20 @@ START
 TASK 1: [操作] [路徑] — [說明]
 TASK 2: [操作] [路徑] — [說明]
 ...
-TASK N: 更新該任務所屬專案 docs/ 下相關的商業邏輯說明文件（必要項目）
+TASK N: [視該任務所屬專案的說明檔慣例，可能包含測試 TASK 與文件更新 TASK]
 ```
 
 **解析邏輯：**
 
 - 使用 `re.findall(r'TASK \d+: (.+)', ...)` 擷取 TASK 清單（Fallback：`STEP \d+:`）
 - 每個 TASK 成為 `state["plan"]` 中的一個元素
-- 規格文件寫入 `docs/superpowers/plans/YYYY-MM-DD-<feature>.md`（`to-spec` 略過發布 issue tracker 的步驟）
+- 規格文件寫入 `docs/superpowers/plans/<filename>.md`（`to-spec` 略過發布 issue tracker 的步驟；`<filename>` 為任務開始時使用者輸入的自訂檔名，留空則改用 Bash 執行 `git branch --show-current` 取得的目前 branch 名稱，並將 `/` 等字元替換為 `-`）。重新規劃／依人工意見調整計畫時沿用同一個檔名，不重新命名
+- 涉及新增或修改行為的 TASK，須額外排入對應的「撰寫／更新測試」TASK，讓 `execute` 有明確依據依 tdd skill 執行紅-綠循環；純文件、設定調整或不改變行為的重構可不需要
+- 是否需要新增「更新文件」TASK，依該任務所屬專案的 `CLAUDE.md` / `AGENT.md` 判斷：說明檔要求同步維護 `docs/` 商業邏輯說明文件才排入，未提及此類慣例則不強制新增
 
 **注入的 Skills（完整內容）：** `grill-with-docs`、`grilling`、`domain-modeling`、`to-spec`；另列名稱（不注入完整內容）：`tdd`
+
+**規格文件範本（`_SPEC_TEMPLATE`，覆蓋 to-spec 原本的範本）：** 固定章節為 `Problem Statement` / `Solution` / `User Stories` / `Implementation Decisions`（含「影響模組」「關鍵機制與流程」小節）/ `Testing Strategy`（含「Seam（測試接縫）」「測試案例矩陣（Test Matrix）」小節）/ `Out of Scope` / `Technical Debt & Follow-up Notes`，開頭另附 `Date`、`Scope`。三種模式（初始規劃、重新規劃、依人工意見調整計畫）撰寫或更新規格文件時都必須依此範本，章節結構不可增減，**每個章節都必須填寫內容，沒有內容也要填「無」**，不可留白或整段刪除；範本內的具體條目（如 SOT / Error Handling Flow / i18n、Seam 首選/次要接縫、Test Matrix 範例列）僅為格式參考，非固定必填項目。
 
 ---
 
@@ -213,18 +227,19 @@ TASK N: 更新該任務所屬專案 docs/ 下相關的商業邏輯說明文件�
 **執行前準備（必須完成）：**
 
 1. 依 `project_context.py` 提供的專案清單，判斷本次任務涉及哪個（或哪些）專案目錄，Read 讀取其 `CLAUDE.md` / `AGENT.md`，了解架構、指令（測試、lint、build 等）、目錄慣例、程式碼規範與技術棧；找不到說明檔則自行 Read/Glob/Grep 探索並比對現有風格
-2. 依偵測到的技術棧，**自行**從可用的 skills 中挑選並使用適合的其他 skill（例如 Vue 專案適用 `vue-best-practices`、Nuxt + Vitest 專案適用 `nuxt-vitest-msw`、需要測試優先開發時適用 `tdd`）——不寫死任何特定技術棧的 skill 清單
-3. 讀取該專案 `docs/` 目錄下所有現有文件，了解商業邏輯說明；若 `docs/` 目錄不存在則建立並繼續
+2. 依偵測到的技術棧，**自行**從可用的 skills 中挑選並使用適合的其他 skill（例如 Vue 專案適用 `vue-best-practices`、Nuxt + Vitest 專案適用 `nuxt-vitest-msw`）——不寫死任何特定技術棧的 skill 清單。`tdd` 已是固定注入的 skill（見下方「注入的 Skills」），不需要另外挑選
+3. 若該專案 `docs/` 目錄存在，讀取其下所有現有文件，了解商業邏輯說明；`docs/` 目錄不存在時不需自行建立
 
 **執行方式：** 以 `implement` skill 的流程為主軸，但有以下覆蓋規則：
 
 - **不**執行 implement 流程中「commit 到目前分支」的步驟——是否提交由使用者事後決定
 - **不**自行呼叫 `/code-review`——後續有獨立的 Review Agent 依專案規格審查本次修改
-- 其餘步驟（優先在既有 seam 使用 `/tdd`、定期執行型別檢查與單一測試檔案、最後執行完整測試）依 implement skill 原本流程進行
+- TASK 清單中若有「撰寫／更新測試」的 TASK，**必須**依 `tdd` skill 的紅-綠循環執行：先寫會失敗的測試，再寫最小可行實作讓測試通過，最後重構；不可先完成其他 TASK 的實作、事後才回頭補測試
+- 其餘步驟（定期執行型別檢查與單一測試檔案、最後執行完整測試）依 implement skill 原本流程進行
 
 嚴格依序完成 TASK 清單中的每一項；先 Read 再 Write/Edit，避免覆蓋不相關程式碼；風格、命名、目錄結構、i18n／型別／auto-generated 檔案等規則，一律依該專案 `CLAUDE.md` / `AGENT.md` 的說明判斷，不硬編碼在 prompt 裡。
 
-**文件同步要求：** 每次修改程式碼後，必須同步更新該專案 `docs/` 下相關的商業邏輯說明文件（功能說明、資料流、模組／元件結構、業務規則）。此要求由計畫的最後一個 TASK 統一處理；若 TASK 清單未包含，執行完所有 TASK 後自行補上。
+**文件同步要求：** 是否需要同步更新文件，依該任務所屬專案的 `CLAUDE.md` / `AGENT.md` 判斷——說明檔要求同步維護 `docs/` 商業邏輯說明文件才需處理（依 TASK 清單中對應的文件更新 TASK 執行，或在說明檔明確要求但 TASK 清單未包含時主動補上）；說明檔未提及此類慣例時不需要主動撰寫或更新文件。
 
 **強制測試與自動修復：** 依該專案 `CLAUDE.md` / `AGENT.md` 中列出的測試指令執行測試；若說明檔未列出，探索 `package.json` / `pyproject.toml` 等設定檔判斷正確指令。測試失敗時分析錯誤並修復、重跑，最多重試 3 次；3 次後不論結果如何都繼續輸出最終摘要。
 
@@ -234,7 +249,7 @@ TASK N: 更新該任務所屬專案 docs/ 下相關的商業邏輯說明文件�
 2. 所有已新增/修改的說明文件清單
 3. 每個 TASK 的完成狀態（✅ 已完成 / ❌ 未完成 + 原因）
 
-**注入的 Skills：** `implement`（完整內容）；其餘依偵測到的技術棧由 Agent 自行從可用 skills 中挑選使用
+**注入的 Skills：** `implement`（完整內容）、`tdd`（列名稱）；其餘依偵測到的技術棧由 Agent 自行從可用 skills 中挑選使用
 
 ---
 
@@ -256,7 +271,7 @@ TASK N: 更新該任務所屬專案 docs/ 下相關的商業邏輯說明文件�
 
 1. 確認 TASK 清單完整性，列出未完成的 TASK 編號
 2. 依偵測到的專案讀取其說明檔中列出的測試指令並實際用 Bash 執行測試（找不到則探索 `package.json` / `pyproject.toml`）；測試失敗計入 Standards 軸的問題
-3. 確認相關的商業邏輯說明文件（該專案 `docs/` 目錄）是否已依本次修改更新
+3. 若該任務所屬專案的說明檔要求同步維護 `docs/` 商業邏輯說明文件，確認是否已依本次修改更新；說明檔未提及此類慣例時不需要求有文件變更
 
 **輸出格式：**
 
@@ -277,16 +292,27 @@ Ready to merge? Yes / No
 REVIEW_LEVEL: 重寫
 （或）
 REVIEW_LEVEL: 修補
+
+（若 Yes 但仍有不影響功能的修改建議，附上：）
+## 建議事項（不影響功能）
+SUGGESTION 1: [建議內容與理由]
+SUGGESTION 2: [建議內容與理由]
 ```
 
-**REVIEW_LEVEL 判斷標準：**
+**嚴重程度分流（`review_node` 的核心邏輯，`nodes/review.py`）：**
+
+`Ready to merge? No` 只保留給**嚴重影響功能**的問題（核心邏輯錯誤、功能無法正常運作、資料損毀或資安風險、架構根本偏差、TASK 大量未完成）——這類問題一律自動判定為需要重新規劃，不詢問人工：
 
 | 等級     | 觸發條件                                                              |
 | -------- | --------------------------------------------------------------------- |
 | **重寫** | 核心邏輯錯誤、架構根本偏差、多個互相關聯的根本性問題、TASK 大量未完成 |
 | **修補** | 小 bug、測試失敗、遺漏文件同步、個別 TASK 未完成、小幅修正            |
 
-**審查報告儲存至：** `docs/nodes/review/YYYY-MM-DD-iterN.md`（`_save_review_report()`，含 task、date、review level、完整報告內容）
+其餘不影響功能正確性的問題（風格、可讀性、效能微調等）一律回答 `Yes`，改列在 `SUGGESTION n:` 建議清單中，交由人工決定：`review_node` 會逐條印出建議、在終端機提示輸入要修改的編號（`1,3`／`all`／直接 Enter 表示不修改）；非互動式環境預設不修改任何建議。人工選中至少一條時才視為需要重新規劃（`review_level` 一律標記「修補」，並把選中的建議附加在 `review_result` 末尾的「人工確認：選定修改的建議事項」小節，供 `analyze_plan` 重新規劃時只針對這些點 grill）；未選中任何建議或無建議可選時直接視為通過。
+
+**路由結論：** 以上兩種情況（嚴重問題 / 人工選中建議）都會把 `review_blocking` 設為 `True`，交由 `route_after_review` 讀取決定是否重新規劃；其餘情況 `review_blocking` 為 `False`，直接結束流程。
+
+**審查報告儲存至：** `docs/nodes/review/YYYY-MM-DD-iterN.md`（`_save_review_report()`，含 task、date、review level、完整報告內容；僅在 `review_blocking=True` 時儲存）
 
 ---
 
@@ -299,7 +325,7 @@ REVIEW_LEVEL: 修補
 - `analyze_plan` → 填入 `analysis`、`plan`
 - `human_confirm` → 填入 `status`（`"confirmed"` / `"needs_revision"` + `human_feedback` / `"aborted"`）
 - `execute` → 填入 `execution_result`、`status`
-- `review` → 填入 `review_result`、`review_level`、`status`
+- `review` → 填入 `review_result`、`review_level`、`review_blocking`、`status`
 
 ### 2. 動態專案偵測作為共同上下文
 
@@ -309,7 +335,7 @@ REVIEW_LEVEL: 修補
 
 | 產出物   | 路徑                                     | 讀寫者                                      |
 | -------- | ---------------------------------------- | ------------------------------------------- |
-| 計畫文件 | `docs/superpowers/plans/YYYY-MM-DD-*.md` | `analyze_plan` 寫，`execute`、`review` 讀   |
+| 計畫文件 | `docs/superpowers/plans/<filename>.md`（`<filename>` 為使用者自訂檔名，留空則用 branch name） | `analyze_plan` 寫，`execute`、`review` 讀   |
 | 審查報告 | `docs/nodes/review/YYYY-MM-DD-iterN.md`  | `review` 寫，下次迭代的 `analyze_plan` 可讀 |
 | 業務文件 | 各偵測到專案的 `docs/` 目錄              | `execute` 寫，`review` 驗證                 |
 
@@ -422,7 +448,7 @@ AgentLoop 容器本身不跑 Docker daemon，而是讓容器內的 Docker CLI �
 | **Docker**                      | 以 `python:3.11-slim` 為基底，加裝 Node.js 20 執行 Claude Code CLI，並加裝 `docker-ce-cli` + `docker-compose-plugin`（僅 CLI，不含 daemon）                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
 | **Docker Compose 路徑掛載**     | AgentLoop 與目標專案一律以「與 host 相同的絕對路徑」掛載（`${HOST_WORKSPACE_ROOT}/AgentLoop:${HOST_WORKSPACE_ROOT}/AgentLoop`、`${HOST_WORKSPACE_ROOT}/${TARGET_PROJECT}:${HOST_WORKSPACE_ROOT}/${TARGET_PROJECT}`），而非重新映射到 `/workspace/...`。原因：宿主 daemon 幫目標專案建立 bind mount 時，用的是掛載路徑「字串本身」，該字串必須在宿主上真實存在，否則會掛到空目錄。目標專案資料夾名稱由 `.env` 的 `TARGET_PROJECT` 決定（目前範例值為 `cdn_frontend_vue`）；`project_context.py` 的動態偵測邏輯本身不寫死任何專案名稱。若要同時掛載多個目標專案，`.env` 目前只內建單一 `TARGET_PROJECT`，需自行擴充 `TARGET_PROJECT_2`、`TARGET_PROJECT_3`… 並在 `docker-compose.yml` 依樣新增對應的 volume 行（見 README） |
 | **`/var/run/docker.sock` 掛載** | `- /var/run/docker.sock:/var/run/docker.sock`，讓容器內 Docker CLI 連上宿主 daemon（DooD 的核心）                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
-| **Claude 設定掛載** | 分兩塊，刻意分開：(1) 登入狀態（`.claude/` 其餘內容、`.claude.json`）掛在容器專屬的 `agent_home` named volume（`- agent_home:/home/agent`），**不**與 host 共用——原因是若直接掛載 host 的 `~/.claude`，host 與容器內的 `claude` subprocess 會共用同一份 OAuth 憑證檔，兩邊同時使用時 token refresh 互搶，會導致容器內 node 執行到一半認證失效、或剛啟動時讀到寫入中的檔案顯示未登入；因此改為容器內另外執行 `claude login`（或設 `ANTHROPIC_API_KEY`），登入狀態隨 volume 持久化，容器重建不會遺失。(2) skills 內容（純靜態、無寫入需求）維持唯讀掛載自 host：`${HOME}/.claude/skills:/home/agent/.claude/skills:ro` 與 `${HOME}/.agents:/home/agent/.agents:ro`（`~/.claude/skills` 底下多為指向 `~/.agents/skills` 的符號連結，需一併掛載才能解析）。`working_dir: ${HOST_WORKSPACE_ROOT}` |
+| **Claude 設定掛載** | 分兩塊，刻意分開：(1) 登入狀態（`.claude/` 其餘內容、`.claude.json`）掛在容器專屬的 `agent_home` named volume（`- agent_home:/home/agent`），**不**與 host 共用——原因是若直接掛載 host 的 `~/.claude`，host 與容器內的 `claude` subprocess 會共用同一份 OAuth 憑證檔，兩邊同時使用時 token refresh 互搶，會導致容器內 node 執行到一半認證失效、或剛啟動時讀到寫入中的檔案顯示未登入；因此改為另外設定認證——首選在 host 執行 `claude setup-token`，將產出的 token 寫入 `.env` 的 `CLAUDE_CODE_OAUTH_TOKEN`（或改設 `ANTHROPIC_API_KEY`）；容器內互動式 `claude login` 仍可用但非首選，因為 `docker exec -it` 的嵌套 TTY 貼授權碼常因 paste 截斷或過期顯示 `Invalid code`。登入狀態隨 volume 持久化，容器重建不會遺失。(2) skills 內容（純靜態、無寫入需求）維持唯讀掛載自 host：`${HOME}/.claude/skills:/home/agent/.claude/skills:ro` 與 `${HOME}/.agents:/home/agent/.agents:ro`（`~/.claude/skills` 底下多為指向 `~/.agents/skills` 的符號連結，需一併掛載才能解析）。`working_dir: ${HOST_WORKSPACE_ROOT}` |
 | **非 root 使用者**              | `agent` 使用者執行 `claude --dangerously-skip-permissions`（Claude Code 安全要求，禁止 root 下執行），並設定 `NOPASSWD` sudo 僅限執行 `/usr/bin/docker`——因為宿主掛入的 `docker.sock` 擁有者/群組由宿主環境決定，非 root 使用者常無法單靠 group 權限連線，故一律透過 sudo 執行 docker 指令                                                                                                                                                                                                                                                                                                                                                                                                                                |
 
 ---

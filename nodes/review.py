@@ -1,4 +1,5 @@
 import re
+import sys
 import time
 import os
 from pathlib import Path
@@ -45,24 +46,36 @@ _SYSTEM = """你是一位資深程式碼審查者，負責「Code Review」階�
 1. 確認 TASK 清單完整性：列出未完成的 TASK 編號
 2. 依偵測到的專案，讀取其 CLAUDE.md / AGENT.md 中列出的測試指令並實際用 Bash 執行測試
    （若說明檔未列出，探索 package.json / pyproject.toml 等設定檔判斷）；測試失敗計入 Standards 軸的問題
-3. 確認相關的商業邏輯說明文件（該專案 docs/ 目錄）是否已依本次修改更新
+3. 若該任務所屬專案的 CLAUDE.md / AGENT.md（或其他說明檔）要求同步維護 docs/ 下的商業邏輯說明文件，
+   確認是否已依本次修改更新；說明檔未提及此類慣例時，不需要求有文件變更
 
 ## 最終輸出格式
 
 先依 code-review skill 輸出 `## Standards` 與 `## Spec` 兩軸報告，接著再附上以下總結（供工作流程解析，必須包含）：
    - 各 TASK 完成狀態（✅ 已完成 / ❌ 未完成）
    - 一行「Ready to merge? Yes」或「Ready to merge? No」結論
+     - **No** 僅限「嚴重影響功能」的問題：核心邏輯錯誤、功能無法正常運作、資料損毀或資安風險、
+       架構根本偏差、多個互相關聯的根本性問題、TASK 大量未完成
+     - 其餘問題（風格、可讀性、效能微調、小幅優化、非阻塞的小瑕疵等**不影響功能正確性**者）
+       即使有修改建議，仍回答 **Yes**，改用下方 SUGGESTION 標記逐條列出，交由人工決定要修哪幾條
    - 若結論為 No，下一行必須輸出審查等級：
      REVIEW_LEVEL: 重寫
      （條件：核心邏輯錯誤、架構根本偏差、多個互相關聯的根本性問題、TASK 大量未完成）
      或
      REVIEW_LEVEL: 修補
      （條件：小 bug、測試失敗、遺漏文件同步、個別 TASK 未完成、小幅修正）
+   - 若結論為 Yes 但仍有不影響功能的修改建議，附上一個 `## 建議事項（不影響功能）` 小節，
+     每條建議獨立一行、依序編號，格式必須是：
+     SUGGESTION 1: <建議內容與理由>
+     SUGGESTION 2: <建議內容與理由>
+     ...
+     （沒有任何建議時，不需要輸出這個小節）
 
 請用繁體中文回答。
 """
 
 _BANNER = "\033[1;33m"
+_YELLOW = "\033[1;33m"
 _RED    = "\033[1;31m"
 _RESET  = "\033[0m"
 
@@ -83,6 +96,28 @@ def extract_review_level(review_text: str) -> str:
     if match:
         return match.group(1)
     return "修補"
+
+
+def extract_suggestions(review_text: str) -> list[str]:
+    """從 review 輸出中抽取不影響功能的建議事項清單（SUGGESTION n: ...），依序排列。"""
+    return re.findall(r"SUGGESTION\s*\d+:\s*(.+)", review_text)
+
+
+def _parse_suggestion_selection(answer: str, count: int) -> list[int]:
+    """解析人工輸入的建議編號選擇：'all' 全選、逗號分隔編號、空白則不選任何一條。"""
+    answer = answer.strip().lower()
+    if not answer:
+        return []
+    if answer == "all":
+        return list(range(1, count + 1))
+    selected = set()
+    for token in answer.split(","):
+        token = token.strip()
+        if token.isdigit():
+            n = int(token)
+            if 1 <= n <= count:
+                selected.add(n)
+    return sorted(selected)
 
 
 def _save_review_report(task: str, review_text: str, review_level: str, iteration: int) -> None:
@@ -108,14 +143,14 @@ def _save_review_report(task: str, review_text: str, review_level: str, iteratio
 def review_node(state: AgentState) -> dict:
     if state.get("status") == "error":
         print(f"\n{_BANNER}{'═'*50}\n  [Review Agent] 上游發生錯誤，跳過\n{'═'*50}{_RESET}\n", flush=True)
-        return {"review_result": "", "review_level": "", "status": "error"}
+        return {"review_result": "", "review_level": "", "review_blocking": False, "status": "error"}
 
     print(f"\n{_BANNER}{'═'*50}\n  [Review Agent] 開始\n{'═'*50}{_RESET}\n", flush=True)
 
     code_review_skill = build_skills_block(["code-review"])
     if not code_review_skill:
         print(f"{_BANNER}  [Review Agent] 找不到 code-review skill，跳過{_RESET}\n", flush=True)
-        return {"review_result": "SKIPPED", "review_level": ""}
+        return {"review_result": "SKIPPED", "review_level": "", "review_blocking": False}
 
     exec_summary = state.get("execution_result", "")
     if len(exec_summary) > 2000:
@@ -160,16 +195,50 @@ def review_node(state: AgentState) -> dict:
         return {"status": "error", "review_result": result.text, "review_level": ""}
 
     review_text = result.text
-    blocking = has_blocking_issues(review_text)
-    review_level = extract_review_level(review_text) if blocking else ""
+    iteration = state.get("iteration", 0)
 
-    if blocking:
-        _save_review_report(state["task"], review_text, review_level, state.get("iteration", 0))
-        print(f"{_BANNER}  [Review Agent] 未通過，審查等級：{review_level}{_RESET}\n", flush=True)
+    if has_blocking_issues(review_text):
+        # 嚴重影響功能的問題：維持原本嚴格行為，不詢問人工，直接產出報告並重新規劃
+        review_level = extract_review_level(review_text)
+        _save_review_report(state["task"], review_text, review_level, iteration)
+        print(f"{_BANNER}  [Review Agent] 發現嚴重影響功能的問題，審查等級：{review_level}{_RESET}\n", flush=True)
+        return {"review_result": review_text, "review_level": review_level, "review_blocking": True}
+
+    suggestions = extract_suggestions(review_text)
+    if not suggestions:
+        print(f"{_BANNER}  [Review Agent] 通過，無嚴重問題亦無其他建議，直接前往 Check{_RESET}\n", flush=True)
+        return {"review_result": review_text, "review_level": "", "review_blocking": False}
+
+    print(f"\n{_BANNER}{'─'*50}", flush=True)
+    print("  [Review Agent] 無嚴重影響功能的問題，但有以下修改建議：", flush=True)
+    print(f"{'─'*50}{_RESET}", flush=True)
+    for i, s in enumerate(suggestions, 1):
+        print(f"  {i}. {s}", flush=True)
+    print(f"{_BANNER}{'─'*50}{_RESET}\n", flush=True)
+
+    if not sys.stdin.isatty():
+        print(f"{_YELLOW}  [Review Agent] 非互動式環境，預設不修改任何建議，直接前往 Check{_RESET}\n", flush=True)
+        selected = []
     else:
-        print(f"{_BANNER}  [Review Agent] 通過，直接前往 Check{_RESET}\n", flush=True)
+        try:
+            answer = input(
+                f"{_YELLOW}  請輸入要修改的建議編號（例如 1,3；all=全部；直接 Enter=不修改）：{_RESET}"
+            ).strip()
+        except (EOFError, KeyboardInterrupt):
+            print(f"\n{_YELLOW}  [Review Agent] 已取消，預設不修改任何建議{_RESET}\n", flush=True)
+            answer = ""
+        selected = _parse_suggestion_selection(answer, len(suggestions))
 
-    return {
-        "review_result": review_text,
-        "review_level": review_level,
-    }
+    if not selected:
+        print(f"{_BANNER}  [Review Agent] 維持現狀，直接前往 Check{_RESET}\n", flush=True)
+        return {"review_result": review_text, "review_level": "", "review_blocking": False}
+
+    selected_block = "\n".join(f"SUGGESTION {i}: {suggestions[i - 1]}" for i in selected)
+    review_result = (
+        f"{review_text}\n\n---\n\n## 人工確認：選定修改的建議事項\n\n"
+        f"以下為經人工確認、需要處理的建議（其餘未選中的建議維持現狀，不需修改）：\n\n"
+        f"{selected_block}"
+    )
+    _save_review_report(state["task"], review_result, "修補", iteration)
+    print(f"{_BANNER}  [Review Agent] 已選定 {len(selected)} 項建議進行修補，重新規劃{_RESET}\n", flush=True)
+    return {"review_result": review_result, "review_level": "修補", "review_blocking": True}

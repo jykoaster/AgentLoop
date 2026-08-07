@@ -1,17 +1,16 @@
 from langgraph.graph import StateGraph, END
 from .state import AgentState
 from .nodes import analyze_plan_node, execute_node, review_node, human_confirm_node
-from .nodes.review import has_blocking_issues
 
 MAX_ITERATIONS = 3
 
 
 def route_after_review(state: AgentState) -> str:
-    """Review 通過 → end；未通過（含 TASK 未完成）→ 重新規劃。"""
-    review_result = state.get("review_result", "")
+    """review_node 已完成嚴重問題判定與（非嚴重建議的）人工確認，
+    這裡只讀取其結論 review_blocking：False → end；True（且未達 iteration 上限）→ 重新規劃。"""
     if state.get("status") == "error":
         return "end"
-    if review_result == "SKIPPED" or not has_blocking_issues(review_result):
+    if not state.get("review_blocking", False):
         return "end"
     if state.get("iteration", 0) >= MAX_ITERATIONS:
         return "end"

@@ -11,7 +11,9 @@ REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
 TOOL_PRESETS = {
     "readonly": "Read,Glob,Grep",
-    "plan":     "Read,Write,Glob,Grep",
+    # 含 Bash 是為了讓 analyze_plan 能在規劃階段用 `git branch --show-current`
+    # 判斷規格文件檔名裡的 branch name，不含 Edit（規劃階段只新增規格文件，不改既有程式碼）
+    "plan":     "Read,Write,Bash,Glob,Grep",
     "full":     "Read,Write,Edit,Bash,Glob,Grep",
     "check":    "Read,Glob,Grep,Bash",
     # code-review skill 需要 Task 工具以平行呼叫 Standards / Spec 兩個 sub-agent
