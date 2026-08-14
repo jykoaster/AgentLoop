@@ -168,6 +168,8 @@ START
 
 `state["project_dir"]`（本次任務對應的目標專案目錄，相對 workspace root）則沒有終端機提問——由 Claude 在初始規劃回合判斷後，於最終輸出附上 `PROJECT_DIR:` 一行回報，`analyze_plan_node()` 解析後存入 `AgentState`；之後所有節點（`execute`、`review`、`human_confirm`、`archive`）都直接讀這個欄位定位 OpenSpec change 位置，不需要各自重新判斷。初始規劃若解析不到 `PROJECT_DIR:`/`CHANGE_NAME:` 兩者，視為錯誤（`status: "error"`），因為後續所有節點都依賴這兩個值才能定位規格文件。
 
+**Domain 歸屬確認（先列既有 module 再讓使用者決定）：** `_CHANGE_SETUP_INITIAL` 在 bootstrap 完 `openspec/` 之後、決定 change name 之前，會插入 `_DOMAIN_SELECTION_PROTOCOL` 這一步：先用 Bash 列出 `<目標專案>/openspec/specs/` 底下既有的 domain（資料夾名稱），若有既有 domain，**必須**（不受一般「只問真正需要決策的事」限制）用 `QUESTION:` 格式列出所有既有 domain + 一個「以上皆非，建立新 domain」選項，交由使用者選擇本次規格 delta 歸屬哪個 domain；沒有既有 domain（`specs/` 不存在或是空的）則跳過提問，直接視為新建 domain。這個決定取代了先前純靠 Claude 自行以資料夾名稱字串比對「domain 是否已存在」的做法——選了既有 domain 就沿用該名稱、視為「domain 已存在」（不加 `## Purpose`）；選建立新 domain 才自行命名、視為「domain 首次建立」（`_OPENSPEC_ARTIFACT_RULES` 依此決定要不要加 `## Purpose`）。此機制只在初始規劃（`_CHANGE_SETUP_INITIAL`）跑，沿用階段（`_CHANGE_SETUP_REPLAN`/`_CHANGE_SETUP_HUMAN_REVISE`）沿用同一個 change，不重新走這一步。
+
 **互動式釐清（grilling）機制：**
 
 三種模式的 prompt 都要求 Claude 在需要人工決策時，該輪回應「只能」輸出固定格式的 `QUESTION: <問題>` + 數字選項，而不得自行臆測。這由 `_run_with_grilling()` 迴圈驅動：
@@ -186,7 +188,7 @@ START
 
 | 版本                   | 用途                                                                                                                                                                               |
 | ---------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `_SYSTEM_INITIAL`      | 全新任務規劃：Read/Glob/Grep 探索 → grill-with-docs 互動釐清（同步 domain-modeling）→ 依「建立 OpenSpec Change」判斷目標專案／建立 change → 依「OpenSpec 產出規則」撰寫 proposal.md / design.md / specs delta / tasks.md → `openspec validate` 到通過 |
+| `_SYSTEM_INITIAL`      | 全新任務規劃：Read/Glob/Grep 探索 → grill-with-docs 互動釐清（同步 domain-modeling）→ 依「建立 OpenSpec Change」判斷目標專案／bootstrap → Domain 歸屬確認（列既有 domain 讓使用者選或建新）→ 建立 change → 依「OpenSpec 產出規則」撰寫 proposal.md / design.md / specs delta / tasks.md → `openspec validate` 到通過 |
 | `_SYSTEM_REPLAN`       | 帶入 `<<REVIEW_CONTEXT>>`（`review_result`，截斷至最後 3000 字）與 `<<REVIEW_LEVEL>>`；依「重寫／修補」分流見上，並用專屬的 `_REVIEW_QUESTION_PROTOCOL` 針對 review 結果逐點 grill；沿用既有 change，不重新 `openspec new change` |
 | `_SYSTEM_HUMAN_REVISE` | 帶入 `<<HUMAN_FEEDBACK>>`（`human_confirm` 收到的使用者修改意見）：理解意見（不夠明確則提問）→ 視需要重讀程式碼 → 視需要更新 domain-modeling → 更新既有 change 的規格文件            |
 
@@ -216,7 +218,7 @@ CHANGE_NAME: <kebab-case change name>
 
 **OpenSpec Change 建立與規格文件範本：** 規格文件不再是 AgentLoop 自訂的單一 Markdown 檔案，而是遵照 [OpenSpec](https://github.com/Fission-AI/OpenSpec) 的 change 資料夾格式，寫在目標專案的 `<project_dir>/openspec/changes/<change_name>/` 底下：
 
-- **建立階段**（`_CHANGE_SETUP_INITIAL`，僅初始規劃）：判斷目標專案目錄 → 若 `<目標專案>/openspec/` 不存在，執行一次性 `openspec init --tools claude --force` bootstrap → 決定 change name（kebab-case；使用者提供則直接用，否則用該目標專案的 `git branch --show-current` 轉換） → `openspec new change <name>` 建立資料夾
+- **建立階段**（`_CHANGE_SETUP_INITIAL`，僅初始規劃）：判斷目標專案目錄 → 若 `<目標專案>/openspec/` 不存在，執行一次性 `openspec init --tools claude --force` bootstrap → Domain 歸屬確認（見上方說明）→ 決定 change name（kebab-case；使用者提供則直接用，否則用該目標專案的 `git branch --show-current` 轉換） → `openspec new change <name>` 建立資料夾
 - **沿用階段**（`_CHANGE_SETUP_REPLAN` / `_CHANGE_SETUP_HUMAN_REVISE`，replan／human-revise）：`project_dir`/`change_name` 沿用 `AgentState` 已存的值，不重新 `init`/`new change`，直接 Edit/Write 同一個 change 資料夾；「重寫」等級的 replan 額外把 `tasks.md` 所有 checkbox 重設回 `- [ ]`
 - **產出規則**（`_OPENSPEC_ARTIFACT_RULES`，三種模式共用）：
   - `proposal.md`：`## Intent` / `## Scope`（In scope / Out of scope）/ `## Approach`

@@ -128,7 +128,7 @@ The system SHALL/MUST <一個明確、可觀察的行為>。
 規則：
 - 每個 Requirement 只講一件事、一個 SHALL/MUST/SHOULD；不要把好幾個「而且」塞進同一個 Requirement
 - 每個 Requirement 至少要有一個 Scenario；Scenario 要測到具體情境（含邊界/錯誤情況），不是重述 Requirement
-- 若這是該 domain 第一次建立 spec（`openspec/specs/<domain>/` 目前不存在），在 delta 檔案最上面加一段 `## Purpose`（一兩句話說明這個 domain 是做什麼的）；domain 已存在則不需要
+- 若「Domain 歸屬確認」步驟判定為 domain 首次建立，在 delta 檔案最上面加一段 `## Purpose`（一兩句話說明這個 domain 是做什麼的）；沿用既有 domain 則不需要
 - 不需要獨立的「User Stories」章節——Scenario 已經是驗收條件的正式化版本
 - 若本次任務純粹是重構/文件/設定調整、完全沒有外部可觀察行為變化，可以在該 change 的 `.openspec.yaml` 加 `skip_specs: true` 並略過 specs delta；若 REMOVED 移除了某個 domain 的最後一個 Requirement，需在 `.openspec.yaml` 加 `retire_capabilities: true` 才能讓 archive 一併刪除該 domain 的 spec 檔
 
@@ -151,19 +151,39 @@ The system SHALL/MUST <一個明確、可觀察的行為>。
 ### 完成前的驗證
 用 Bash 執行 `openspec validate <change-name> --json --strict`；有 error 等級的問題就修正對應檔案後重新驗證，直到沒有 error 為止（warning 可視情況保留、不必為了消除 warning 硬湊內容）。"""
 
-_CHANGE_SETUP_INITIAL = """## 建立 OpenSpec Change（規格文件的實際存放位置）
+_DOMAIN_SELECTION_PROTOCOL = """## Domain 歸屬確認（先列既有 module 再讓使用者決定）
+
+用 Bash 列出 `<目標專案>/openspec/specs/` 底下現有的 domain 名稱（該目錄下的資料夾名稱即為既有 domain）：
+
+- 若該目錄不存在、或底下沒有任何項目：視為目前沒有既有 domain，跳過本步驟提問，直接依任務內容自訂新 domain 名稱（後續視為「domain 首次建立」）
+- 若有既有 domain：本步驟**必須**提問（不受「只對真正需要使用者決策的事項提問」限制），依下方格式列出所有既有 domain 供使用者選擇，並額外加一個「以上皆非，建立新 domain」選項：
+
+QUESTION: 本次需求歸屬於哪一個既有 domain？（沒有符合的請選「建立新 domain」）
+1. <既有 domain 1>
+2. <既有 domain 2，依實際數量增減>
+N. 以上皆非，建立新 domain
+
+- 使用者選定既有 domain 名稱後，本次 specs/**/*.md 一律沿用該名稱，視為「domain 已存在」（不加 `## Purpose`）
+- 使用者選擇「建立新 domain」後，才自行依任務語意命名新 domain，視為「domain 首次建立」（需加 `## Purpose`）
+- 本次任務若同時涉及多個 domain，比照上述流程逐一確認每個 domain 的歸屬"""
+
+_CHANGE_SETUP_INITIAL = f"""## 建立 OpenSpec Change（規格文件的實際存放位置）
 
 1. 依 <<PROJECT_CONTEXT>> 判斷本次任務主要涉及哪一個目標專案目錄，記下其相對於 workspace root
    的路徑（例如 `my-project`）——這個路徑之後要原封不動地放進最終輸出的 `PROJECT_DIR:` 一行
 2. 用 Bash 檢查 `<目標專案>/openspec/` 是否存在；不存在的話執行一次性 bootstrap：
    `cd <目標專案> && openspec init --tools claude --force`
-3. 決定 change name（必須是 kebab-case：小寫字母、數字、單一連字號，不可有底線／大寫／連續連字號／開頭結尾連字號）：
+3. 依下方「Domain 歸屬確認」判斷本次規格 delta 要寫進哪個／哪些 domain
+
+{_DOMAIN_SELECTION_PROTOCOL}
+
+4. 決定 change name（必須是 kebab-case：小寫字母、數字、單一連字號，不可有底線／大寫／連續連字號／開頭結尾連字號）：
    - 若使用者於任務開始時提供了自訂名稱，本次為：<<CHANGE_NAME_VALUE>>，直接以此作為 change name
    - 若上方顯示為空（使用者未提供），改用 `git -C <目標專案> branch --show-current` 取得目標專案
      目前的 git branch 名稱，轉成 kebab-case 作為 change name
-4. 執行 `cd <目標專案> && openspec new change <change-name>` 建立 change 資料夾
-5. 依下方「OpenSpec 產出規則」用 Write 在該 change 資料夾底下寫 proposal.md / specs/**/*.md /
-   design.md / tasks.md，並依「完成前的驗證」跑 `openspec validate` 到通過"""
+5. 執行 `cd <目標專案> && openspec new change <change-name>` 建立 change 資料夾
+6. 依下方「OpenSpec 產出規則」用 Write 在該 change 資料夾底下寫 proposal.md / specs/**/*.md /
+   design.md / tasks.md（domain 名稱依步驟 3 的確認結果），並依「完成前的驗證」跑 `openspec validate` 到通過"""
 
 _CHANGE_SETUP_REPLAN = """## 更新既有的 OpenSpec Change
 
