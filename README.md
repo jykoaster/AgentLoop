@@ -130,6 +130,26 @@ python -m AgentLoop.main --node review "任務描述"
 
 ---
 
+## 使用的 Skills
+
+各節點透過 `skill_loader.py` 從 host 掛載進來的 `~/.claude/skills/` 讀取下列 skill 並注入 prompt。「完整內容」欄為是的 skill，因流程細節（提問方式、文件存放規則、平行 sub-agent 呼叫方式等）必須完整注入才能正確遵循；其餘只列出名稱供 Claude 自行判斷是否採用（節省 token）。
+
+| Skill                                                                                                     | 使用節點                  | 完整內容 | 用途                                                                      |
+| ----------------------------------------------------------------------------------------------------------- | ------------------------- | -------- | ------------------------------------------------------------------------- |
+| [`grill-with-docs`](https://github.com/mattpocock/skills/blob/main/skills/engineering/grill-with-docs/SKILL.md) | `analyze_plan`            | 是       | 初始規劃／依人工意見重新規劃時，互動式逐一提問釐清需求                     |
+| [`grilling`](https://github.com/mattpocock/skills/blob/main/skills/productivity/grilling/SKILL.md)             | `analyze_plan`            | 是       | 提供 `grill-with-docs` 的提問流程本體                                     |
+| [`domain-modeling`](https://github.com/mattpocock/skills/blob/main/skills/engineering/domain-modeling/SKILL.md) | `analyze_plan`            | 是       | 提問過程中即時記錄詞彙與 ADR                                              |
+| [`to-spec`](https://github.com/mattpocock/skills/blob/main/skills/engineering/to-spec/SKILL.md)                 | `analyze_plan`            | 是       | 規格文件撰寫依據（實際輸出格式由 `_SPEC_TEMPLATE` 固定覆蓋）              |
+| [`tdd`](https://github.com/mattpocock/skills/blob/main/skills/engineering/tdd/SKILL.md)                         | `analyze_plan`、`execute` | 否       | 規劃「撰寫／更新測試」TASK、執行測試 TASK 時採紅-綠循環                    |
+| [`implement`](https://github.com/mattpocock/skills/blob/main/skills/engineering/implement/SKILL.md)             | `execute`                 | 是       | 執行階段主流程依據（commit 與 `/code-review` 步驟由 `_SYSTEM` 覆蓋關閉）  |
+| [`code-review`](https://github.com/mattpocock/skills/blob/main/skills/engineering/code-review/SKILL.md)         | `review`                  | 是       | Standards／Spec 兩軸審查，各自透過平行 sub-agent 產出報告                 |
+
+以上 skill 皆來自 [`mattpocock/skills`](https://github.com/mattpocock/skills)，透過 `~/.agents/.skill-lock.json` 安裝到 `~/.agents/skills/`，再由 `~/.claude/skills/` 下的 symlink 指向、以唯讀方式掛載進容器。`_FULL_CONTENT_SKILLS`（`skill_loader.py`）白名單決定完整內容注入名單；node 各自的 `_SKILLS` 常數（`nodes/analyze_plan.py`、`nodes/execute.py`）決定該節點會用到哪些 skill。`review` 節點的 `code-review` 是直接呼叫 `build_skills_block(["code-review"])`，不透過 `_SKILLS` 常數。
+
+（OpenSpec 的規格產出流程不透過此 skill 機制載入，而是寫死在 `analyze_plan.py` 的 prompt 常數中，並由 `openspec_runner.py` 直接呼叫 `openspec` CLI，詳見上方「執行 Agent 工作流」一節。）
+
+---
+
 ## 目標專案文件需求
 
 `execute` 與 `review` 節點靠 `project_context.py` 動態偵測目標專案根目錄下的 `CLAUDE.md`（或 `AGENT.md` / `AGENTS.md`）來了解架構與慣例，不會把任何專案的目錄結構寫死在 prompt 裡。目標專案的說明檔**必須**涵蓋以下內容，Agent 才能正確規劃、實作與審查：
@@ -142,3 +162,13 @@ python -m AgentLoop.main --node review "任務描述"
 是否需要在 `docs/` 目錄維護商業邏輯說明文件（功能說明、資料流、模組/元件結構、業務規則），由目標專案自己的說明檔決定：說明檔裡若有要求同步維護，`analyze_plan` 會排入對應的文件更新 TASK、`execute` 照做、`review` 驗證是否確實同步；說明檔未提及此類慣例時，AgentLoop 不會強制新增或更新文件。
 
 找不到任何說明檔時，Agent 會退回用 Read/Glob/Grep 自行探索程式碼風格，但規劃與審查的準確度會下降，建議每個目標專案都補上 `CLAUDE.md`。
+
+### 目標專案是否需要 Docker
+
+視情況而定，不是所有目標專案都一定要有 Docker：
+
+- **規劃／審查中的讀取類操作**（讀 `CLAUDE.md`、產出計畫、`git diff HEAD` 比對）不需要目標專案有 Docker，任何技術棧都能處理。
+- 但 `execute` 與 `review` 節點**強制要執行目標專案的測試指令**，而 AgentLoop 容器本身只原生安裝了 **Python 3.11** 與 **Node.js 20**（見 `Dockerfile`）。因此：
+  - 若目標專案是 Python／Node 專案，且測試不依賴額外服務（資料庫、cache 等），可以在 AgentLoop 容器內直接跑測試，**不需要**目標專案有 Docker。
+  - 若目標專案使用其他語言、或測試需要額外服務，則**需要**目標專案本身能透過 `docker compose up` / `exec` 之類的指令啟動與跑測試——AgentLoop 容器內建 Docker CLI 並掛載 host 的 `docker.sock`（DooD，見上方「首次使用」前的 Docker outside of Docker 說明），正是為了讓 Agent 能在容器內對目標專案下這類指令；容器本身沒有其他語言 runtime，也不會另外起一顆 Docker daemon。
+  - 這件事應該寫進目標專案的 `CLAUDE.md`／`AGENT.md`：測試指令若需要透過 `docker compose exec ...` 執行，直接寫清楚，Agent 才會照著跑，而不是誤用容器內不存在的原生指令。
