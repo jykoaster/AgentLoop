@@ -1,17 +1,22 @@
 from langgraph.graph import StateGraph, END
 from .state import AgentState
-from .nodes import analyze_plan_node, execute_node, review_node, human_confirm_node
+from .nodes import analyze_plan_node, execute_node, review_node, human_confirm_node, archive_node
 
 MAX_ITERATIONS = 3
 
 
 def route_after_review(state: AgentState) -> str:
     """review_node 已完成嚴重問題判定與（非嚴重建議的）人工確認，
-    這裡只讀取其結論 review_blocking：False → end；True（且未達 iteration 上限）→ 重新規劃。"""
+    這裡只讀取其結論 review_blocking：
+    - status 為 error → end（跳過 archive）
+    - review_blocking 為 False（真正通過）→ archive（把這次的 change 併入持久 specs/）
+    - review_blocking 為 True 且已達 iteration 上限（放棄重試）→ end（跳過 archive：
+      沒有通過審查的東西不併入持久 specs/）
+    - 其餘（review_blocking 為 True 且還能重試）→ replan"""
     if state.get("status") == "error":
         return "end"
     if not state.get("review_blocking", False):
-        return "end"
+        return "archive"
     if state.get("iteration", 0) >= MAX_ITERATIONS:
         return "end"
     return "replan"
@@ -42,9 +47,10 @@ def build_workflow() -> StateGraph:
     graph.add_node("execute", execute_node)
     graph.add_node("review", review_node)
     graph.add_node("increment", increment_iteration)
+    graph.add_node("archive_change", archive_node)
 
     # 流程：
-    #   analyze_plan → human_confirm → [y] → execute → review → [pass] → END
+    #   analyze_plan → human_confirm → [y] → execute → review → [pass] → archive_change → END
     #                       |                   ↑           |
     #                      [N]                  |       [fail, iter < MAX]
     #                       ↓                  |           ↓
@@ -53,6 +59,8 @@ def build_workflow() -> StateGraph:
     # - human_confirm：規劃後人工審閱，輸入 y 才繼續，否則中止
     # - execute 內部自動修復測試失敗（最多重試 3 次），再交給 review 判定
     # - review 失敗回到 analyze_plan 重新規劃（需再次人工確認）
+    # - review 通過 → archive_change：把這次的 OpenSpec change 併入目標專案持久的 openspec/specs/
+    #   （放棄重試、或發生 error 時直接 END，不 archive）
 
     graph.set_entry_point("analyze_plan")
     graph.add_edge("analyze_plan", "human_confirm")
@@ -68,10 +76,11 @@ def build_workflow() -> StateGraph:
     graph.add_conditional_edges(
         "review",
         route_after_review,
-        {"end": END, "replan": "increment"},
+        {"end": END, "replan": "increment", "archive": "archive_change"},
     )
 
     graph.add_edge("increment", "analyze_plan")
+    graph.add_edge("archive_change", END)
 
     return graph.compile()
 

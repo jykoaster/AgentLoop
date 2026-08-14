@@ -22,6 +22,10 @@ RUN install -m 0755 -d /etc/apt/keyrings && \
 # 安裝 Claude Code CLI
 RUN npm install -g @anthropic-ai/claude-code
 
+# 安裝 OpenSpec CLI（analyze_plan 產出的規格文件遵照其 change/spec delta 規則，
+# review 通過後由 archive 節點呼叫 `openspec archive` 合併進目標專案的 openspec/specs/）
+RUN npm install -g @fission-ai/openspec
+
 # 安裝 Python 依賴（先複製 requirements 利用 layer cache）
 COPY requirements.txt /tmp/requirements.txt
 RUN pip install --no-cache-dir -r /tmp/requirements.txt

@@ -7,7 +7,7 @@ from datetime import datetime
 from ..state import AgentState
 from ..claude_runner import call_claude, format_usage_stats
 from ..skill_loader import build_skills_block
-from ..project_context import build_project_docs_hint, latest_plan_file
+from ..project_context import build_project_docs_hint
 
 # 使用的模型（"haiku" | "sonnet" | "opus" | "fable"，見 claude_runner.MODEL_IDS；
 # None 則沿用 claude CLI 本身的預設模型）
@@ -34,7 +34,10 @@ _SYSTEM = """你是一位資深程式碼審查者，負責「Code Review」階�
 ## 依 code-review skill 執行時的具體參數
 
 - **Fixed point**：本次修改尚未 commit，固定點為 `HEAD`（直接執行 `git diff HEAD` 取得完整異動即可，不需詢問使用者）
-- **Spec 來源**：<<SPEC_SOURCE>>
+- **Spec 來源**：`<<CHANGE_LOCATION>>`（由分析規劃階段依 OpenSpec 規則產生的 change 資料夾，
+  用 Read 讀取其下 proposal.md / design.md / tasks.md / specs/**/*.md 取得完整內容；也可用
+  `openspec show <<CHANGE_NAME_VALUE>> --json` 快速確認結構。若該 change 已被前一輪迭代
+  archive，改讀 `<<PROJECT_DIR_VALUE>>/openspec/specs/` 下對應 domain 的 spec.md）
 - **Standards 來源**：依下方「專案說明檔」判斷本次任務涉及的專案，讀取該專案的 CLAUDE.md / AGENT.md，
   以及其中提及或專案根目錄下的 CODING_STANDARDS.md / CONTRIBUTING.md（若有）作為 Standards 依據；
   若任務同時涉及多個專案（例如前後端），分別讀取
@@ -43,7 +46,8 @@ _SYSTEM = """你是一位資深程式碼審查者，負責「Code Review」階�
 
 ## 額外操作指示
 
-1. 確認 TASK 清單完整性：列出未完成的 TASK 編號
+1. 確認 TASK 清單完整性：Read `<<CHANGE_LOCATION>>/tasks.md`，依其 checkbox 狀態
+   （`- [x]` 已完成／`- [ ]` 未完成）逐項核對，列出未完成的 TASK 編號
 2. 依偵測到的專案，讀取其 CLAUDE.md / AGENT.md 中列出的測試指令並實際用 Bash 執行測試
    （若說明檔未列出，探索 package.json / pyproject.toml 等設定檔判斷）；測試失敗計入 Standards 軸的問題
 3. 若該任務所屬專案的 CLAUDE.md / AGENT.md（或其他說明檔）要求同步維護 docs/ 下的商業邏輯說明文件，
@@ -160,12 +164,9 @@ def review_node(state: AgentState) -> dict:
         f"TASK {i+1}: {s}" for i, s in enumerate(state.get("plan", []))
     )
 
-    spec_file = latest_plan_file()
-    spec_source = (
-        f"{spec_file}（由分析規劃階段依 to-spec 產生，請用 Read 讀取）"
-        if spec_file
-        else "找不到規格文件，改以上方「審查背景」中的任務描述與 TASK 清單作為 Spec 依據"
-    )
+    project_dir = state.get("project_dir", "")
+    change_name = state.get("change_name", "")
+    change_location = f"{project_dir}/openspec/changes/{change_name}"
 
     start = time.monotonic()
 
@@ -176,7 +177,9 @@ def review_node(state: AgentState) -> dict:
             .replace("<<TASK>>", state["task"])
             .replace("<<PLAN_TEXT>>", plan_text)
             .replace("<<EXECUTION_SUMMARY>>", exec_summary)
-            .replace("<<SPEC_SOURCE>>", spec_source)
+            .replace("<<CHANGE_LOCATION>>", change_location)
+            .replace("<<PROJECT_DIR_VALUE>>", project_dir)
+            .replace("<<CHANGE_NAME_VALUE>>", change_name)
             .replace("<<PROJECT_CONTEXT>>", build_project_docs_hint())
         )
         result = call_claude(prompt, tools="review", timeout=600, model=_MODEL)

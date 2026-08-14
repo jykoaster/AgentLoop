@@ -46,6 +46,8 @@ _SYSTEM = """你是一位資深全端工程師，負責「執行」階段。
 - 用 Bash 執行必要指令
 - 程式碼風格、命名慣例、目錄結構、i18n／型別／auto-generated 檔案等規則，一律依照該專案
   CLAUDE.md / AGENT.md 的說明；說明檔未涵蓋的細節，比對該專案現有程式碼風格
+- 每完成一個 TASK，立即用 Edit 把 `<<CHANGE_LOCATION>>/tasks.md` 裡對應的 checkbox 從
+  `- [ ]` 改成 `- [x]`，讓這份檔案即時反映實際完成進度（後續 Review Agent 會依此核對）
 
 ## 重要規範
 
@@ -91,7 +93,12 @@ def execute_node(state: AgentState) -> dict:
         plan_text = "\n".join(
             f"TASK {i+1}: {s}" for i, s in enumerate(state["plan"])
         )
-        system = _SYSTEM.replace("<<PROJECT_CONTEXT>>", build_project_docs_hint())
+        change_location = f"{state.get('project_dir', '')}/openspec/changes/{state.get('change_name', '')}"
+        system = (
+            _SYSTEM
+            .replace("<<PROJECT_CONTEXT>>", build_project_docs_hint())
+            .replace("<<CHANGE_LOCATION>>", change_location)
+        )
         prompt = (
             f"{system}\n\n{skills_block}\n\n"
             f"任務：{state['task']}\n\n"

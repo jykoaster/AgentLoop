@@ -1,6 +1,5 @@
 import sys
 from ..state import AgentState
-from ..project_context import latest_plan_file
 
 _CYAN   = "\033[1;36m"
 _YELLOW = "\033[1;33m"
@@ -29,10 +28,11 @@ def human_confirm_node(state: AgentState) -> dict:
         for i, task in enumerate(plan, 1):
             print(f"  TASK {i}: {task}", flush=True)
 
-    plan_file = latest_plan_file()
-    if plan_file:
-        print(f"\n{_YELLOW}## 計畫文件{_RESET}", flush=True)
-        print(f"  {plan_file}", flush=True)
+    project_dir = state.get("project_dir", "")
+    change_name = state.get("change_name", "")
+    if project_dir and change_name:
+        print(f"\n{_YELLOW}## OpenSpec Change{_RESET}", flush=True)
+        print(f"  {project_dir}/openspec/changes/{change_name}/", flush=True)
 
     print(f"\n{_CYAN}{'─'*60}{_RESET}", flush=True)
 

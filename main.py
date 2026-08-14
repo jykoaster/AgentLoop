@@ -42,7 +42,8 @@ def _empty_state(task: str) -> AgentState:
         "status": "pending",
         "iteration": 0,
         "human_feedback": "",
-        "plan_filename": "",
+        "change_name": "",
+        "project_dir": "",
     }
 
 

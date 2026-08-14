@@ -14,6 +14,7 @@ AgentLoop/
 ├── workflow.py            # LangGraph 工作流程定義
 ├── state.py                # AgentState 型別定義
 ├── claude_runner.py         # Claude Code CLI 封裝層
+├── openspec_runner.py         # OpenSpec CLI 封裝層（唯一跟 `openspec` CLI 對話的地方；目前只有 archive）
 ├── skill_loader.py           # Skill 注入器
 ├── project_context.py         # 動態偵測工作區內各專案的 CLAUDE.md / AGENT.md
 ├── requirements.txt
@@ -23,10 +24,17 @@ AgentLoop/
 │   ├── analyze_plan.py     # 規劃 / 重新規劃 Agent 節點
 │   ├── human_confirm.py    # 人工確認中斷點
 │   ├── execute.py          # 執行 Agent 節點
-│   └── review.py           # 程式碼審查 Agent 節點
+│   ├── review.py           # 程式碼審查 Agent 節點
+│   └── archive.py          # review 通過後的收尾節點（純 Python，呼叫 openspec archive）
 └── docs/
     └── nodes/review/        # review 節點產出的審查報告（YYYY-MM-DD-iterN.md）
 ```
+
+規格文件本身不再存在 AgentLoop 這個 repo 底下，而是寫進**目標專案**的
+`<project_dir>/openspec/changes/<change_name>/`（`proposal.md` / `design.md` / `tasks.md` /
+`specs/<domain>/spec.md`），遵照 [OpenSpec](https://github.com/Fission-AI/OpenSpec) 的
+change/spec-delta 規則；review 通過後由 `archive` 節點呼叫 `openspec archive` 併入該目標專案
+持久的 `<project_dir>/openspec/specs/`。詳見下方「規劃 Agent」與「收尾節點」兩節。
 
 ---
 
@@ -46,6 +54,9 @@ class AgentState(TypedDict):
     status: str            # "pending" | "needs_revision" | "error" | "confirmed" | "aborted"
     iteration: int         # 重試計數器（上限 3）
     human_feedback: str    # 使用者在 human_confirm 拒絕計畫時填寫的修改意見
+    change_name: str       # OpenSpec change 名稱（kebab-case）；任務開始時問一次，全程沿用
+    project_dir: str       # 本次任務對應的目標專案目錄（相對 workspace root）；由 analyze_plan
+                           # 初始規劃回合回報，之後所有節點據此定位 openspec/changes/<change_name>/
 ```
 
 每個節點讀取需要的欄位、寫入自己負責的欄位，節點之間**不直接呼叫彼此**，全部透過狀態字典溝通。
@@ -83,19 +94,20 @@ START
        │                                    │             │   勾選要修哪幾條，見下方說明）
        │                                    └──────┬──────┘
        │                                           │
-       │                      ┌────────────────────┤
-       │                      │                    │
-       │           review_blocking=False   review_blocking=True + 未達上限
-       │                      │                    │
-       │                      ▼                    ▼
-       │                   END ✅         increment_iteration
-       │                                           │
-       │                                           ▼
-       │                                    回到 analyze_plan
-       │                                  （帶入 review_result
-       │                                   與 review_level，
-       │                                   只針對 review 結果 grill）
-       │                                    再次等待人工確認
+       │                      ┌────────────────────┼───────────────────────┐
+       │                      │                    │                       │
+       │           review_blocking=False   review_blocking=True    review_blocking=True
+       │                      │            + 未達上限               + 已達 iteration 上限
+       │                      ▼                    │                       │
+       │             ┌────────────────┐            ▼                       ▼
+       │             │ archive_change │  increment_iteration              END ⚠️
+       │             │ 併入目標專案持久 │            │
+       │             │ openspec/specs/│            ▼
+       │             └───────┬────────┘     回到 analyze_plan
+       │                     │              （帶入 review_result
+       │                     ▼               與 review_level，
+       │                  END ✅             只針對 review 結果 grill）
+       │                                     再次等待人工確認
        │
        ├─── 輸入 N + 填寫修改意見 ──────────→ analyze_plan
        │    (needs_revision + human_feedback)  （帶入 human_feedback
@@ -104,15 +116,17 @@ START
        └─── 輸入 N + 空白 (aborted) ────────→ END 🛑
 ```
 
-> `review_blocking=True` 且已達 iteration 上限 (3) 時，`route_after_review` 亦路由至 END ⚠️。
+`archive_change` 是純 Python 節點，不呼叫 Claude：呼叫 `openspec archive <change_name> --yes --json`
+把這次的 spec delta 併入目標專案持久的 `openspec/specs/`，失敗只印警告，不影響工作流程結束狀態。
 
 ### 關鍵函式
 
 | 函式                    | 所在檔案      | 說明                                                                                  |
 | ----------------------- | ------------- | ------------------------------------------------------------------------------------- |
 | `route_after_confirm()` | `workflow.py` | 條件路由：`confirmed` → execute；`needs_revision` → replan；`aborted` / `error` → END |
-| `route_after_review()`  | `workflow.py` | 條件路由：只讀取 `review_node` 已判定好的 `review_blocking`（不再自行解析 review 文字），配合 iteration 上限決定是否重試 |
+| `route_after_review()`  | `workflow.py` | 條件路由：只讀取 `review_node` 已判定好的 `review_blocking`（不再自行解析 review 文字）——`False`（通過）→ `archive_change`；`True` 且已達 iteration 上限 → END（放棄重試，不 archive）；其餘 → replan |
 | `increment_iteration()` | `workflow.py` | 增加重試計數，重設 status 為 `pending`                                                |
+| `archive_node()`        | `nodes/archive.py` | review 通過後呼叫 `openspec_runner.archive_change()`；純機械式動作，不佔用 Claude 呼叫，失敗只印警告 |
 | `build_workflow()`      | `workflow.py` | 編譯 `StateGraph`，回傳可執行的 app                                                   |
 
 常數 `MAX_ITERATIONS = 3`：超過後強制結束，避免無限迴圈。
@@ -127,7 +141,7 @@ START
 
 ---
 
-## 四個節點詳述（3 個 Agent + 1 個人工確認閘）
+## 五個節點詳述（3 個 Claude Agent + 1 個人工確認閘 + 1 個純 Python 收尾節點）
 
 ### 1. `analyze_plan`（規劃 Agent）
 
@@ -148,9 +162,11 @@ START
 
 `plan` 工具集本身也含 `Bash`（`claude_runner.TOOL_PRESETS`），供初始規劃用 `git branch --show-current` 判斷規格文件檔名裡的 branch name，不含 `Edit`（規劃階段只新增規格文件，不改既有程式碼）。
 
-**任務開始時詢問規劃文件檔名：**
+**任務開始時詢問 OpenSpec change 名稱：**
 
-初始規劃模式進入 `analyze_plan_node()` 時，若 `state["plan_filename"]` 尚未設定，會在呼叫 Claude 之前先用 `_ask_plan_filename()` 直接向終端機使用者提問（不透過 Claude、不是 grilling 機制的一部分），取得的值全程保存在 `AgentState["plan_filename"]`，供本次任務所有輪次（含後續 replan／human-revise）的規格檔名沿用。若使用者留空，交由 Claude 改用 `git branch --show-current` 取得的目前 branch 名稱作為檔名。非互動式環境或使用者直接按 Enter／中止時留空繼續，不阻塞流程。
+初始規劃模式進入 `analyze_plan_node()` 時，若 `state["change_name"]` 尚未設定，會在呼叫 Claude 之前先用 `_ask_change_name()` 直接向終端機使用者提問（不透過 Claude、不是 grilling 機制的一部分）。輸入的值會先在 Python 端做 kebab-case 正規化（`_sanitize_change_name()`：小寫化、空白／底線轉連字號、去除不合法字元、合併連續連字號、去頭尾連字號），正規化後為空則視為未提供。取得的值全程保存在 `AgentState["change_name"]`，供本次任務所有輪次（含後續 replan／human-revise）的 OpenSpec change 名稱沿用。若使用者留空，交由 Claude 改用該任務對應目標專案的 `git branch --show-current` 取得的目前 branch 名稱（同樣轉 kebab-case）作為 change name。非互動式環境或使用者直接按 Enter／中止時留空繼續，不阻塞流程。
+
+`state["project_dir"]`（本次任務對應的目標專案目錄，相對 workspace root）則沒有終端機提問——由 Claude 在初始規劃回合判斷後，於最終輸出附上 `PROJECT_DIR:` 一行回報，`analyze_plan_node()` 解析後存入 `AgentState`；之後所有節點（`execute`、`review`、`human_confirm`、`archive`）都直接讀這個欄位定位 OpenSpec change 位置，不需要各自重新判斷。初始規劃若解析不到 `PROJECT_DIR:`/`CHANGE_NAME:` 兩者，視為錯誤（`status: "error"`），因為後續所有節點都依賴這兩個值才能定位規格文件。
 
 **互動式釐清（grilling）機制：**
 
@@ -170,9 +186,9 @@ START
 
 | 版本                   | 用途                                                                                                                                                                               |
 | ---------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `_SYSTEM_INITIAL`      | 全新任務規劃：Read/Glob/Grep 探索 → grill-with-docs 互動釐清（同步 domain-modeling）→ 依 `_SPEC_TEMPLATE`（覆蓋 to-spec 原本範本，見下方「規格文件範本」）撰寫規格文件 → 轉譯為 TASK 清單 |
-| `_SYSTEM_REPLAN`       | 帶入 `<<REVIEW_CONTEXT>>`（`review_result`，截斷至最後 3000 字）與 `<<REVIEW_LEVEL>>`；依「重寫／修補」分流見上，並用專屬的 `_REVIEW_QUESTION_PROTOCOL` 針對 review 結果逐點 grill |
-| `_SYSTEM_HUMAN_REVISE` | 帶入 `<<HUMAN_FEEDBACK>>`（`human_confirm` 收到的使用者修改意見）：理解意見（不夠明確則提問）→ 視需要重讀程式碼 → 視需要更新 domain-modeling → 更新既有規格文件                    |
+| `_SYSTEM_INITIAL`      | 全新任務規劃：Read/Glob/Grep 探索 → grill-with-docs 互動釐清（同步 domain-modeling）→ 依「建立 OpenSpec Change」判斷目標專案／建立 change → 依「OpenSpec 產出規則」撰寫 proposal.md / design.md / specs delta / tasks.md → `openspec validate` 到通過 |
+| `_SYSTEM_REPLAN`       | 帶入 `<<REVIEW_CONTEXT>>`（`review_result`，截斷至最後 3000 字）與 `<<REVIEW_LEVEL>>`；依「重寫／修補」分流見上，並用專屬的 `_REVIEW_QUESTION_PROTOCOL` 針對 review 結果逐點 grill；沿用既有 change，不重新 `openspec new change` |
+| `_SYSTEM_HUMAN_REVISE` | 帶入 `<<HUMAN_FEEDBACK>>`（`human_confirm` 收到的使用者修改意見）：理解意見（不夠明確則提問）→ 視需要重讀程式碼 → 視需要更新 domain-modeling → 更新既有 change 的規格文件            |
 
 **輸出格式：**
 
@@ -181,23 +197,33 @@ START
 [2-5 行摘要：需求／問題根因、涉及檔案、潛在問題或修正方向]
 
 ## 計畫
+（已寫入 tasks.md，摘要如下，供人工確認時快速瀏覽）
 TASK 1: [操作] [路徑] — [說明]
-TASK 2: [操作] [路徑] — [說明]
 ...
-TASK N: [視該任務所屬專案的說明檔慣例，可能包含測試 TASK 與文件更新 TASK]
+
+PROJECT_DIR: <目標專案相對 workspace root 的路徑>
+CHANGE_NAME: <kebab-case change name>
 ```
 
 **解析邏輯：**
 
-- 使用 `re.findall(r'TASK \d+: (.+)', ...)` 擷取 TASK 清單（Fallback：`STEP \d+:`）
-- 每個 TASK 成為 `state["plan"]` 中的一個元素
-- 規格文件寫入 `docs/superpowers/plans/<filename>.md`（`to-spec` 略過發布 issue tracker 的步驟；`<filename>` 為任務開始時使用者輸入的自訂檔名，留空則改用 Bash 執行 `git branch --show-current` 取得的目前 branch 名稱，並將 `/` 等字元替換為 `-`）。重新規劃／依人工意見調整計畫時沿用同一個檔名，不重新命名
+- `PROJECT_DIR:` / `CHANGE_NAME:` 兩行用正規表示式擷取，定位出 `openspec/changes/<change_name>/` 的實際路徑（`CHANGE_NAME:` 額外經過 `_sanitize_change_name()` 正規化）
+- `state["analysis"]`、`state["plan"]` **直接讀檔**而非 regex Claude 的聊天文字：`analysis` 讀該 change 資料夾下 `proposal.md` 全文；`plan` 讀 `tasks.md` 的 checkbox 清單（`_TASK_CHECKBOX_RE`）。單一事實來源是 OpenSpec CLI 自己會 `validate` 的檔案，避免「聊天摘要」與「實際寫入檔案」兜不起來；任一檔案讀不到時退回舊有的 `TASK \d+:` / `STEP \d+:` regex（對 Claude 最終輸出文字）作為 fallback
 - 涉及新增或修改行為的 TASK，須額外排入對應的「撰寫／更新測試」TASK，讓 `execute` 有明確依據依 tdd skill 執行紅-綠循環；純文件、設定調整或不改變行為的重構可不需要
 - 是否需要新增「更新文件」TASK，依該任務所屬專案的 `CLAUDE.md` / `AGENT.md` 判斷：說明檔要求同步維護 `docs/` 商業邏輯說明文件才排入，未提及此類慣例則不強制新增
 
 **注入的 Skills（完整內容）：** `grill-with-docs`、`grilling`、`domain-modeling`、`to-spec`；另列名稱（不注入完整內容）：`tdd`
 
-**規格文件範本（`_SPEC_TEMPLATE`，覆蓋 to-spec 原本的範本）：** 固定章節為 `Problem Statement` / `Solution` / `User Stories` / `Implementation Decisions`（含「影響模組」「關鍵機制與流程」小節）/ `Testing Strategy`（含「Seam（測試接縫）」「測試案例矩陣（Test Matrix）」小節）/ `Out of Scope` / `Technical Debt & Follow-up Notes`，開頭另附 `Date`、`Scope`。三種模式（初始規劃、重新規劃、依人工意見調整計畫）撰寫或更新規格文件時都必須依此範本，章節結構不可增減，**每個章節都必須填寫內容，沒有內容也要填「無」**，不可留白或整段刪除；範本內的具體條目（如 SOT / Error Handling Flow / i18n、Seam 首選/次要接縫、Test Matrix 範例列）僅為格式參考，非固定必填項目。
+**OpenSpec Change 建立與規格文件範本：** 規格文件不再是 AgentLoop 自訂的單一 Markdown 檔案，而是遵照 [OpenSpec](https://github.com/Fission-AI/OpenSpec) 的 change 資料夾格式，寫在目標專案的 `<project_dir>/openspec/changes/<change_name>/` 底下：
+
+- **建立階段**（`_CHANGE_SETUP_INITIAL`，僅初始規劃）：判斷目標專案目錄 → 若 `<目標專案>/openspec/` 不存在，執行一次性 `openspec init --tools claude --force` bootstrap → 決定 change name（kebab-case；使用者提供則直接用，否則用該目標專案的 `git branch --show-current` 轉換） → `openspec new change <name>` 建立資料夾
+- **沿用階段**（`_CHANGE_SETUP_REPLAN` / `_CHANGE_SETUP_HUMAN_REVISE`，replan／human-revise）：`project_dir`/`change_name` 沿用 `AgentState` 已存的值，不重新 `init`/`new change`，直接 Edit/Write 同一個 change 資料夾；「重寫」等級的 replan 額外把 `tasks.md` 所有 checkbox 重設回 `- [ ]`
+- **產出規則**（`_OPENSPEC_ARTIFACT_RULES`，三種模式共用）：
+  - `proposal.md`：`## Intent` / `## Scope`（In scope / Out of scope）/ `## Approach`
+  - `design.md`（**AgentLoop 規定必寫**，不採用 OpenSpec 預設「小改動可略過 design.md」的作法，以維持既有的測試策略／技術債紀律）：`## Technical Approach` / `## Architecture Decisions` / `## Testing Strategy`（含「Seam（測試接縫）」「測試案例矩陣（Test Matrix）」固定小節）/ `## Technical Debt & Follow-up Notes`；沒有內容也要保留標題填「無」，不可留白或整段刪除
+  - `specs/<domain>/spec.md`（delta，可能有多個 domain）：只用 `## ADDED Requirements` / `## MODIFIED Requirements` / `## REMOVED Requirements` 三種分節，`### Requirement:`（SHALL/MUST/SHOULD，一個 Requirement 只講一件事）+ `#### Scenario:`（GIVEN/WHEN/THEN，至少一個）；新建 domain 才加 `## Purpose`；純重構/文件/設定變更可在 `.openspec.yaml` 設 `skip_specs: true` 略過；REMOVED 移除某 domain 最後一個 Requirement 時需設 `retire_capabilities: true` 才會被 archive 一併刪除該 domain 的 spec
+  - `tasks.md`：`## N. <群組>` + `- [ ] N.M <任務>` checkbox、階層編號——這份檔案本身就是任務清單，`execute` 節點會直接勾選它、`review` 節點會直接讀它核對完成度
+  - 完成前用 Bash 執行 `openspec validate <change-name> --json --strict`，有 error 等級問題需修正到通過為止（這一步在 Claude 自己的工具呼叫回合內完成，Python 不介入）
 
 ---
 
@@ -237,7 +263,7 @@ TASK N: [視該任務所屬專案的說明檔慣例，可能包含測試 TASK �
 - TASK 清單中若有「撰寫／更新測試」的 TASK，**必須**依 `tdd` skill 的紅-綠循環執行：先寫會失敗的測試，再寫最小可行實作讓測試通過，最後重構；不可先完成其他 TASK 的實作、事後才回頭補測試
 - 其餘步驟（定期執行型別檢查與單一測試檔案、最後執行完整測試）依 implement skill 原本流程進行
 
-嚴格依序完成 TASK 清單中的每一項；先 Read 再 Write/Edit，避免覆蓋不相關程式碼；風格、命名、目錄結構、i18n／型別／auto-generated 檔案等規則，一律依該專案 `CLAUDE.md` / `AGENT.md` 的說明判斷，不硬編碼在 prompt 裡。
+嚴格依序完成 TASK 清單中的每一項；先 Read 再 Write/Edit，避免覆蓋不相關程式碼；風格、命名、目錄結構、i18n／型別／auto-generated 檔案等規則，一律依該專案 `CLAUDE.md` / `AGENT.md` 的說明判斷，不硬編碼在 prompt 裡。每完成一個 TASK，立即用 Edit 把該任務對應的 OpenSpec change（`<project_dir>/openspec/changes/<change_name>/tasks.md`，路徑由 `AgentState["project_dir"]`/`["change_name"]` 組成）裡對應的 checkbox 從 `- [ ]` 改成 `- [x]`，讓這份檔案即時反映實際完成進度，供 `review` 節點核對。
 
 **文件同步要求：** 是否需要同步更新文件，依該任務所屬專案的 `CLAUDE.md` / `AGENT.md` 判斷——說明檔要求同步維護 `docs/` 商業邏輯說明文件才需處理（依 TASK 清單中對應的文件更新 TASK 執行，或在說明檔明確要求但 TASK 清單未包含時主動補上）；說明檔未提及此類慣例時不需要主動撰寫或更新文件。
 
@@ -264,12 +290,12 @@ TASK N: [視該任務所屬專案的說明檔慣例，可能包含測試 TASK �
 **審查依據：**
 
 - **Fixed point**：本次修改尚未 commit，固定為 `HEAD`（`git diff HEAD` 取得完整異動）
-- **Spec 來源**：優先讀取 `analyze_plan` 依 to-spec 產生、`docs/superpowers/plans/` 下最新的規格文件（`project_context.latest_plan_file()`）；找不到則以任務描述與 TASK 清單為 fallback
+- **Spec 來源**：`<project_dir>/openspec/changes/<change_name>/`（`AgentState["project_dir"]`/`["change_name"]` 組成的路徑，取代先前的 `project_context.latest_plan_file()` 檔案 glob 機制）——Read 讀取其下 proposal.md / design.md / tasks.md / specs/**/*.md，也可用 `openspec show <change_name> --json` 快速確認結構；若該 change 已被前一輪迭代 archive，改讀 `<project_dir>/openspec/specs/` 下對應 domain 的 spec.md
 - **Standards 來源**：依 `project_context.py` 判斷本次任務涉及的專案，讀取其 `CLAUDE.md` / `AGENT.md`，以及其中提及或專案根目錄下的 `CODING_STANDARDS.md` / `CONTRIBUTING.md`（若有）；涉及多個專案時分別讀取
 
 **額外操作指示：**
 
-1. 確認 TASK 清單完整性，列出未完成的 TASK 編號
+1. 確認 TASK 清單完整性：Read `tasks.md`，依其 checkbox 狀態（`- [x]` 已完成／`- [ ]` 未完成）逐項核對，列出未完成的 TASK 編號
 2. 依偵測到的專案讀取其說明檔中列出的測試指令並實際用 Bash 執行測試（找不到則探索 `package.json` / `pyproject.toml`）；測試失敗計入 Standards 軸的問題
 3. 若該任務所屬專案的說明檔要求同步維護 `docs/` 商業邏輯說明文件，確認是否已依本次修改更新；說明檔未提及此類慣例時不需要求有文件變更
 
@@ -316,16 +342,31 @@ SUGGESTION 2: [建議內容與理由]
 
 ---
 
+### 5. `archive_change`（收尾節點，`nodes/archive.py`）
+
+**職責：** review 判定通過（`review_blocking=False`）後的機械式收尾動作——把這次的 OpenSpec change 併入目標專案持久的 `openspec/specs/`。這是「該不該 archive」的判斷（review 通過就 archive），不需要 Claude 的判斷力，因此**不呼叫 `call_claude()`**，純 Python 直接跑 `openspec` CLI，不佔用一次 Claude 呼叫、不耗費 token。
+
+**觸發時機：** 只在 `route_after_review()` 判定 `review_blocking=False` 時進入；`status=="error"` 或 `review_blocking=True` 且已達 iteration 上限（放棄重試）時直接 END，不會進入這個節點——沒有通過審查的東西不併入持久 specs/。
+
+**執行內容：** 透過 `openspec_runner.archive_change(project_dir_abs, change_name)`（`openspec_runner.py`，跟 `claude_runner.py` 是「唯一跟 claude CLI 對話的地方」同樣的角色，這裡是唯一跟 `openspec` CLI 對話的地方）執行 `openspec archive <change_name> --yes --json`，把 change 的 spec delta 合併進 `openspec/specs/`、change 資料夾搬到 `openspec/changes/archive/YYYY-MM-DD-<name>/`。
+
+**失敗處理：** 容錯解析 stdout 的 JSON 診斷（OpenSpec agent-contract 的 `status: StoreDiagnostic[]` 慣例），失敗（`openspec` 指令不存在、validate 沒過、change 不存在等）只印警告訊息並附上手動補跑指令，**不**讓整個 workflow 失敗——程式碼已經審查通過，archive 只是收尾，失敗頂多之後手動執行 `openspec archive <name> --yes`。
+
+**回傳：** 不更動 `AgentState` 任何欄位（`{}`），純粹是收尾動作。
+
+---
+
 ## 節點間協作機制
 
 ### 1. 狀態字典傳遞
 
 每個節點讀取前一個節點填入的欄位，再將自己的輸出寫入對應欄位，例如：
 
-- `analyze_plan` → 填入 `analysis`、`plan`
+- `analyze_plan` → 填入 `analysis`、`plan`、`change_name`、`project_dir`
 - `human_confirm` → 填入 `status`（`"confirmed"` / `"needs_revision"` + `human_feedback` / `"aborted"`）
 - `execute` → 填入 `execution_result`、`status`
 - `review` → 填入 `review_result`、`review_level`、`review_blocking`、`status`
+- `archive_change` → 不填入任何欄位（純收尾動作）
 
 ### 2. 動態專案偵測作為共同上下文
 
@@ -335,7 +376,8 @@ SUGGESTION 2: [建議內容與理由]
 
 | 產出物   | 路徑                                     | 讀寫者                                      |
 | -------- | ---------------------------------------- | ------------------------------------------- |
-| 計畫文件 | `docs/superpowers/plans/<filename>.md`（`<filename>` 為使用者自訂檔名，留空則用 branch name） | `analyze_plan` 寫，`execute`、`review` 讀   |
+| OpenSpec Change | `<project_dir>/openspec/changes/<change_name>/`（`proposal.md`/`design.md`/`tasks.md`/`specs/**/*.md`；`<project_dir>`/`<change_name>` 為 `AgentState` 對應欄位） | `analyze_plan` 寫，`execute`（勾選 tasks.md checkbox）、`review`、`archive_change` 讀 |
+| 持久規格 | `<project_dir>/openspec/specs/<domain>/spec.md` | `archive_change` 呼叫 `openspec archive` 合併寫入，跨任務累積 |
 | 審查報告 | `docs/nodes/review/YYYY-MM-DD-iterN.md`  | `review` 寫，下次迭代的 `analyze_plan` 可讀 |
 | 業務文件 | 各偵測到專案的 `docs/` 目錄              | `execute` 寫，`review` 驗證                 |
 
@@ -361,6 +403,7 @@ Iteration 2:
     → human_confirm [y]（再次等待確認）
     → execute（執行差異修補）
     → review → "通過"
+    → archive_change（併入目標專案持久 openspec/specs/）
     → END ✅
 ```
 
@@ -434,6 +477,7 @@ MODEL_IDS = {
 | **stream-json output**                            | 即時串流 JSON 事件，支援 `assistant`、`tool_use`、`tool_result`、`result` 類型 |
 | **Built-in Tools**                                | Read、Write、Edit、Bash、Glob、Grep、Task（Claude Code 原生工具）              |
 | **Skill System**                                  | `~/.claude/skills/` 中的 Markdown 文件，動態注入 Agent 系統提示                |
+| **OpenSpec CLI** (`@fission-ai/openspec`)         | 規格文件遵照的 change/spec-delta 規則來源；`analyze_plan` 在 Claude 自己的 Bash 呼叫中用它 `init`/`new change`/`validate`，`archive_change` 節點用它 `archive`（詳見 `openspec_runner.py`）。同樣透過容器內的 Node.js 20 安裝 |
 
 ### 目標專案技術棧
 
@@ -477,14 +521,14 @@ State file 可預載 `plan`、`execution_result` 等欄位，便於針對單一�
 
 | 面向         | 細節                                                                     |
 | ------------ | ------------------------------------------------------------------------ |
-| 架構模式     | LangGraph StateGraph + 3 個 Agent 節點 + 人工確認閘 + 審查驅動的反饋迴圈 |
-| 節點數量     | 4（規劃、人工確認、執行、審查）                                          |
+| 架構模式     | LangGraph StateGraph + 3 個 Claude Agent 節點 + 人工確認閘 + 審查驅動的反饋迴圈 + 純 Python 收尾節點 |
+| 節點數量     | 5（規劃、人工確認、執行、審查、收尾 archive）                            |
 | 最大重試次數 | 3 次迭代後強制結束                                                       |
 | 執行模型     | 序列執行 + 迭代精修（審查驅動，重新規劃時只針對 review 結果 grill）      |
 | 語言         | Python 協調層 + 繁體中文提示                                             |
 | 目標架構     | 動態偵測，不假設固定技術棧（目前範例：Vue + Ant Design Vue）             |
-| 驅動方式     | Claude Code CLI（本地認證，非 API Key）                                  |
+| 驅動方式     | Claude Code CLI（本地認證，非 API Key）+ OpenSpec CLI（規格文件格式與 archive） |
 | 狀態傳遞     | 不可變 TypedDict 流經整個工作流程                                        |
-| 產出物       | 計畫文件、執行摘要、審查報告、程式碼變更                                 |
+| 產出物       | 目標專案下的 OpenSpec change（規格文件）、執行摘要、審查報告、程式碼變更、review 通過後合併進目標專案持久的 openspec/specs/ |
 
 </content>

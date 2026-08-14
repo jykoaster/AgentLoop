@@ -108,24 +108,25 @@ python -m AgentLoop.main --node review "任務描述"
 
 完整工作流跑到 `human_confirm` 時會暫停，在終端機顯示規劃摘要與 TASK 清單，輸入 `y` 才會繼續往下執行。
 
-執行過程中，`analyze_plan` 第一次進行初始規劃時會先在終端機詢問規劃文件的檔名（不含副檔名）：直接輸入想要的檔名即可自訂 `docs/superpowers/plans/<檔名>.md`；若直接按 Enter 留空，則改用當時的 git branch 名稱作為檔名。此值會沿用到同一個任務後續的重新規劃／依人工意見調整計畫，不會重複問、也不會重新命名既有檔案。
+執行過程中，`analyze_plan` 第一次進行初始規劃時會先在終端機詢問 OpenSpec change 名稱（kebab-case）：直接輸入想要的名稱即可，Claude 會據此在目標專案下建立 `openspec/changes/<名稱>/`；若直接按 Enter 留空，則改用當時目標專案的 git branch 名稱作為 change 名稱。此值會沿用到同一個任務後續的重新規劃／依人工意見調整計畫，不會重複問、也不會重新命名既有 change。
+
+規格文件遵照 [OpenSpec](https://github.com/Fission-AI/OpenSpec) 的 change/spec-delta 規則，寫在**目標專案**（不是 AgentLoop 這個 repo）下的 `openspec/changes/<change 名稱>/`（`proposal.md`/`design.md`/`tasks.md`/`specs/<domain>/spec.md`）。目標專案第一次被處理時，若尚未有 `openspec/` 目錄，`analyze_plan` 會自動執行一次 `openspec init` bootstrap，不需要手動介入；`openspec` CLI 已由 Dockerfile 自動安裝在容器內。審查通過後，最後一個節點會呼叫 `openspec archive` 把這次的規格差異併入目標專案持久的 `openspec/specs/`，跨任務累積成完整的行為規格。
 
 ---
 
 ## Agent 流程簡介
 
-四個節點依序（含審查失敗的重試迴圈）串接，狀態透過同一個 `AgentState` 字典在節點間傳遞：
+五個節點依序（含審查失敗的重試迴圈）串接，狀態透過同一個 `AgentState` 字典在節點間傳遞：
 
 | 節點            | 角色       | 說明                                                                                                          |
 | --------------- | ---------- | ------------------------------------------------------------------------------------------------------------- |
-| `analyze_plan`  | 規劃 Agent | 讀取任務與目標專案程式碼，必要時互動式提問釐清需求，輸出結構化 TASK 清單與規格文件                            |
+| `analyze_plan`  | 規劃 Agent | 讀取任務與目標專案程式碼，必要時互動式提問釐清需求，輸出結構化 TASK 清單與 OpenSpec change 規格文件           |
 | `human_confirm` | 人工確認閘 | 顯示計畫摘要，等待使用者輸入 `y` 確認才放行；也可輸入修改意見打回重新規劃，或直接中止                         |
-| `execute`       | 執行 Agent | 依序完成計畫中的每個 TASK：改程式碼、同步商業邏輯文件、跑測試並修復失敗                                       |
+| `execute`       | 執行 Agent | 依序完成計畫中的每個 TASK：改程式碼、同步商業邏輯文件、跑測試並修復失敗、勾選 tasks.md 對應項目               |
 | `review`        | 審查 Agent | 唯讀方式比對 `git diff HEAD`，從 Standards（是否符合專案規範）與 Spec（是否符合規格）兩軸審查，判定是否可合併 |
+| `archive_change`| 收尾（純 Python） | review 通過後，呼叫 `openspec archive` 把這次的規格差異併入目標專案持久的 `openspec/specs/`；失敗只印警告，不影響流程結束 |
 
-審查只有在發現**嚴重影響功能**的問題時（核心邏輯錯誤、功能無法正常運作、架構根本偏差等）才自動標記「重寫」或「修補」、直接回到 `analyze_plan` 重新規劃；其餘不影響功能的修改建議會逐條列出，在終端機讓使用者選擇要修哪幾條（或全部不修，直接放行），只有選中至少一條才會回到 `analyze_plan` 針對選中的建議重新規劃。重新規劃後再次經過人工確認才重跑 `execute` → `review`，最多重試 3 輪，超過即強制結束。
-
-任務剛開始、進入第一次 `analyze_plan` 時，終端機會先問一次規劃文件檔名（可直接按 Enter 留空，改用目前 git branch 名稱），之後同一個任務的重新規劃／依人工意見調整計畫都會沿用這個檔名，不會重複問、也不會重新命名。
+審查只有在發現**嚴重影響功能**的問題時（核心邏輯錯誤、功能無法正常運作、架構根本偏差等）才自動標記「重寫」或「修補」、直接回到 `analyze_plan` 重新規劃；其餘不影響功能的修改建議會逐條列出，在終端機讓使用者選擇要修哪幾條（或全部不修，直接放行），只有選中至少一條才會回到 `analyze_plan` 針對選中的建議重新規劃。重新規劃後再次經過人工確認才重跑 `execute` → `review`，最多重試 3 輪，超過即強制結束（且不會 archive）。
 
 ![image](https://hackmd.io/_uploads/BJrOA-xLGx.png)
 ![image](https://hackmd.io/_uploads/r1DKCZxLGl.png)

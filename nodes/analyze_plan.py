@@ -1,3 +1,4 @@
+import os
 import re
 import sys
 import time
@@ -5,7 +6,7 @@ from datetime import datetime
 from ..state import AgentState
 from ..claude_runner import call_claude, format_usage_stats, QUESTION_MARKER
 from ..skill_loader import build_skills_block
-from ..project_context import build_project_docs_hint
+from ..project_context import build_project_docs_hint, REPO_ROOT
 
 _SKILLS = [
     "grill-with-docs",
@@ -56,54 +57,138 @@ QUESTION: <你的問題>
 - 輸出後立即結束本輪回應，等待使用者回覆後再繼續
 - 當 review 標記的每個問題點都已確認完畢，才可以繼續進行後續流程與最終輸出（此後不得再輸出 QUESTION）"""
 
-_SPEC_TEMPLATE = """```markdown
-# [Feature/Fix Name] 需求與設計規格書
+_OPENSPEC_ARTIFACT_RULES = """## OpenSpec 產出規則（規格文件的實際格式）
 
-**Date**: <<TODAY>>
-**Scope**: `受影響的目錄/檔案結構`
+規格文件不寫成單一 Markdown 檔案，而是遵照 OpenSpec 的 change 資料夾格式，寫在目標專案的
+`openspec/changes/<change-name>/` 底下：
 
-## Problem Statement
-<!-- 說明現有系統的痛點、Bug 或新需求背景，明確列出要解決的問題項目 -->
+### proposal.md
+```markdown
+# Proposal: <Feature/Fix Name>
 
-## Solution
-<!-- 高階解決方案概述，包含驗證規則調整、UI 變更、錯誤處理機制等 -->
+## Intent
+<為什麼要做這個改動、要解決的問題>
 
-## User Stories
-<!-- 條列各角色（使用者、系統管理員等）的操作情境與期望結果 -->
+## Scope
+In scope:
+- <本次要做的事項>
 
-## Implementation Decisions
-<!-- 詳細的技術決策與架構邏輯 -->
-### 影響模組
-- `受影響檔案 A`: 具體修改內容
-- `受影響檔案 B`: 具體修改內容
+Out of scope:
+- <明確排除、避免範疇蔓延的事項；沒有則寫「無」>
 
-### 關鍵機制與流程
-- **單一真理來源 (SOT)**: 前端 UI 與 Validator 的分工
-- **錯誤處理流 (Error Handling Flow)**: API 錯誤與前端 Validation 的分流邏輯
-- **i18n 多語系策略**: 新增/修改 key 的管理方式
+## Approach
+<高階解決方案概述>
+```
+
+### design.md（本專案規定必寫，不採用 OpenSpec 預設「小改動可略過 design.md」的作法）
+```markdown
+# Design: <Feature/Fix Name>
+
+## Technical Approach
+<技術實作方式>
+
+## Architecture Decisions
+### Decision: <決策名稱>
+<決策內容與理由；沒有值得記錄的架構決策則寫「無」>
 
 ## Testing Strategy
-<!-- 定義如何驗證此變更，不包含實際執行 Log -->
 ### Seam（測試接縫）
-- **首選接縫**: 測試對象與測試方法（如單元測試）
-- **次要接縫**: Vue Test Utils / Component 層級驗證
+- **首選接縫**：<測試對象與測試方法>
+- **次要接縫**：<次要驗證方式，沒有則寫「無」>
 
 ### 測試案例矩陣（Test Matrix）
 | 輸入值 / 情境 | 預期結果 | 斷言 Target / Reject Key |
 | --- | --- | --- |
-| 案例 1 | ... | ... |
-
-## Out of Scope
-<!-- 明確指出本次開發「不做」的事項，避免範疇蔓延 -->
+| <案例> | ... | ... |
 
 ## Technical Debt & Follow-up Notes
-<!-- 需追蹤的技術債（如 ESLint 警告、Google Sheet 同步等） -->
+<需追蹤的技術債；沒有則寫「無」>
 ```
+「Testing Strategy」「Technical Debt & Follow-up Notes」兩個小節必須保留標題，沒有內容也要填「無」，不可留白或整段刪除。
 
-**章節結構規則：**
-- 上方 `#`/`##`/`###` 標題結構（含「影響模組」「關鍵機制與流程」「Seam（測試接縫）」「測試案例矩陣（Test Matrix）」四個固定小節）**必須完整保留**，不可增減或改名
-- 每個章節（含四個固定小節）都必須填寫內容；某章節在本次任務沒有內容時，仍須保留該標題並填寫「無」，不可留白或整個刪除
-- 標題底下的 `<!-- -->` 為填寫指引、非文件正式內容；「SOT / Error Handling Flow / i18n 多語系策略」「首選/次要接縫」「案例 1」與「受影響檔案 A/B」等**都只是範例內容**，用來示範這個小節通常會寫什麼——實際要寫的是本次任務真正涉及的模組、機制、測試情境，不是照抄範例文字"""
+### specs/<domain>/spec.md（delta，可能有多個 domain，各自建一個檔案）
+只描述本次「改了什麼」，不是整份系統規格：
+```markdown
+## ADDED Requirements
+
+### Requirement: <名稱>
+The system SHALL/MUST <一個明確、可觀察的行為>。
+
+#### Scenario: <情境名稱>
+- GIVEN <前提>
+- WHEN <觸發>
+- THEN <結果>
+
+## MODIFIED Requirements
+（改變既有行為時使用，須包含完整的新版本內容 + 一行說明改了什麼）
+
+## REMOVED Requirements
+（行為被移除時使用，須說明原因）
+```
+規則：
+- 每個 Requirement 只講一件事、一個 SHALL/MUST/SHOULD；不要把好幾個「而且」塞進同一個 Requirement
+- 每個 Requirement 至少要有一個 Scenario；Scenario 要測到具體情境（含邊界/錯誤情況），不是重述 Requirement
+- 若這是該 domain 第一次建立 spec（`openspec/specs/<domain>/` 目前不存在），在 delta 檔案最上面加一段 `## Purpose`（一兩句話說明這個 domain 是做什麼的）；domain 已存在則不需要
+- 不需要獨立的「User Stories」章節——Scenario 已經是驗收條件的正式化版本
+- 若本次任務純粹是重構/文件/設定調整、完全沒有外部可觀察行為變化，可以在該 change 的 `.openspec.yaml` 加 `skip_specs: true` 並略過 specs delta；若 REMOVED 移除了某個 domain 的最後一個 Requirement，需在 `.openspec.yaml` 加 `retire_capabilities: true` 才能讓 archive 一併刪除該 domain 的 spec 檔
+
+### tasks.md
+```markdown
+# Tasks
+
+## 1. <群組名稱>
+- [ ] 1.1 <具體任務>
+- [ ] 1.2 <具體任務>
+
+## 2. <群組名稱>
+- [ ] 2.1 <具體任務>
+```
+- 用階層編號（1.1、1.2...），依實作順序排列
+- 涉及新增或修改行為的任務，須額外安排一個對應的「撰寫／更新測試」任務（優先在既有測試 seam 上以 tdd skill 的紅-綠循環進行）；純文件、設定調整或不改變行為的重構可不需要
+- 是否需要「更新文件」任務，依該任務所屬專案的 CLAUDE.md / AGENT.md 判斷：若說明檔要求同步維護 docs/ 下的商業邏輯說明文件，安排對應任務（通常放在最後）；未提及此類慣例時不強制新增
+- 這份檔案會被執行 Agent 逐項勾選、被審查 Agent 讀取確認完成度，內容必須跟你在最終輸出的分析摘要一致
+
+### 完成前的驗證
+用 Bash 執行 `openspec validate <change-name> --json --strict`；有 error 等級的問題就修正對應檔案後重新驗證，直到沒有 error 為止（warning 可視情況保留、不必為了消除 warning 硬湊內容）。"""
+
+_CHANGE_SETUP_INITIAL = """## 建立 OpenSpec Change（規格文件的實際存放位置）
+
+1. 依 <<PROJECT_CONTEXT>> 判斷本次任務主要涉及哪一個目標專案目錄，記下其相對於 workspace root
+   的路徑（例如 `my-project`）——這個路徑之後要原封不動地放進最終輸出的 `PROJECT_DIR:` 一行
+2. 用 Bash 檢查 `<目標專案>/openspec/` 是否存在；不存在的話執行一次性 bootstrap：
+   `cd <目標專案> && openspec init --tools claude --force`
+3. 決定 change name（必須是 kebab-case：小寫字母、數字、單一連字號，不可有底線／大寫／連續連字號／開頭結尾連字號）：
+   - 若使用者於任務開始時提供了自訂名稱，本次為：<<CHANGE_NAME_VALUE>>，直接以此作為 change name
+   - 若上方顯示為空（使用者未提供），改用 `git -C <目標專案> branch --show-current` 取得目標專案
+     目前的 git branch 名稱，轉成 kebab-case 作為 change name
+4. 執行 `cd <目標專案> && openspec new change <change-name>` 建立 change 資料夾
+5. 依下方「OpenSpec 產出規則」用 Write 在該 change 資料夾底下寫 proposal.md / specs/**/*.md /
+   design.md / tasks.md，並依「完成前的驗證」跑 `openspec validate` 到通過"""
+
+_CHANGE_SETUP_REPLAN = """## 更新既有的 OpenSpec Change
+
+本次沿用先前已建立的 change，不需要 `openspec init` 或 `openspec new change`：
+- 目標專案：<<PROJECT_DIR_VALUE>>
+- Change name：<<CHANGE_NAME_VALUE>>
+- Change 位置：`<<PROJECT_DIR_VALUE>>/openspec/changes/<<CHANGE_NAME_VALUE>>/`
+
+直接在這個資料夾下用 Read 讀取、Edit/Write 更新 proposal.md / specs/**/*.md / design.md /
+tasks.md（維持既有內容裡跟本次無關的部分，只改需要調整的段落），完成後依「完成前的驗證」
+重新跑 `openspec validate` 到通過。
+
+若本輪為「重寫」等級：完成 rollback 後，同時把 tasks.md 所有 `- [x]` checkbox 重設回 `- [ ]`
+（重寫代表要重新執行整份計畫）；「修補」等級不動 checkbox。"""
+
+_CHANGE_SETUP_HUMAN_REVISE = """## 更新既有的 OpenSpec Change
+
+本次沿用先前已建立的 change，不需要 `openspec init` 或 `openspec new change`：
+- 目標專案：<<PROJECT_DIR_VALUE>>
+- Change name：<<CHANGE_NAME_VALUE>>
+- Change 位置：`<<PROJECT_DIR_VALUE>>/openspec/changes/<<CHANGE_NAME_VALUE>>/`
+
+直接在這個資料夾下用 Read 讀取、Edit/Write 更新 proposal.md / specs/**/*.md / design.md /
+tasks.md（維持既有內容裡跟本次修改意見無關的部分，只改需要調整的段落），完成後依
+「完成前的驗證」重新跑 `openspec validate` 到通過。"""
 
 _SYSTEM_INITIAL = f"""你是一位資深全端工程師，負責「分析與規劃」階段。
 
@@ -113,36 +198,26 @@ _SYSTEM_INITIAL = f"""你是一位資深全端工程師，負責「分析與規�
 
 1. 用 Read/Glob/Grep 閱讀相關程式碼，找出需修改的位置與潛在衝突
 2. 依 grill-with-docs 對本任務進行互動式釐清（見下方「提問規則」），過程中依 domain-modeling 規則即時更新 CONTEXT.md / docs/adr/
-3. 共識達成後，依 to-spec 的探索流程整理規格文件，但規格文件的**範本與檔名規則改用下方指定版本**（覆蓋 to-spec 原本的範本與檔名慣例）：
-   - 探索程式碼以確認測試 seam，優先使用既有 seam、避免新增
-   - 本專案未串接 issue tracker，略過 to-spec 中「發布並標記 triage label」的步驟
-   - 依下方「規格文件範本」撰寫
-   - 用 Write 工具存到 docs/superpowers/plans/<filename>.md：
-     - 若使用者於任務開始時提供了自訂檔名，本次為：<<PLAN_FILENAME_VALUE>>，直接以此作為 <filename>（不含副檔名）
-     - 若上方顯示為空（使用者未提供自訂檔名），改用 Bash 執行 `git branch --show-current`（或 `git rev-parse --abbrev-ref HEAD`）取得本次修改所屬目標專案的目前 git branch 名稱作為 <filename>；若含 `/` 等不適合檔名的字元，替換為 `-`
+3. 共識達成後，依下方「建立 OpenSpec Change」與「OpenSpec 產出規則」完成規格文件
+   （本專案未串接 issue tracker，略過 to-spec 中「發布並標記 triage label」的步驟；探索程式碼以確認測試 seam，優先使用既有 seam、避免新增）
 
-## 規格文件範本
+{_CHANGE_SETUP_INITIAL}
 
-{_SPEC_TEMPLATE}
+{_OPENSPEC_ARTIFACT_RULES}
 
-## 執行步驟（續）
-
-4. 存檔後，將規格轉譯為可執行 TASK 清單，在最終輸出中附上以下摘要（供後續 Agent 使用）：
+## 最終輸出格式
 
 ## 分析
 [2-5 行摘要：需求、涉及檔案、潛在問題]
 
 ## 計畫
+（已寫入 tasks.md，摘要如下，供人工確認時快速瀏覽）
 TASK 1: [操作] [路徑] — [說明]
 TASK 2: [操作] [路徑] — [說明]
 ...
 
-規則：
-- 每個 TASK 對應規格文件中的一個可執行步驟，讓執行 Agent 可逐一嚴格處理
-- 涉及新增或修改行為的 TASK，須額外安排一個對應的「撰寫／更新測試」TASK（優先在既有測試 seam 上以 tdd skill 的紅-綠循環進行）；純文件、設定調整或不改變行為的重構可不需要
-- 是否需要新增「更新文件」TASK，依該任務所屬專案的 CLAUDE.md / AGENT.md（或其他說明檔）判斷：
-  若說明檔要求同步維護 docs/ 下的商業邏輯說明文件，安排對應的文件更新 TASK（通常放在最後，涵蓋範圍依說明檔慣例）；
-  說明檔未提及此類慣例時，不強制新增文件 TASK
+PROJECT_DIR: <目標專案相對 workspace root 的路徑>
+CHANGE_NAME: <kebab-case change name>
 
 {_QUESTION_PROTOCOL}
 
@@ -168,17 +243,16 @@ _SYSTEM_REPLAN = f"""你是一位資深全端工程師，負責「重新分析�
    - 若 git stash 失敗或沒有 stash 可用，嘗試 `git checkout -- .` 還原已修改的追蹤檔案
    - 確認 rollback 完成後再繼續
 2. 重新閱讀現有程式碼；依下方「提問規則」針對審查結果逐點 grill 確認，不需重新進行完整的 grill-with-docs 釐清或文件同步
-3. 依 to-spec 的探索流程、下方「規格文件範本」重新撰寫規格文件，取代 `docs/superpowers/plans/` 下的舊規格文件——
-   **檔名維持不變**（沿用舊規格文件的檔名，不重新命名）；略過發布 issue tracker 的步驟，改用 Write 存檔
+3. 依下方「更新既有的 OpenSpec Change」與「OpenSpec 產出規則」重新撰寫規格文件
 
 ### 若為「修補」：
 1. 不需要 rollback，保留已完成的修改
 2. 閱讀現有程式碼，精確定位需要修正的地方；依下方「提問規則」針對審查結果逐點 grill 確認
-3. 依下方「規格文件範本」更新既有規格文件的相關段落（不必整份重寫，但維持範本的章節結構，不可整段刪除某章節）
+3. 依下方「更新既有的 OpenSpec Change」與「OpenSpec 產出規則」更新規格文件相關段落（不必整份重寫，但維持章節結構，不可整段刪除某章節）
 
-## 規格文件範本
+{_CHANGE_SETUP_REPLAN}
 
-{_SPEC_TEMPLATE}
+{_OPENSPEC_ARTIFACT_RULES}
 
 ## 輸出格式
 
@@ -188,16 +262,10 @@ _SYSTEM_REPLAN = f"""你是一位資深全端工程師，負責「重新分析�
 [2-5 行摘要：問題根因、涉及檔案、修正方向]
 
 ## 計畫
+（已更新 tasks.md，摘要如下，供人工確認時快速瀏覽）
 TASK 1: [操作] [路徑] — [說明]
 TASK 2: [操作] [路徑] — [說明]
 ...
-
-規則：
-- 每個 TASK 對應規格文件中的一個可執行步驟，讓執行 Agent 可逐一嚴格處理
-- 涉及新增或修改行為的 TASK，須額外安排一個對應的「撰寫／更新測試」TASK（優先在既有測試 seam 上以 tdd skill 的紅-綠循環進行）；純文件、設定調整或不改變行為的重構可不需要
-- 是否需要新增「更新文件」TASK，依該任務所屬專案的 CLAUDE.md / AGENT.md（或其他說明檔）判斷：
-  若說明檔要求同步維護 docs/ 下的商業邏輯說明文件，安排對應的文件更新 TASK（通常放在最後）；
-  說明檔未提及此類慣例時，不強制新增文件 TASK
 
 {_REVIEW_QUESTION_PROTOCOL}
 
@@ -219,13 +287,12 @@ _SYSTEM_HUMAN_REVISE = f"""你是一位資深全端工程師，負責「根據�
 1. 仔細理解使用者的修改意見；若意見不夠明確，依下方「提問規則」提問確認，不要自行臆測
 2. 視需要用 Read/Glob/Grep 重新閱讀相關程式碼
 3. 若修改意見牽涉到詞彙或架構決策的變更，依 domain-modeling 更新 CONTEXT.md / docs/adr/
-4. 依下方「規格文件範本」更新 docs/superpowers/plans/ 下的規格文件——**檔名維持不變**（不重新命名），
-   維持範本的章節結構，不可整段刪除某章節
-5. 存檔後，在最終輸出中附上調整後的摘要與 TASK 清單
+4. 依下方「更新既有的 OpenSpec Change」與「OpenSpec 產出規則」更新規格文件（維持章節結構，不可整段刪除某章節）
+5. 完成後在最終輸出中附上調整後的摘要
 
-## 規格文件範本
+{_CHANGE_SETUP_HUMAN_REVISE}
 
-{_SPEC_TEMPLATE}
+{_OPENSPEC_ARTIFACT_RULES}
 
 ## 輸出格式
 
@@ -233,16 +300,10 @@ _SYSTEM_HUMAN_REVISE = f"""你是一位資深全端工程師，負責「根據�
 [2-5 行摘要：根據人工意見的修正方向與涉及檔案]
 
 ## 計畫
+（已更新 tasks.md，摘要如下，供人工確認時快速瀏覽）
 TASK 1: [操作] [路徑] — [說明]
 TASK 2: [操作] [路徑] — [說明]
 ...
-
-規則：
-- 每個 TASK 對應規格文件中的一個可執行步驟，讓執行 Agent 可逐一嚴格處理
-- 涉及新增或修改行為的 TASK，須額外安排一個對應的「撰寫／更新測試」TASK（優先在既有測試 seam 上以 tdd skill 的紅-綠循環進行）；純文件、設定調整或不改變行為的重構可不需要
-- 是否需要新增「更新文件」TASK，依該任務所屬專案的 CLAUDE.md / AGENT.md（或其他說明檔）判斷：
-  若說明檔要求同步維護 docs/ 下的商業邏輯說明文件，安排對應的文件更新 TASK（通常放在最後）；
-  說明檔未提及此類慣例時，不強制新增文件 TASK
 
 {_QUESTION_PROTOCOL}
 
@@ -258,6 +319,53 @@ _MAX_QUESTIONS = 15
 
 
 _QUESTION_LINE_RE = re.compile(r"^\s*" + re.escape(QUESTION_MARKER), re.MULTILINE)
+_PROJECT_DIR_RE = re.compile(r"^\s*PROJECT_DIR:\s*(.+?)\s*$", re.MULTILINE)
+_CHANGE_NAME_RE = re.compile(r"^\s*CHANGE_NAME:\s*(.+?)\s*$", re.MULTILINE)
+_TASK_CHECKBOX_RE = re.compile(r"^-\s\[[ xX]\]\s*(.+)$", re.MULTILINE)
+
+_KEBAB_INVALID_RE = re.compile(r"[^a-z0-9-]+")
+_MULTI_HYPHEN_RE = re.compile(r"-{2,}")
+
+
+def _sanitize_change_name(raw: str) -> str:
+    """轉成 OpenSpec 要求的 kebab-case：小寫字母/數字/單一連字號，去除底線、空白、大寫、
+    連續連字號與開頭結尾連字號。"""
+    s = raw.strip().lower()
+    s = re.sub(r"[\s_]+", "-", s)
+    s = _KEBAB_INVALID_RE.sub("", s)
+    s = _MULTI_HYPHEN_RE.sub("-", s)
+    return s.strip("-")
+
+
+def _read_change_artifacts(project_dir: str, change_name: str, raw: str) -> tuple[str, list[str]]:
+    """規格文件的事實來源是 OpenSpec CLI 自己會驗證的檔案，不是 Claude 聊天回覆的摘要文字：
+    analysis 讀 proposal.md 全文，plan 讀 tasks.md 的 checkbox 清單。任一檔案讀不到時退回舊有的
+    「regex Claude 最終輸出文字」方式，避免整個節點失敗。"""
+    change_dir = os.path.join(REPO_ROOT, project_dir, "openspec", "changes", change_name)
+
+    analysis = ""
+    try:
+        with open(os.path.join(change_dir, "proposal.md"), encoding="utf-8") as f:
+            analysis = f.read().strip()
+    except OSError:
+        pass
+    if not analysis:
+        analysis_match = re.search(r"## 分析\n([\s\S]*?)(?=## 計畫|$)", raw)
+        analysis = analysis_match.group(1).strip() if analysis_match else raw[:500]
+
+    plan: list[str] = []
+    try:
+        with open(os.path.join(change_dir, "tasks.md"), encoding="utf-8") as f:
+            plan = _TASK_CHECKBOX_RE.findall(f.read())
+    except OSError:
+        pass
+    if not plan:
+        tasks = re.findall(r"TASK\s*\d+:\s*(.+)", raw)
+        if not tasks:
+            tasks = re.findall(r"STEP\s*\d+:\s*(.+)", raw)
+        plan = tasks if tasks else [raw]
+
+    return analysis, plan
 
 
 def _is_question(text: str) -> bool:
@@ -309,20 +417,26 @@ def _run_with_grilling(prompt: str, tools: str, model: str, timeout: int):
         prompt = answer if answer else "請採用你自己建議的答案，並繼續下一個問題或流程。"
 
 
-def _ask_plan_filename() -> str:
-    """任務開始時（僅初始規劃）詢問使用者規劃文件自訂檔名，留空則由 Claude 改用 git branch 名稱。
-    非互動式環境或使用者直接按 Enter／中止時，留空繼續。
-    """
-    print(f"\n{_YELLOW}  [分析+規劃 Agent] 請輸入規劃文件檔名（不含副檔名，可直接按 Enter 改用目前 git branch 名稱）：{_RESET}", flush=True)
+def _ask_change_name() -> str:
+    """任務開始時（僅初始規劃）詢問使用者 OpenSpec change 名稱，留空則由 Claude 改用目標專案的
+    git branch 名稱。非互動式環境或使用者直接按 Enter／中止時，留空繼續。"""
+    print(
+        f"\n{_YELLOW}  [分析+規劃 Agent] 請輸入 OpenSpec change 名稱"
+        f"（kebab-case，可直接按 Enter 改用目標專案目前 git branch 名稱）：{_RESET}",
+        flush=True,
+    )
     if not sys.stdin.isatty():
-        print(f"{_YELLOW}  非互動式環境，規劃文件檔名留空，改用 branch name{_RESET}\n", flush=True)
+        print(f"{_YELLOW}  非互動式環境，change 名稱留空，改用 branch name{_RESET}\n", flush=True)
         return ""
     try:
         answer = input(f"{_YELLOW}  > {_RESET}").strip()
     except (EOFError, KeyboardInterrupt):
-        print(f"\n{_YELLOW}  已跳過，規劃文件檔名留空，改用 branch name{_RESET}\n", flush=True)
+        print(f"\n{_YELLOW}  已跳過，change 名稱留空，改用 branch name{_RESET}\n", flush=True)
         return ""
-    return answer
+    sanitized = _sanitize_change_name(answer)
+    if answer and not sanitized:
+        print(f"{_YELLOW}  輸入內容正規化後為空，視為未提供，改用 branch name{_RESET}\n", flush=True)
+    return sanitized
 
 
 def analyze_plan_node(state: AgentState) -> dict:
@@ -332,7 +446,8 @@ def analyze_plan_node(state: AgentState) -> dict:
     is_replan = bool(review_result)
     is_human_revise = bool(human_feedback) and not is_replan
 
-    plan_filename = state.get("plan_filename", "")
+    change_name = state.get("change_name", "")
+    project_dir = state.get("project_dir", "")
 
     model = _MODEL
     if is_replan:
@@ -344,8 +459,8 @@ def analyze_plan_node(state: AgentState) -> dict:
     else:
         label = "初始規劃"
         tools = "plan"
-        if not plan_filename:
-            plan_filename = _ask_plan_filename()
+        if not change_name:
+            change_name = _ask_change_name()
 
     print(f"\n{_BANNER}{'═'*50}\n  [分析+規劃 Agent] 開始 — {label}\n{'═'*50}{_RESET}\n", flush=True)
 
@@ -367,6 +482,8 @@ def analyze_plan_node(state: AgentState) -> dict:
                 .replace("<<PROJECT_CONTEXT>>", project_context)
                 .replace("<<REVIEW_CONTEXT>>", review_ctx)
                 .replace("<<REVIEW_LEVEL>>", review_level or "修補")
+                .replace("<<PROJECT_DIR_VALUE>>", project_dir)
+                .replace("<<CHANGE_NAME_VALUE>>", change_name)
                 .replace("<<TODAY>>", today)
             )
         elif is_human_revise:
@@ -374,13 +491,15 @@ def analyze_plan_node(state: AgentState) -> dict:
                 _SYSTEM_HUMAN_REVISE
                 .replace("<<PROJECT_CONTEXT>>", project_context)
                 .replace("<<HUMAN_FEEDBACK>>", human_feedback)
+                .replace("<<PROJECT_DIR_VALUE>>", project_dir)
+                .replace("<<CHANGE_NAME_VALUE>>", change_name)
                 .replace("<<TODAY>>", today)
             )
         else:
             system = (
                 _SYSTEM_INITIAL
                 .replace("<<PROJECT_CONTEXT>>", project_context)
-                .replace("<<PLAN_FILENAME_VALUE>>", plan_filename or "（未提供，留空）")
+                .replace("<<CHANGE_NAME_VALUE>>", change_name or "（未提供，留空）")
                 .replace("<<TODAY>>", today)
             )
 
@@ -388,7 +507,7 @@ def analyze_plan_node(state: AgentState) -> dict:
         result = _run_with_grilling(prompt, tools=tools, model=model, timeout=300)
     except Exception as e:
         print(f"{_RED}  [分析+規劃 Agent] 發生例外：{e}{_RESET}\n", flush=True)
-        return {"status": "error", "analysis": f"分析階段發生例外：{e}", "plan": [], "plan_filename": plan_filename}
+        return {"status": "error", "analysis": f"分析階段發生例外：{e}", "plan": [], "change_name": change_name, "project_dir": project_dir}
 
     elapsed = time.monotonic() - start
 
@@ -398,16 +517,35 @@ def analyze_plan_node(state: AgentState) -> dict:
 
     if result.is_error:
         print(f"{_RED}  [分析+規劃 Agent] Claude 執行失敗：{result.text}{_RESET}\n", flush=True)
-        return {"status": "error", "analysis": result.text, "plan": [], "plan_filename": plan_filename}
+        return {"status": "error", "analysis": result.text, "plan": [], "change_name": change_name, "project_dir": project_dir}
 
     raw = result.text
-    tasks = re.findall(r"TASK\s*\d+:\s*(.+)", raw)
-    if not tasks:
-        tasks = re.findall(r"STEP\s*\d+:\s*(.+)", raw)
-    plan = tasks if tasks else [raw]
 
-    analysis_match = re.search(r"## 分析\n([\s\S]*?)(?=## 計畫|$)", raw)
-    analysis = analysis_match.group(1).strip() if analysis_match else raw[:500]
+    parsed_project_dir = _PROJECT_DIR_RE.search(raw)
+    if parsed_project_dir:
+        project_dir = parsed_project_dir.group(1).strip()
+
+    parsed_change_name = _CHANGE_NAME_RE.search(raw)
+    if parsed_change_name:
+        sanitized = _sanitize_change_name(parsed_change_name.group(1))
+        if sanitized:
+            change_name = sanitized
+
+    if not project_dir or not change_name:
+        print(
+            f"{_RED}  [分析+規劃 Agent] 未能取得 PROJECT_DIR/CHANGE_NAME，"
+            f"無法定位 OpenSpec change 位置{_RESET}\n",
+            flush=True,
+        )
+        return {
+            "status": "error",
+            "analysis": raw,
+            "plan": [],
+            "change_name": change_name,
+            "project_dir": project_dir,
+        }
+
+    analysis, plan = _read_change_artifacts(project_dir, change_name, raw)
 
     return {
         "analysis": analysis,
@@ -417,5 +555,6 @@ def analyze_plan_node(state: AgentState) -> dict:
         "review_level": "",
         "review_blocking": False,
         "human_feedback": "",
-        "plan_filename": plan_filename,
+        "change_name": change_name,
+        "project_dir": project_dir,
     }
