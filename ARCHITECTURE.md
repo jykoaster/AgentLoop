@@ -20,6 +20,8 @@ AgentLoop/
 ├── requirements.txt
 ├── Dockerfile
 ├── docker-compose.yml
+├── .claude/
+│   └── skills/               # 專案內建 Skill（見下方「Skill 系統作為知識注入」）
 ├── nodes/
 │   ├── analyze_plan.py     # 規劃 / 重新規劃 Agent 節點
 │   ├── human_confirm.py    # 人工確認中斷點
@@ -389,7 +391,7 @@ SUGGESTION 2: [建議內容與理由]
 
 ### 5. Skill 系統作為知識注入
 
-`skill_loader.py` 從 `~/.claude/skills/` 讀取 Claude Code Skill 文件，以完整內容或僅列名稱的方式注入系統提示。白名單 `_FULL_CONTENT_SKILLS`（`grill-with-docs`、`grilling`、`domain-modeling`、`to-spec`、`implement`、`code-review`）會注入完整內容——這些 skill 設有 `disable-model-invocation`，Claude 不會自動觸發，必須完整注入才能正確遵循其流程（提問方式、文件存放規則、平行 sub-agent 呼叫方式等）；其餘只列名稱以節省 token，由 Agent 依偵測到的技術棧自行選用。
+`skill_loader.py` 讀取 Claude Code Skill 文件，以完整內容或僅列名稱的方式注入系統提示。查找順序為專案內建的 `AgentLoop/.claude/skills/<name>/` 優先，找不到才 fallback 到使用者本機的 `~/.claude/skills/<name>/`——本專案用到的 7 個 skill（`grill-with-docs`、`grilling`、`domain-modeling`、`to-spec`、`tdd`、`implement`、`code-review`）已直接複製進 `AgentLoop/.claude/skills/`，讓專案自帶所需內容、不依賴操作者本機是否裝有這些 skill；fallback 路徑保留給其餘依技術棧動態選用、專案未內建的 skill（例如 `vue-best-practices`、`nuxt-vitest-msw`）。白名單 `_FULL_CONTENT_SKILLS`（`grill-with-docs`、`grilling`、`domain-modeling`、`to-spec`、`implement`、`code-review`）會注入完整內容——這些 skill 設有 `disable-model-invocation`，Claude 不會自動觸發，必須完整注入才能正確遵循其流程（提問方式、文件存放規則、平行 sub-agent 呼叫方式等）；其餘只列名稱以節省 token，由 Agent 依偵測到的技術棧自行選用。
 
 ### 6. 反饋迴圈
 
@@ -478,7 +480,7 @@ MODEL_IDS = {
 | **Claude Code CLI** (`@anthropic-ai/claude-code`) | 以 `claude -p` 啟動 Agent，使用本地身份驗證（不需要 API Key）；容器內有獨立於 host 的登入狀態，見下方「Claude 設定掛載」 |
 | **stream-json output**                            | 即時串流 JSON 事件，支援 `assistant`、`tool_use`、`tool_result`、`result` 類型 |
 | **Built-in Tools**                                | Read、Write、Edit、Bash、Glob、Grep、Task（Claude Code 原生工具）              |
-| **Skill System**                                  | `~/.claude/skills/` 中的 Markdown 文件，動態注入 Agent 系統提示                |
+| **Skill System**                                  | `AgentLoop/.claude/skills/`（專案內建，優先）或 `~/.claude/skills/`（fallback）中的 Markdown 文件，動態注入 Agent 系統提示 |
 | **OpenSpec CLI** (`@fission-ai/openspec`)         | 規格文件遵照的 change/spec-delta 規則來源；`analyze_plan` 在 Claude 自己的 Bash 呼叫中用它 `init`/`new change`/`validate`，`archive_change` 節點用它 `archive`（詳見 `openspec_runner.py`）。同樣透過容器內的 Node.js 20 安裝 |
 
 ### 目標專案技術棧
@@ -494,7 +496,7 @@ AgentLoop 容器本身不跑 Docker daemon，而是讓容器內的 Docker CLI �
 | **Docker**                      | 以 `python:3.11-slim` 為基底，加裝 Node.js 20 執行 Claude Code CLI，並加裝 `docker-ce-cli` + `docker-compose-plugin`（僅 CLI，不含 daemon）                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
 | **Docker Compose 路徑掛載**     | AgentLoop 與目標專案一律以「與 host 相同的絕對路徑」掛載（`${HOST_WORKSPACE_ROOT}/AgentLoop:${HOST_WORKSPACE_ROOT}/AgentLoop`、`${HOST_WORKSPACE_ROOT}/${TARGET_PROJECT}:${HOST_WORKSPACE_ROOT}/${TARGET_PROJECT}`），而非重新映射到 `/workspace/...`。原因：宿主 daemon 幫目標專案建立 bind mount 時，用的是掛載路徑「字串本身」，該字串必須在宿主上真實存在，否則會掛到空目錄。目標專案資料夾名稱由 `.env` 的 `TARGET_PROJECT` 決定（目前範例值為 `cdn_frontend_vue`）；`project_context.py` 的動態偵測邏輯本身不寫死任何專案名稱。若要同時掛載多個目標專案，`.env` 目前只內建單一 `TARGET_PROJECT`，需自行擴充 `TARGET_PROJECT_2`、`TARGET_PROJECT_3`… 並在 `docker-compose.yml` 依樣新增對應的 volume 行（見 README） |
 | **`/var/run/docker.sock` 掛載** | `- /var/run/docker.sock:/var/run/docker.sock`，讓容器內 Docker CLI 連上宿主 daemon（DooD 的核心）                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
-| **Claude 設定掛載** | 分兩塊，刻意分開：(1) 登入狀態（`.claude/` 其餘內容、`.claude.json`）掛在容器專屬的 `agent_home` named volume（`- agent_home:/home/agent`），**不**與 host 共用——原因是若直接掛載 host 的 `~/.claude`，host 與容器內的 `claude` subprocess 會共用同一份 OAuth 憑證檔，兩邊同時使用時 token refresh 互搶，會導致容器內 node 執行到一半認證失效、或剛啟動時讀到寫入中的檔案顯示未登入；因此改為另外設定認證——首選在 host 執行 `claude setup-token`，將產出的 token 寫入 `.env` 的 `CLAUDE_CODE_OAUTH_TOKEN`（或改設 `ANTHROPIC_API_KEY`）；容器內互動式 `claude login` 仍可用但非首選，因為 `docker exec -it` 的嵌套 TTY 貼授權碼常因 paste 截斷或過期顯示 `Invalid code`。登入狀態隨 volume 持久化，容器重建不會遺失。(2) skills 內容（純靜態、無寫入需求）維持唯讀掛載自 host：`${HOME}/.claude/skills:/home/agent/.claude/skills:ro` 與 `${HOME}/.agents:/home/agent/.agents:ro`（`~/.claude/skills` 底下多為指向 `~/.agents/skills` 的符號連結，需一併掛載才能解析）。`working_dir: ${HOST_WORKSPACE_ROOT}` |
+| **Claude 設定掛載** | 分兩塊，刻意分開：(1) 登入狀態（`.claude/` 其餘內容、`.claude.json`）掛在容器專屬的 `agent_home` named volume（`- agent_home:/home/agent`），**不**與 host 共用——原因是若直接掛載 host 的 `~/.claude`，host 與容器內的 `claude` subprocess 會共用同一份 OAuth 憑證檔，兩邊同時使用時 token refresh 互搶，會導致容器內 node 執行到一半認證失效、或剛啟動時讀到寫入中的檔案顯示未登入；因此改為另外設定認證——首選在 host 執行 `claude setup-token`，將產出的 token 寫入 `.env` 的 `CLAUDE_CODE_OAUTH_TOKEN`（或改設 `ANTHROPIC_API_KEY`）；容器內互動式 `claude login` 仍可用但非首選，因為 `docker exec -it` 的嵌套 TTY 貼授權碼常因 paste 截斷或過期顯示 `Invalid code`。登入狀態隨 volume 持久化，容器重建不會遺失。(2) skills 內容：本專案用到的 skill 已直接複製進 `AgentLoop/.claude/skills/` 隨專案版控、不再依賴掛載即可運作；host 的 `${HOME}/.claude/skills:/home/agent/.claude/skills:ro` 與 `${HOME}/.agents:/home/agent/.agents:ro`（純靜態、無寫入需求）仍保留唯讀掛載，作為 `skill_loader.py` 的 fallback 來源，供 Agent 依偵測到的技術棧動態選用專案未內建的其他 skill（`~/.claude/skills` 底下多為指向 `~/.agents/skills` 的符號連結，需一併掛載才能解析）。`working_dir: ${HOST_WORKSPACE_ROOT}` |
 | **非 root 使用者**              | `agent` 使用者執行 `claude --dangerously-skip-permissions`（Claude Code 安全要求，禁止 root 下執行），並設定 `NOPASSWD` sudo 僅限執行 `/usr/bin/docker`——因為宿主掛入的 `docker.sock` 擁有者/群組由宿主環境決定，非 root 使用者常無法單靠 group 權限連線，故一律透過 sudo 執行 docker 指令                                                                                                                                                                                                                                                                                                                                                                                                                                |
 
 ---

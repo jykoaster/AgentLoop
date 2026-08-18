@@ -1,7 +1,13 @@
-"""從 ~/.claude/skills/ 讀取 skill 內容並注入到 prompt 中。"""
+"""讀取 skill 內容並注入到 prompt 中。
+
+優先讀取專案內建的 AgentLoop/.claude/skills/，讓專案自帶所需 skill、不依賴
+使用者本機設定；找不到時 fallback 到使用者本機的 ~/.claude/skills/。
+"""
 import os
 
-SKILLS_DIR = os.path.expanduser("~/.claude/skills")
+PROJECT_SKILLS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".claude", "skills")
+USER_SKILLS_DIR = os.path.expanduser("~/.claude/skills")
+SKILLS_DIRS = [PROJECT_SKILLS_DIR, USER_SKILLS_DIR]
 
 # 只注入完整內容的 skill 白名單；其餘只列名稱
 # 這些 skill 的確切流程（提問方式、文件存放規則、平行 sub-agent 呼叫方式等）必須完整注入才能正確遵循。
@@ -12,10 +18,19 @@ _FULL_CONTENT_SKILLS: set[str] = {
 }
 
 
+def _resolve(name: str, filename: str) -> str:
+    """依序在專案內建與使用者本機目錄尋找檔案路徑，找不到回傳空字串。"""
+    for skills_dir in SKILLS_DIRS:
+        path = os.path.join(skills_dir, name, filename)
+        if os.path.isfile(path):
+            return path
+    return ""
+
+
 def load_skill(name: str) -> str:
     """讀取單一 skill 的 SKILL.md 內容。找不到時靜默略過。"""
-    path = os.path.join(SKILLS_DIR, name, "SKILL.md")
-    if not os.path.isfile(path):
+    path = _resolve(name, "SKILL.md")
+    if not path:
         return ""
     with open(path, "r", encoding="utf-8") as f:
         return f.read()
@@ -23,8 +38,8 @@ def load_skill(name: str) -> str:
 
 def load_skill_file(name: str, filename: str) -> str:
     """讀取 skill 目錄中的任意檔案。找不到時靜默略過。"""
-    path = os.path.join(SKILLS_DIR, name, filename)
-    if not os.path.isfile(path):
+    path = _resolve(name, filename)
+    if not path:
         return ""
     with open(path, "r", encoding="utf-8") as f:
         return f.read()

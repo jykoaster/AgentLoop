@@ -132,7 +132,7 @@ python -m AgentLoop.main --node review "任務描述"
 
 ## 使用的 Skills
 
-各節點透過 `skill_loader.py` 從 host 掛載進來的 `~/.claude/skills/` 讀取下列 skill 並注入 prompt。「完整內容」欄為是的 skill，因流程細節（提問方式、文件存放規則、平行 sub-agent 呼叫方式等）必須完整注入才能正確遵循；其餘只列出名稱供 Claude 自行判斷是否採用（節省 token）。
+各節點透過 `skill_loader.py` 讀取下列 skill 並注入 prompt。這些 skill 已直接複製進本專案的 `AgentLoop/.claude/skills/`，隨專案版控、開箱即用，不需要另外在 host 安裝；找不到時才 fallback 到 host 掛載進來的 `~/.claude/skills/`。「完整內容」欄為是的 skill，因流程細節（提問方式、文件存放規則、平行 sub-agent 呼叫方式等）必須完整注入才能正確遵循；其餘只列出名稱供 Claude 自行判斷是否採用（節省 token）。
 
 | Skill                                                                                                     | 使用節點                  | 完整內容 | 用途                                                                      |
 | ----------------------------------------------------------------------------------------------------------- | ------------------------- | -------- | ------------------------------------------------------------------------- |
@@ -144,7 +144,7 @@ python -m AgentLoop.main --node review "任務描述"
 | [`implement`](https://github.com/mattpocock/skills/blob/main/skills/engineering/implement/SKILL.md)             | `execute`                 | 是       | 執行階段主流程依據（commit 與 `/code-review` 步驟由 `_SYSTEM` 覆蓋關閉）  |
 | [`code-review`](https://github.com/mattpocock/skills/blob/main/skills/engineering/code-review/SKILL.md)         | `review`                  | 是       | Standards／Spec 兩軸審查，各自透過平行 sub-agent 產出報告                 |
 
-以上 skill 皆來自 [`mattpocock/skills`](https://github.com/mattpocock/skills)，透過 `~/.agents/.skill-lock.json` 安裝到 `~/.agents/skills/`，再由 `~/.claude/skills/` 下的 symlink 指向、以唯讀方式掛載進容器。`_FULL_CONTENT_SKILLS`（`skill_loader.py`）白名單決定完整內容注入名單；node 各自的 `_SKILLS` 常數（`nodes/analyze_plan.py`、`nodes/execute.py`）決定該節點會用到哪些 skill。`review` 節點的 `code-review` 是直接呼叫 `build_skills_block(["code-review"])`，不透過 `_SKILLS` 常數。
+以上 skill 皆原本來自 [`mattpocock/skills`](https://github.com/mattpocock/skills)（透過 `~/.agents/.skill-lock.json` 安裝到 `~/.agents/skills/`），現已直接複製一份進 `AgentLoop/.claude/skills/<name>/` 隨本專案版控；若上游更新，需手動重新複製對應目錄以同步。`_FULL_CONTENT_SKILLS`（`skill_loader.py`）白名單決定完整內容注入名單；node 各自的 `_SKILLS` 常數（`nodes/analyze_plan.py`、`nodes/execute.py`）決定該節點會用到哪些 skill。`review` 節點的 `code-review` 是直接呼叫 `build_skills_block(["code-review"])`，不透過 `_SKILLS` 常數。其餘依目標專案技術棧動態選用、本專案未內建的 skill（例如 `vue-best-practices`、`nuxt-vitest-msw`），仍需透過 host 的 `~/.claude/skills/`（`~/.agents/skills/` 的 symlink）唯讀掛載進容器才能被找到。
 
 （OpenSpec 的規格產出流程不透過此 skill 機制載入，而是寫死在 `analyze_plan.py` 的 prompt 常數中，並由 `openspec_runner.py` 直接呼叫 `openspec` CLI，詳見上方「執行 Agent 工作流」一節。）
 

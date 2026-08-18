@@ -1,4 +1,5 @@
 .env
 __pycache__/
-.claude/
+.claude/*
+!.claude/skills/
 docs/nodes/
