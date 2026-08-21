@@ -12,6 +12,9 @@ CLI 入口點：執行 LangGraph 四 Agent 工作流，或單獨呼叫任一 nod
 
   # 帶前置狀態的單獨呼叫（JSON 檔案）
   python -m AgentLoop.main --node review --state-file /tmp/state.json "任務描述"
+
+  # archive 不需要 task，但需靠 --state-file 帶入 project_dir / change_name（與 branch_name）
+  python -m AgentLoop.main --node archive --state-file /tmp/archive_state.json "封存"
 """
 import sys
 import os
@@ -27,7 +30,7 @@ from .state import AgentState
 _BOLD  = "\033[1m"
 _RESET = "\033[0m"
 
-_NODES = ("analyze_plan", "execute", "review")
+_NODES = ("analyze_plan", "execute", "review", "archive")
 
 
 def _empty_state(task: str) -> AgentState:
@@ -79,9 +82,14 @@ def run(task: str) -> None:
 
 
 def run_node(node_name: str, task: str, state_file: str | None = None) -> None:
-    from .nodes import analyze_plan_node, execute_node, review_node
+    from .nodes import analyze_plan_node, execute_node, review_node, archive_node
 
-    node_fn = {"analyze_plan": analyze_plan_node, "execute": execute_node, "review": review_node}[node_name]
+    node_fn = {
+        "analyze_plan": analyze_plan_node,
+        "execute": execute_node,
+        "review": review_node,
+        "archive": archive_node,
+    }[node_name]
 
     state = _empty_state(task)
     if state_file:
