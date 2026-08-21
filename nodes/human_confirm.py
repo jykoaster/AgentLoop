@@ -30,9 +30,12 @@ def human_confirm_node(state: AgentState) -> dict:
 
     project_dir = state.get("project_dir", "")
     change_name = state.get("change_name", "")
+    branch_name = state.get("branch_name", "")
     if project_dir and change_name:
         print(f"\n{_YELLOW}## OpenSpec Change{_RESET}", flush=True)
         print(f"  {project_dir}/openspec/changes/{change_name}/", flush=True)
+        if branch_name:
+            print(f"  工作分支：{branch_name}", flush=True)
 
     print(f"\n{_CYAN}{'─'*60}{_RESET}", flush=True)
 

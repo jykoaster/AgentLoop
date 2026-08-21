@@ -17,6 +17,7 @@ AgentLoop/
 ├── openspec_runner.py         # OpenSpec CLI 封裝層（唯一跟 `openspec` CLI 對話的地方；目前只有 archive）
 ├── skill_loader.py           # Skill 注入器
 ├── project_context.py         # 動態偵測工作區內各專案的 CLAUDE.md / AGENT.md
+├── git_ops.py                 # 在目標專案 checkout／建立 AgentState["branch_name"]
 ├── requirements.txt
 ├── Dockerfile
 ├── docker-compose.yml
@@ -56,7 +57,8 @@ class AgentState(TypedDict):
     status: str            # "pending" | "needs_revision" | "error" | "confirmed" | "aborted"
     iteration: int         # 重試計數器（上限 3）
     human_feedback: str    # 使用者在 human_confirm 拒絕計畫時填寫的修改意見
-    change_name: str       # 任務開始時問一次；kebab-case OpenSpec change 名稱，留空則改用 git branch
+    change_name: str       # OpenSpec change 名稱（由 branch_name 轉 kebab-case）；任務開始時問一次，全程沿用
+    branch_name: str       # 使用者指定的 git 分支（必填）；規劃／執行／審查／archive 都切到此分支
     project_dir: str       # 本次任務對應的目標專案目錄（相對 workspace root）；由 analyze_plan
                            # 初始規劃回合回報，之後所有節點據此定位 openspec/changes/<change_name>/
 ```
@@ -162,13 +164,15 @@ START
 - **重寫（rewrite）**：在目標專案執行 `git stash push --include-untracked -- . ':!openspec'`（失敗則 `git checkout -- . ':!openspec'` + `git clean -fd --exclude=openspec/`）丟棄程式碼變更（含 execute 留下的 untracked 新檔），但保留 `openspec/`，然後重頭規劃
 - **修補（patch）**：保留現有變更，僅追加差異修補計畫
 
-`plan` 工具集本身也含 `Bash`（`claude_runner.TOOL_PRESETS`），供初始規劃跑 `openspec` CLI，不含 `Edit`（規劃階段只新增規格文件，不改既有程式碼）。
+`plan` 工具集本身也含 `Bash`（`claude_runner.TOOL_PRESETS`），供初始規劃 checkout 指定分支並跑 `openspec` CLI，不含 `Edit`（規劃階段只新增規格文件，不改既有程式碼）。
 
-**任務開始時詢問 OpenSpec change 名稱：**
+**任務開始時詢問 git 分支名稱：**
 
-初始規劃模式進入 `analyze_plan_node()` 時，若 `state["change_name"]` 尚未設定，會在呼叫 Claude 之前先用 `_ask_change_name()` 直接向終端機使用者提問（不透過 Claude、不是 grilling 機制的一部分）。使用者可輸入 kebab-case 名稱，或直接按 Enter 留空——留空時 Claude 會改用目標專案目前的 git branch 名稱（再轉成 kebab-case）。取得的值全程保存在 `AgentState["change_name"]`，後續 replan / human-revise 不再詢問、也不重新命名既有 change。
+初始規劃模式進入 `analyze_plan_node()` 時，若 `state["branch_name"]` 尚未設定，會在呼叫 Claude 之前先用 `_ask_branch_name()` 直接向終端機使用者提問（不透過 Claude、不是 grilling 機制的一部分）。**不可為空**：空白會重問；非互動式環境或使用者中止則視為錯誤（`status: "error"`）。取得的值全程保存在 `AgentState["branch_name"]`。OpenSpec `change_name` 由此分支名稱經 `_sanitize_change_name()` 轉成 kebab-case（含把 `/` 轉成 `-`，例如 `feature/add-login` → `feature-add-login`），不另問、也不讓 Claude 改名。
 
-`state["project_dir"]`（本次任務對應的目標專案目錄，相對 workspace root）則沒有終端機提問——由 Claude 在初始規劃回合判斷後，於最終輸出附上 `PROJECT_DIR:` 一行回報，`analyze_plan_node()` 解析後存入 `AgentState`；之後所有節點（`execute`、`review`、`human_confirm`、`archive`）都直接讀這個欄位定位 OpenSpec change 位置，不需要各自重新判斷。初始規劃若解析不到 `PROJECT_DIR:` 或 `CHANGE_NAME:`（且使用者未預先提供 change 名稱），視為錯誤（`status: "error"`）。
+確認目標專案後，規劃／執行／審查／archive 都會透過 `git_ops.ensure_on_branch()` 切到該分支（已存在則 `checkout`，不存在則 `checkout -b` 從目前 HEAD 建立）。初始規劃時 Claude 也被要求在寫規格前先 checkout，Python 在解析到 `PROJECT_DIR:` 後會再切一次作為保險。
+
+`state["project_dir"]`（本次任務對應的目標專案目錄，相對 workspace root）則沒有終端機提問——由 Claude 在初始規劃回合判斷後，於最終輸出附上 `PROJECT_DIR:` 一行回報，`analyze_plan_node()` 解析後存入 `AgentState`；之後所有節點（`execute`、`review`、`human_confirm`、`archive`）都直接讀這個欄位定位 OpenSpec change 位置，不需要各自重新判斷。初始規劃若解析不到 `PROJECT_DIR:`，或缺少 `change_name`／`branch_name`，視為錯誤（`status: "error"`）。
 
 **Domain 歸屬確認（先列既有 module 再讓使用者決定）：** `_CHANGE_SETUP_INITIAL` 在 bootstrap 完 `openspec/` 之後、決定 change name 之前，會插入 `_DOMAIN_SELECTION_PROTOCOL` 這一步：先用 Bash 列出 `<目標專案>/openspec/specs/` 底下既有的 domain（資料夾名稱），若有既有 domain，**必須**（不受一般「只問真正需要決策的事」限制）用 `QUESTION:` 格式列出所有既有 domain + 一個「以上皆非，建立新 domain」選項，交由使用者選擇本次規格 delta 歸屬哪個 domain；沒有既有 domain（`specs/` 不存在或是空的）則跳過提問，直接視為新建 domain。這個決定取代了先前純靠 Claude 自行以資料夾名稱字串比對「domain 是否已存在」的做法——選了既有 domain 就沿用該名稱、視為「domain 已存在」（不加 `## Purpose`）；選建立新 domain 才自行命名、視為「domain 首次建立」（`_OPENSPEC_ARTIFACT_RULES` 依此決定要不要加 `## Purpose`）。此機制只在初始規劃（`_CHANGE_SETUP_INITIAL`）跑，沿用階段（`_CHANGE_SETUP_EXISTING`，replan 另加 `_REWRITE_CHECKBOX_RESET`）沿用同一個 change，不重新走這一步。
 
@@ -207,7 +211,7 @@ CHANGE_NAME: <kebab-case change name>
 
 **解析邏輯：**
 
-- `PROJECT_DIR:` 與 `CHANGE_NAME:` 用正規表示式擷取，定位出 `openspec/changes/<change_name>/` 的實際路徑
+- `PROJECT_DIR:` 用正規表示式擷取，定位出 `openspec/changes/<change_name>/` 的實際路徑。`CHANGE_NAME:` 仍要求 Claude 回報以供核對，但 **Python 不再用它覆寫** 使用者分支轉出的 `change_name`
 - `state["analysis"]`、`state["plan"]` **只讀檔**：`analysis` 讀該 change 資料夾下 `proposal.md` 全文；`plan` 讀 `tasks.md` 的 checkbox 清單（`_TASK_CHECKBOX_RE`）。單一事實來源是 OpenSpec CLI 自己會 `validate` 的檔案；`proposal.md` 或 `tasks.md` 讀不到（或 tasks 沒有任何 checkbox）視為錯誤（`status: "error"`），不再 fallback 去 regex 聊天文字
 - 涉及新增或修改行為的 TASK，須額外排入對應的「撰寫／更新測試」TASK，讓 `execute` 有明確依據依 tdd skill 執行紅-綠循環；純文件、設定調整或不改變行為的重構可不需要
 - 是否需要新增「更新文件」TASK，依該任務所屬專案的 `CLAUDE.md` / `AGENT.md` 判斷：說明檔要求同步維護 `docs/` 商業邏輯說明文件才排入，未提及此類慣例則不強制新增
@@ -216,7 +220,7 @@ CHANGE_NAME: <kebab-case change name>
 
 **OpenSpec Change 建立與規格文件範本：** 規格文件不再是 AgentLoop 自訂的單一 Markdown 檔案，而是遵照 [OpenSpec](https://github.com/Fission-AI/OpenSpec) 的 change 資料夾格式，寫在目標專案的 `<project_dir>/openspec/changes/<change_name>/` 底下：
 
-- **建立階段**（`_CHANGE_SETUP_INITIAL`，僅初始規劃）：判斷目標專案目錄 → 若 `<目標專案>/openspec/` 不存在，執行一次性 `openspec init --tools claude --force` bootstrap → Domain 歸屬確認（見上方說明）→ 決定 change name（使用者提供或 git branch 轉 kebab-case）→ `openspec new change <name>` 建立資料夾
+- **建立階段**（`_CHANGE_SETUP_INITIAL`，僅初始規劃）：判斷目標專案目錄 → **checkout 使用者指定的 `branch_name`** → 若 `<目標專案>/openspec/` 不存在，執行一次性 `openspec init --tools claude --force` bootstrap → Domain 歸屬確認（見上方說明）→ change name 固定為 `branch_name` 的 kebab-case → `openspec new change <name>` 建立資料夾
 - **沿用階段**（`_CHANGE_SETUP_EXISTING`，replan／human-revise 共用；replan 另加 `_REWRITE_CHECKBOX_RESET`）：`project_dir`/`change_name` 沿用 `AgentState` 已存的值，不重新 `init`/`new change`，直接 Edit/Write 同一個 change 資料夾；「重寫」等級的 replan 額外把 `tasks.md` 所有 checkbox 重設回 `- [ ]`
 - **產出規則**（`_OPENSPEC_ARTIFACT_RULES`，三種模式共用）：
   - `proposal.md`：`## Intent` / `## Scope`（In scope / Out of scope）/ `## Approach`
@@ -233,7 +237,7 @@ CHANGE_NAME: <kebab-case change name>
 
 **行為：**
 
-- 列印分析摘要、TASK 清單（含數量）、OpenSpec change 路徑
+- 列印分析摘要、TASK 清單（含數量）、OpenSpec change 路徑與工作分支
 - 偵測到非互動式 stdin（如管道重導向）時自動中止，避免無限等待
 - 輸入 `y`（不區分大小寫）→ 返回 `status: "confirmed"` → 工作流程繼續至 `execute`
 - 輸入非 `y` 後，再輸入修改意見（非空白）→ 返回 `status: "needs_revision"` + `human_feedback` → 回到 `analyze_plan` 重新規劃
@@ -252,10 +256,11 @@ CHANGE_NAME: <kebab-case change name>
 
 **執行前準備（必須完成）：**
 
-1. Read `openspec/changes/<change_name>/` 下的 proposal.md、specs/**/*.md、tasks.md（若有 design.md 一併讀取）。規格、驗收條件與任務清單以這些檔案為準，**不**把 `state["plan"]` 扁平清單貼進 prompt
-2. 依 `project_context.py` 提供的專案清單，判斷本次任務涉及哪個（或哪些）專案目錄，Read 讀取其 `CLAUDE.md` / `AGENT.md`，了解架構、指令（測試、lint、build 等）、目錄慣例、程式碼規範與技術棧；找不到說明檔則自行 Read/Glob/Grep 探索並比對現有風格
-3. 依偵測到的技術棧，**自行**從可用的 skills 中挑選並使用適合的其他 skill（例如 Vue 專案適用 `vue-best-practices`、Nuxt + Vitest 專案適用 `nuxt-vitest-msw`）——不寫死任何特定技術棧的 skill 清單。`tdd` 已是固定列出名稱的 skill（見下方「注入的 Skills」），不需要另外挑選
-4. 若該專案 `docs/` 目錄存在，讀取其下所有現有文件，了解商業邏輯說明；`docs/` 目錄不存在時不需自行建立
+1. Python 先用 `git_ops.ensure_on_branch()` 把目標專案切到 `state["branch_name"]`（已存在則 checkout，不存在則建立）；失敗則 `status: "error"`，不呼叫 Claude
+2. Read `openspec/changes/<change_name>/` 下的 proposal.md、specs/**/*.md、tasks.md（若有 design.md 一併讀取）。規格、驗收條件與任務清單以這些檔案為準，**不**把 `state["plan"]` 扁平清單貼進 prompt
+3. 依 `project_context.py` 提供的專案清單，判斷本次任務涉及哪個（或哪些）專案目錄，Read 讀取其 `CLAUDE.md` / `AGENT.md`，了解架構、指令（測試、lint、build 等）、目錄慣例、程式碼規範與技術棧；找不到說明檔則自行 Read/Glob/Grep 探索並比對現有風格
+4. 依偵測到的技術棧，**自行**從可用的 skills 中挑選並使用適合的其他 skill（例如 Vue 專案適用 `vue-best-practices`、Nuxt + Vitest 專案適用 `nuxt-vitest-msw`）——不寫死任何特定技術棧的 skill 清單。`tdd` 已是固定列出名稱的 skill（見下方「注入的 Skills」），不需要另外挑選
+5. 若該專案 `docs/` 目錄存在，讀取其下所有現有文件，了解商業邏輯說明；`docs/` 目錄不存在時不需自行建立
 
 **執行方式：** 依 change 資料夾內 `tasks.md` 的順序嚴格依序完成：
 
@@ -366,7 +371,7 @@ SUGGESTION 2: [建議內容與理由]
 
 每個節點讀取前一個節點填入的欄位，再將自己的輸出寫入對應欄位，例如：
 
-- `analyze_plan` → 填入 `analysis`、`plan`、`change_name`、`project_dir`
+- `analyze_plan` → 填入 `analysis`、`plan`、`change_name`、`branch_name`、`project_dir`
 - `human_confirm` → 填入 `status`（`"confirmed"` / `"needs_revision"` + `human_feedback` / `"aborted"`）
 - `execute` → 填入 `execution_result`、`status`
 - `review` → 填入 `review_result`、`review_level`、`review_blocking`、`status`

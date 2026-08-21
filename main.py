@@ -43,6 +43,7 @@ def _empty_state(task: str) -> AgentState:
         "iteration": 0,
         "human_feedback": "",
         "change_name": "",
+        "branch_name": "",
         "project_dir": "",
     }
 

@@ -2,6 +2,7 @@ import os
 from ..state import AgentState
 from ..project_context import REPO_ROOT
 from ..openspec_runner import archive_change
+from ..git_ops import ensure_on_branch
 
 _BANNER = "\033[1;35m"
 _YELLOW = "\033[1;33m"
@@ -18,9 +19,17 @@ def archive_node(state: AgentState) -> dict:
 
     project_dir = state.get("project_dir", "")
     change_name = state.get("change_name", "")
+    branch_name = state.get("branch_name", "")
     if not project_dir or not change_name:
         print(f"{_YELLOW}  [Archive] 缺少 project_dir/change_name，略過{_RESET}\n", flush=True)
         return {}
+
+    if branch_name:
+        ok, msg = ensure_on_branch(project_dir, branch_name)
+        print(f"{_YELLOW}  [git] {msg}{_RESET}", flush=True)
+        if not ok:
+            print(f"{_YELLOW}  [Archive] 無法切換到指定分支，略過{_RESET}\n", flush=True)
+            return {}
 
     project_dir_abs = os.path.join(REPO_ROOT, project_dir)
     result = archive_change(project_dir_abs, change_name)

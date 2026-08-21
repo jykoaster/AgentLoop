@@ -3,6 +3,7 @@ from ..state import AgentState
 from ..claude_runner import call_claude, format_usage_stats
 from ..skill_loader import build_skills_block
 from ..project_context import build_project_docs_hint
+from ..git_ops import ensure_on_branch
 
 _SKILLS = [
     "tdd",
@@ -19,17 +20,19 @@ _SYSTEM = """你是一位資深全端工程師，負責「執行」階段。
 ## 執行前準備（必須完成）
 
 在開始任何修改前，必須先：
-1. 用 Read 讀取 `<<CHANGE_LOCATION>>` 下的 proposal.md、specs/**/*.md、tasks.md
+1. 確認目標專案已在分支 `<<BRANCH_NAME_VALUE>>` 上工作（呼叫端會先切換；若你發現目前不在此分支，立刻 checkout）。
+   本階段所有程式碼修改都必須落在這個分支，不要切去其他分支。
+2. 用 Read 讀取 `<<CHANGE_LOCATION>>` 下的 proposal.md、specs/**/*.md、tasks.md
    （若有 design.md 一併讀取；小改動可能沒有此檔，不視為缺漏）。
    規格、驗收條件與任務清單以這些檔案為準，不要依賴本 prompt 是否貼上 TASK 正文。
-2. 依下方「專案說明檔」判斷本次任務涉及的專案目錄，用 Read 讀取其 CLAUDE.md / AGENT.md，
+3. 依下方「專案說明檔」判斷本次任務涉及的專案目錄，用 Read 讀取其 CLAUDE.md / AGENT.md，
    了解該專案的架構、指令（測試、lint、build 等）、目錄慣例、程式碼規範，以及**技術棧**
    - 若任務同時涉及多個專案（例如前後端），須分別讀取各自的說明檔
    - 若找不到 CLAUDE.md / AGENT.md，自行用 Read/Glob/Grep 探索程式碼並比對現有風格
-3. 依偵測到的技術棧，自行從你可用的 skills 中挑選並使用適合的其他 skill
+4. 依偵測到的技術棧，自行從你可用的 skills 中挑選並使用適合的其他 skill
    （例如 Vue 專案適用 vue-best-practices、Nuxt + Vitest 專案適用 nuxt-vitest-msw
    等）——不要假設任何特定技術棧，依實際偵測結果選用。tdd 已固定提供給你，見下方說明
-4. 若該專案 docs/ 目錄存在，讀取其下所有現有文件，了解商業邏輯說明；docs/ 目錄不存在時不需自行建立
+5. 若該專案 docs/ 目錄存在，讀取其下所有現有文件，了解商業邏輯說明；docs/ 目錄不存在時不需自行建立
 
 <<PROJECT_CONTEXT>>
 
@@ -80,6 +83,7 @@ _SYSTEM = """你是一位資深全端工程師，負責「執行」階段。
 
 _BANNER = "\033[1;32m"
 _RED    = "\033[1;31m"
+_YELLOW = "\033[1;33m"
 _RESET  = "\033[0m"
 
 
@@ -90,12 +94,22 @@ def execute_node(state: AgentState) -> dict:
 
     try:
         project_dir = state.get("project_dir", "")
+        branch_name = state.get("branch_name", "")
+        if project_dir and branch_name:
+            ok, msg = ensure_on_branch(project_dir, branch_name)
+            print(f"{_YELLOW}  [git] {msg}{_RESET}", flush=True)
+            if not ok:
+                return {"status": "error", "execution_result": f"無法切換到分支 {branch_name}：{msg}"}
+        elif not branch_name:
+            return {"status": "error", "execution_result": "缺少 branch_name，無法在指定分支上實作"}
+
         skills_block = build_skills_block(_SKILLS)
         change_location = f"{project_dir}/openspec/changes/{state.get('change_name', '')}"
         system = (
             _SYSTEM
             .replace("<<PROJECT_CONTEXT>>", build_project_docs_hint())
             .replace("<<CHANGE_LOCATION>>", change_location)
+            .replace("<<BRANCH_NAME_VALUE>>", branch_name)
         )
         prompt = (
             f"{system}\n\n{skills_block}\n\n"

@@ -8,6 +8,7 @@ from ..state import AgentState
 from ..claude_runner import call_claude, format_usage_stats
 from ..skill_loader import build_skills_block
 from ..project_context import build_project_docs_hint
+from ..git_ops import ensure_on_branch
 
 # 使用的模型（"haiku" | "sonnet" | "opus" | "fable"，見 claude_runner.MODEL_IDS；
 # None 則沿用 claude CLI 本身的預設模型）
@@ -31,8 +32,8 @@ skill 裡「Pin the fixed point」「Identify the spec source」兩步以本節�
 
 ## 依 code-review skill 執行時的具體參數（覆蓋 skill 前半）
 
-- **Fixed point**：本次修改尚未 commit，固定點為 `HEAD`。直接執行 `git diff HEAD` 取得完整異動，
-  不需詢問使用者，也不用三點 diff。
+- **Fixed point**：本次修改尚未 commit，固定點為 `HEAD`。審查前應已在分支 `<<BRANCH_NAME_VALUE>>` 上；
+  直接執行 `git diff HEAD` 取得完整異動，不需詢問使用者，也不用三點 diff。
 - **Spec 來源**：`<<CHANGE_LOCATION>>`（由分析規劃階段依 OpenSpec 規則產生的 change 資料夾，
   用 Read 讀取其下 proposal.md / tasks.md / specs/**/*.md 取得完整內容（若有 design.md 一併讀取；
   小改動可能沒有此檔，不視為缺漏）；也可用
@@ -154,6 +155,17 @@ def review_node(state: AgentState) -> dict:
 
     project_dir = state.get("project_dir", "")
     change_name = state.get("change_name", "")
+    branch_name = state.get("branch_name", "")
+    if project_dir and branch_name:
+        ok, msg = ensure_on_branch(project_dir, branch_name)
+        print(f"{_YELLOW}  [git] {msg}{_RESET}", flush=True)
+        if not ok:
+            return {
+                "status": "error",
+                "review_result": f"無法切換到分支 {branch_name}：{msg}",
+                "review_level": "",
+                "review_blocking": False,
+            }
 
     code_review_skill = build_skills_block(["code-review"])
     if not code_review_skill:
@@ -172,6 +184,7 @@ def review_node(state: AgentState) -> dict:
             .replace("<<CHANGE_LOCATION>>", change_location)
             .replace("<<PROJECT_DIR_VALUE>>", project_dir)
             .replace("<<CHANGE_NAME_VALUE>>", change_name)
+            .replace("<<BRANCH_NAME_VALUE>>", branch_name)
             .replace("<<PROJECT_CONTEXT>>", build_project_docs_hint())
         )
         result = call_claude(prompt, tools="review", timeout=600, model=_MODEL)

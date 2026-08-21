@@ -6,6 +6,7 @@ from ..state import AgentState
 from ..claude_runner import call_claude, format_usage_stats, QUESTION_MARKER
 from ..skill_loader import build_skills_block
 from ..project_context import build_project_docs_hint, REPO_ROOT
+from ..git_ops import ensure_on_branch
 
 _SKILLS = [
     "grilling",
@@ -161,9 +162,13 @@ _PROJECT_AND_DOMAIN_SETUP = f"""## 確認目標專案與 Domain（強制步驟�
 
 1. 依 <<PROJECT_CONTEXT>> 判斷本次任務主要涉及哪一個目標專案目錄，記下其相對於 workspace root
    的路徑（例如 `my-project`）——這個路徑之後要原封不動地放進最終輸出的 `PROJECT_DIR:` 一行
-2. 用 Bash 檢查 `<目標專案>/openspec/` 是否存在；不存在的話執行一次性 bootstrap：
+2. **立刻**把該目標專案切到指定分支 `<<BRANCH_NAME_VALUE>>`（已存在則
+   `git -C <目標專案> checkout <<BRANCH_NAME_VALUE>>`，不存在則
+   `git -C <目標專案> checkout -b <<BRANCH_NAME_VALUE>>`）。確認 `git branch --show-current`
+   就是這個名稱後，才可以繼續 bootstrap / 讀程式碼 / grilling——本任務之後所有讀寫都必須在此分支上
+3. 用 Bash 檢查 `<目標專案>/openspec/` 是否存在；不存在的話執行一次性 bootstrap：
    `cd <目標專案> && openspec init --tools claude --force`
-3. 依下方「Domain 歸屬確認」判斷本次規格 delta 要寫進哪個／哪些 domain。
+4. 依下方「Domain 歸屬確認」判斷本次規格 delta 要寫進哪個／哪些 domain。
 
    **這一步不是「只對真正需要使用者決策的事項提問」規則的例外，而是完全不受它限制：即使
    任務描述（或使用者附上的 issue/需求文件）已經寫得非常清楚、讀起來就像是「直接下指令要你
@@ -175,12 +180,11 @@ _PROJECT_AND_DOMAIN_SETUP = f"""## 確認目標專案與 Domain（強制步驟�
 
 _CHANGE_SETUP_INITIAL = """## 建立 OpenSpec Change（規格文件的實際存放位置）
 
-目標專案目錄與 domain 已在前面「確認目標專案與 Domain」步驟決定，這裡直接沿用該結果：
+目標專案目錄與 domain 已在前面「確認目標專案與 Domain」步驟決定，這裡直接沿用該結果。
+工作目錄必須已經在分支 `<<BRANCH_NAME_VALUE>>` 上（上一步已切換）。
 
-1. 決定 change name（必須是 kebab-case：小寫字母、數字、單一連字號，不可有底線／大寫／連續連字號／開頭結尾連字號）：
-   - 若使用者於任務開始時提供了自訂名稱，本次為：<<CHANGE_NAME_VALUE>>，直接以此作為 change name
-   - 若上方顯示為空（使用者未提供），改用 `git -C <目標專案> branch --show-current` 取得目標專案
-     目前的 git branch 名稱，轉成 kebab-case 作為 change name
+1. change name 固定為：<<CHANGE_NAME_VALUE>>（由使用者提供的 branch 名稱轉成 kebab-case），
+   不要另取、不要改用目前 checkout 的其他名稱
 2. 執行 `cd <目標專案> && openspec new change <change-name>` 建立 change 資料夾
 3. 依下方「OpenSpec 產出規則」用 Write 在該 change 資料夾底下寫 proposal.md / specs/**/*.md /
    tasks.md（domain 名稱依前面的確認結果）；非小改動時才寫 design.md，並依「完成前的驗證」跑
@@ -190,6 +194,7 @@ _CHANGE_SETUP_EXISTING = """## 更新既有的 OpenSpec Change
 
 本次沿用先前已建立的 change，不需要 `openspec init` 或 `openspec new change`：
 - 目標專案：<<PROJECT_DIR_VALUE>>
+- 工作分支：<<BRANCH_NAME_VALUE>>（必須先確認已 checkout 此分支，再讀寫）
 - Change name：<<CHANGE_NAME_VALUE>>
 - Change 位置：`<<PROJECT_DIR_VALUE>>/openspec/changes/<<CHANGE_NAME_VALUE>>/`
 
@@ -321,7 +326,6 @@ _MAX_QUESTIONS = 15
 
 _QUESTION_LINE_RE = re.compile(r"^\s*" + re.escape(QUESTION_MARKER), re.MULTILINE)
 _PROJECT_DIR_RE = re.compile(r"^\s*PROJECT_DIR:\s*(.+?)\s*$", re.MULTILINE)
-_CHANGE_NAME_RE = re.compile(r"^\s*CHANGE_NAME:\s*(.+?)\s*$", re.MULTILINE)
 _TASK_CHECKBOX_RE = re.compile(r"^-\s\[[ xX]\]\s*(.+)$", re.MULTILINE)
 
 _KEBAB_INVALID_RE = re.compile(r"[^a-z0-9-]+")
@@ -330,12 +334,22 @@ _MULTI_HYPHEN_RE = re.compile(r"-{2,}")
 
 def _sanitize_change_name(raw: str) -> str:
     """轉成 OpenSpec 要求的 kebab-case：小寫字母/數字/單一連字號，去除底線、空白、大寫、
-    連續連字號與開頭結尾連字號。"""
+    路徑分隔符、連續連字號與開頭結尾連字號。"""
     s = raw.strip().lower()
+    s = s.replace("/", "-")
     s = re.sub(r"[\s_]+", "-", s)
     s = _KEBAB_INVALID_RE.sub("", s)
     s = _MULTI_HYPHEN_RE.sub("-", s)
     return s.strip("-")
+
+
+def _is_valid_branch_name(name: str) -> bool:
+    """git 分支名稱的基本檢查：非空、不含空白、不是 . / ..、不以 - 開頭、不含 ..。"""
+    if not name or any(c.isspace() for c in name):
+        return False
+    if name in (".", "..") or name.startswith("-") or name.endswith("/") or ".." in name:
+        return False
+    return True
 
 
 def _read_change_artifacts(project_dir: str, change_name: str) -> tuple[str, list[str]]:
@@ -410,26 +424,33 @@ def _run_with_grilling(prompt: str, tools: str, model: str, timeout: int):
         prompt = answer if answer else "請採用你自己建議的答案，並繼續下一個問題或流程。"
 
 
-def _ask_change_name() -> str:
-    """任務開始時（僅初始規劃）詢問使用者 OpenSpec change 名稱，留空則由 Claude 改用目標專案的
-    git branch 名稱。非互動式環境或使用者直接按 Enter／中止時，留空繼續。"""
+def _ask_branch_name() -> str:
+    """任務開始時（僅初始規劃）詢問使用者本次要使用的 git 分支名稱，不可為空。
+    非互動式環境或使用者中止時回傳空字串，由呼叫端視為錯誤。"""
     print(
-        f"\n{_YELLOW}  [分析+規劃 Agent] 請輸入 OpenSpec change 名稱"
-        f"（kebab-case，可直接按 Enter 改用目標專案目前 git branch 名稱）：{_RESET}",
+        f"\n{_YELLOW}  [分析+規劃 Agent] 請輸入本次任務要使用的 git 分支名稱"
+        f"（必填，例如 feature/add-login；已存在則切過去，不存在則新建）：{_RESET}",
         flush=True,
     )
     if not sys.stdin.isatty():
-        print(f"{_YELLOW}  非互動式環境，change 名稱留空，改用 branch name{_RESET}\n", flush=True)
+        print(f"{_RED}  非互動式環境，無法輸入分支名稱{_RESET}\n", flush=True)
         return ""
-    try:
-        answer = input(f"{_YELLOW}  > {_RESET}").strip()
-    except (EOFError, KeyboardInterrupt):
-        print(f"\n{_YELLOW}  已跳過，change 名稱留空，改用 branch name{_RESET}\n", flush=True)
-        return ""
-    sanitized = _sanitize_change_name(answer)
-    if answer and not sanitized:
-        print(f"{_YELLOW}  輸入內容正規化後為空，視為未提供，改用 branch name{_RESET}\n", flush=True)
-    return sanitized
+    while True:
+        try:
+            answer = input(f"{_YELLOW}  > {_RESET}").strip()
+        except (EOFError, KeyboardInterrupt):
+            print(f"\n{_RED}  已取消，分支名稱為必填{_RESET}\n", flush=True)
+            return ""
+        if not answer:
+            print(f"{_YELLOW}  不可為空，請重新輸入{_RESET}", flush=True)
+            continue
+        if not _is_valid_branch_name(answer):
+            print(
+                f"{_YELLOW}  分支名稱不合法（不可含空白、不可為 . / ..、不可以 - 開頭），請重新輸入{_RESET}",
+                flush=True,
+            )
+            continue
+        return answer
 
 
 def analyze_plan_node(state: AgentState) -> dict:
@@ -440,7 +461,18 @@ def analyze_plan_node(state: AgentState) -> dict:
     is_human_revise = bool(human_feedback) and not is_replan
 
     change_name = state.get("change_name", "")
+    branch_name = state.get("branch_name", "")
     project_dir = state.get("project_dir", "")
+
+    def _fail(analysis: str) -> dict:
+        return {
+            "status": "error",
+            "analysis": analysis,
+            "plan": [],
+            "change_name": change_name,
+            "branch_name": branch_name,
+            "project_dir": project_dir,
+        }
 
     model = _MODEL
     if is_replan:
@@ -452,8 +484,23 @@ def analyze_plan_node(state: AgentState) -> dict:
     else:
         label = "初始規劃"
         tools = "plan"
-        if not change_name:
-            change_name = _ask_change_name()
+        if not branch_name:
+            branch_name = _ask_branch_name()
+            if not branch_name:
+                return _fail("未提供 git 分支名稱，無法繼續規劃")
+            change_name = _sanitize_change_name(branch_name)
+            if not change_name:
+                return _fail(f"分支名稱「{branch_name}」無法轉成 OpenSpec change name")
+
+    if not branch_name:
+        print(f"{_RED}  [分析+規劃 Agent] 缺少 branch_name{_RESET}\n", flush=True)
+        return _fail("缺少 branch_name")
+
+    if project_dir:
+        ok, msg = ensure_on_branch(project_dir, branch_name)
+        print(f"{_YELLOW}  [git] {msg}{_RESET}", flush=True)
+        if not ok:
+            return _fail(f"無法切換到分支 {branch_name}：{msg}")
 
     print(f"\n{_BANNER}{'═'*50}\n  [分析+規劃 Agent] 開始 — {label}\n{'═'*50}{_RESET}\n", flush=True)
 
@@ -475,6 +522,7 @@ def analyze_plan_node(state: AgentState) -> dict:
                 .replace("<<REVIEW_LEVEL>>", review_level or "修補")
                 .replace("<<PROJECT_DIR_VALUE>>", project_dir)
                 .replace("<<CHANGE_NAME_VALUE>>", change_name)
+                .replace("<<BRANCH_NAME_VALUE>>", branch_name)
             )
         elif is_human_revise:
             system = (
@@ -483,19 +531,21 @@ def analyze_plan_node(state: AgentState) -> dict:
                 .replace("<<HUMAN_FEEDBACK>>", human_feedback)
                 .replace("<<PROJECT_DIR_VALUE>>", project_dir)
                 .replace("<<CHANGE_NAME_VALUE>>", change_name)
+                .replace("<<BRANCH_NAME_VALUE>>", branch_name)
             )
         else:
             system = (
                 _SYSTEM_INITIAL
                 .replace("<<PROJECT_CONTEXT>>", project_context)
-                .replace("<<CHANGE_NAME_VALUE>>", change_name or "（未提供，留空）")
+                .replace("<<CHANGE_NAME_VALUE>>", change_name)
+                .replace("<<BRANCH_NAME_VALUE>>", branch_name)
             )
 
         prompt = f"{system}\n\n{skills_block}\n\n任務：{state['task']}"
         result = _run_with_grilling(prompt, tools=tools, model=model, timeout=300)
     except Exception as e:
         print(f"{_RED}  [分析+規劃 Agent] 發生例外：{e}{_RESET}\n", flush=True)
-        return {"status": "error", "analysis": f"分析階段發生例外：{e}", "plan": [], "change_name": change_name, "project_dir": project_dir}
+        return _fail(f"分析階段發生例外：{e}")
 
     elapsed = time.monotonic() - start
 
@@ -505,7 +555,7 @@ def analyze_plan_node(state: AgentState) -> dict:
 
     if result.is_error:
         print(f"{_RED}  [分析+規劃 Agent] Claude 執行失敗：{result.text}{_RESET}\n", flush=True)
-        return {"status": "error", "analysis": result.text, "plan": [], "change_name": change_name, "project_dir": project_dir}
+        return _fail(result.text)
 
     raw = result.text
 
@@ -513,25 +563,18 @@ def analyze_plan_node(state: AgentState) -> dict:
     if parsed_project_dir:
         project_dir = parsed_project_dir.group(1).strip()
 
-    parsed_change_name = _CHANGE_NAME_RE.search(raw)
-    if parsed_change_name:
-        sanitized = _sanitize_change_name(parsed_change_name.group(1))
-        if sanitized:
-            change_name = sanitized
-
     if not project_dir or not change_name:
         print(
             f"{_RED}  [分析+規劃 Agent] 未能取得 PROJECT_DIR/CHANGE_NAME，"
             f"無法定位 OpenSpec change 位置{_RESET}\n",
             flush=True,
         )
-        return {
-            "status": "error",
-            "analysis": raw,
-            "plan": [],
-            "change_name": change_name,
-            "project_dir": project_dir,
-        }
+        return _fail(raw)
+
+    ok, msg = ensure_on_branch(project_dir, branch_name)
+    print(f"{_YELLOW}  [git] {msg}{_RESET}", flush=True)
+    if not ok:
+        return _fail(f"無法切換到分支 {branch_name}：{msg}")
 
     analysis, plan = _read_change_artifacts(project_dir, change_name)
     if not analysis or not plan:
@@ -540,13 +583,7 @@ def analyze_plan_node(state: AgentState) -> dict:
             f"{project_dir}/openspec/changes/{change_name}/ 下的 proposal.md 或 tasks.md{_RESET}\n",
             flush=True,
         )
-        return {
-            "status": "error",
-            "analysis": raw,
-            "plan": [],
-            "change_name": change_name,
-            "project_dir": project_dir,
-        }
+        return _fail(raw)
 
     return {
         "analysis": analysis,
@@ -557,5 +594,6 @@ def analyze_plan_node(state: AgentState) -> dict:
         "review_blocking": False,
         "human_feedback": "",
         "change_name": change_name,
+        "branch_name": branch_name,
         "project_dir": project_dir,
     }
