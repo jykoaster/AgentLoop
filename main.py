@@ -13,8 +13,8 @@ CLI 入口點：執行 LangGraph 四 Agent 工作流，或單獨呼叫任一 nod
   # 帶前置狀態的單獨呼叫（JSON 檔案）
   python -m AgentLoop.main --node review --state-file /tmp/state.json "任務描述"
 
-  # archive 不需要 task，但需靠 --state-file 帶入 project_dir / change_name（與 branch_name）
-  python -m AgentLoop.main --node archive --state-file /tmp/archive_state.json "封存"
+  # archive：參數即 OpenSpec change 名稱，掃描工作區定位後封存
+  python -m AgentLoop.main --node archive 54-feat-ai-ad-content-extend-to-1024-chars
 """
 import sys
 import os

@@ -105,8 +105,8 @@ python -m AgentLoop.main --node analyze_plan "任務描述"
 python -m AgentLoop.main --node execute --state-file /tmp/state.json "任務描述"
 python -m AgentLoop.main --node review "任務描述"
 
-# archive 不需要 task 內容，但需靠 --state-file 帶入 project_dir / change_name（可選 branch_name）
-python -m AgentLoop.main --node archive --state-file /tmp/archive_state.json "封存"
+# archive：參數即 OpenSpec change 名稱，會掃描工作區 */openspec/changes/<name>/ 定位後封存
+python -m AgentLoop.main --node archive 54-feat-ai-ad-content-extend-to-1024-chars
 ```
 
 完整工作流跑到 `human_confirm` 時會暫停，在終端機顯示規劃摘要與 TASK 清單，輸入 `y` 才會繼續往下執行。

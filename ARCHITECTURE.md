@@ -359,6 +359,8 @@ SUGGESTION 2: [建議內容與理由]
 
 **執行內容：** 透過 `openspec_runner.archive_change(project_dir_abs, change_name)`（`openspec_runner.py`，跟 `claude_runner.py` 是「唯一跟 claude CLI 對話的地方」同樣的角色，這裡是唯一跟 `openspec` CLI 對話的地方）執行 `openspec archive <change_name> --yes --json`，把 change 的 spec delta 合併進 `openspec/specs/`、change 資料夾搬到 `openspec/changes/archive/YYYY-MM-DD-<name>/`。
 
+**單獨執行：** `python -m AgentLoop.main --node archive <change_name>`。`change_name` 取 `AgentState["change_name"]`，沒有則用 CLI 的 `task` 參數。`project_dir` 已在 state 裡就直接用；否則掃描工作區 `*/openspec/changes/<name>/`（同名多專案時優先 `TARGET_PROJECT`，仍無法唯一確定則略過並列出路徑）。`branch_name` 仍可選，有填才 checkout。
+
 **失敗處理：** 容錯解析 stdout 的 JSON 診斷（OpenSpec agent-contract 的 `status: StoreDiagnostic[]` 慣例），失敗（`openspec` 指令不存在、validate 沒過、change 不存在等）只印警告訊息並附上手動補跑指令，**不**讓整個 workflow 失敗——程式碼已經審查通過，archive 只是收尾，失敗頂多之後手動執行 `openspec archive <name> --yes`。
 
 **回傳：** 不更動 `AgentState` 任何欄位（`{}`），純粹是收尾動作。
@@ -522,9 +524,10 @@ python -m AgentLoop.main "幫我在後端新增一個 GET /tables/featured 端�
 python -m AgentLoop.main --node analyze_plan "任務描述"
 python -m AgentLoop.main --node execute --state-file /tmp/state.json "任務描述"
 python -m AgentLoop.main --node review "任務描述"
+python -m AgentLoop.main --node archive 54-feat-ai-ad-content-extend-to-1024-chars
 ```
 
-State file 可預載 `plan`、`execution_result` 等欄位，便於針對單一節點除錯。`human_confirm` 不在 `--node` 可選清單中，只能作為完整工作流程的一部分執行。
+State file 可預載 `plan`、`execution_result` 等欄位，便於針對單一節點除錯。`archive` 單獨執行時參數即 change 名稱，會掃描工作區定位 `openspec/changes/<name>/`，不需要 `--state-file`。`human_confirm` 不在 `--node` 可選清單中，只能作為完整工作流程的一部分執行。
 
 ---
 

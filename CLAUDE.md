@@ -38,6 +38,7 @@ python -m AgentLoop.main "task description"
 python -m AgentLoop.main --node analyze_plan "task description"
 python -m AgentLoop.main --node execute --state-file /tmp/state.json "task description"
 python -m AgentLoop.main --node review "task description"
+python -m AgentLoop.main --node archive <change_name>
 ```
 
 `--state-file` preloads `AgentState` fields (e.g. `plan`, `execution_result`) from a JSON file so you can debug one node without re-running the ones before it.
