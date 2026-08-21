@@ -15,7 +15,9 @@ _MODEL = "sonnet"
 
 _SYSTEM = """你是一位資深程式碼審查者，負責「Code Review」階段。
 
-請依照下方 code-review skill 的流程進行審查（Standards 與 Spec 兩軸，各自透過平行 sub-agent 產出報告）：
+請依照下方 code-review skill 的流程進行審查（Standards 與 Spec 兩軸，各自透過平行 sub-agent 產出報告）。
+skill 裡「Pin the fixed point」「Identify the spec source」兩步以本節點已固定的參數為準，不要再詢問使用者，
+也不要去 issue tracker / `docs/specs` / `.scratch/` 自找規格，更不要執行 `docs/agents/issue-tracker.md` 相關流程。
 
 <<CODE_REVIEW_SKILL>>
 
@@ -25,22 +27,21 @@ _SYSTEM = """你是一位資深程式碼審查者，負責「Code Review」階�
 
 任務：<<TASK>>
 
-執行計畫（TASK 清單）：
-<<PLAN_TEXT>>
+異動與規格都以檔案為準，不要依賴執行階段的文字自述。
 
-執行摘要：
-<<EXECUTION_SUMMARY>>
+## 依 code-review skill 執行時的具體參數（覆蓋 skill 前半）
 
-## 依 code-review skill 執行時的具體參數
-
-- **Fixed point**：本次修改尚未 commit，固定點為 `HEAD`（直接執行 `git diff HEAD` 取得完整異動即可，不需詢問使用者）
+- **Fixed point**：本次修改尚未 commit，固定點為 `HEAD`。直接執行 `git diff HEAD` 取得完整異動，
+  不需詢問使用者，也不用三點 diff。
 - **Spec 來源**：`<<CHANGE_LOCATION>>`（由分析規劃階段依 OpenSpec 規則產生的 change 資料夾，
-  用 Read 讀取其下 proposal.md / design.md / tasks.md / specs/**/*.md 取得完整內容；也可用
+  用 Read 讀取其下 proposal.md / tasks.md / specs/**/*.md 取得完整內容（若有 design.md 一併讀取；
+  小改動可能沒有此檔，不視為缺漏）；也可用
   `openspec show <<CHANGE_NAME_VALUE>> --json` 快速確認結構。若該 change 已被前一輪迭代
   archive，改讀 `<<PROJECT_DIR_VALUE>>/openspec/specs/` 下對應 domain 的 spec.md）
 - **Standards 來源**：依下方「專案說明檔」判斷本次任務涉及的專案，讀取該專案的 CLAUDE.md / AGENT.md，
   以及其中提及或專案根目錄下的 CODING_STANDARDS.md / CONTRIBUTING.md（若有）作為 Standards 依據；
   若任務同時涉及多個專案（例如前後端），分別讀取
+- 其餘仍依 skill：Fowler smell baseline、平行 sub-agent、以 `## Standards` / `## Spec` 並陳報告
 
 <<PROJECT_CONTEXT>>
 
@@ -151,21 +152,14 @@ def review_node(state: AgentState) -> dict:
 
     print(f"\n{_BANNER}{'═'*50}\n  [Review Agent] 開始\n{'═'*50}{_RESET}\n", flush=True)
 
+    project_dir = state.get("project_dir", "")
+    change_name = state.get("change_name", "")
+
     code_review_skill = build_skills_block(["code-review"])
     if not code_review_skill:
         print(f"{_BANNER}  [Review Agent] 找不到 code-review skill，跳過{_RESET}\n", flush=True)
         return {"review_result": "SKIPPED", "review_level": "", "review_blocking": False}
 
-    exec_summary = state.get("execution_result", "")
-    if len(exec_summary) > 2000:
-        exec_summary = exec_summary[-2000:]
-
-    plan_text = "\n".join(
-        f"TASK {i+1}: {s}" for i, s in enumerate(state.get("plan", []))
-    )
-
-    project_dir = state.get("project_dir", "")
-    change_name = state.get("change_name", "")
     change_location = f"{project_dir}/openspec/changes/{change_name}"
 
     start = time.monotonic()
@@ -175,8 +169,6 @@ def review_node(state: AgentState) -> dict:
             _SYSTEM
             .replace("<<CODE_REVIEW_SKILL>>", code_review_skill)
             .replace("<<TASK>>", state["task"])
-            .replace("<<PLAN_TEXT>>", plan_text)
-            .replace("<<EXECUTION_SUMMARY>>", exec_summary)
             .replace("<<CHANGE_LOCATION>>", change_location)
             .replace("<<PROJECT_DIR_VALUE>>", project_dir)
             .replace("<<CHANGE_NAME_VALUE>>", change_name)

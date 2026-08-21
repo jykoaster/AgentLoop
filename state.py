@@ -3,9 +3,9 @@ from typing import TypedDict
 
 class AgentState(TypedDict):
     task: str
-    analysis: str
-    plan: list[str]
-    execution_result: str
+    analysis: str          # proposal.md 全文，供 human_confirm 顯示
+    plan: list[str]        # tasks.md checkbox 清單，供 human_confirm 顯示（execute／review 自行讀檔）
+    execution_result: str  # 執行節點的文字摘要（除錯／state-file；review 不注入）
     review_result: str   # output from review_node
     review_level: str    # "重寫" | "修補" | "" — set by review_node, read by analyze_plan
     review_blocking: bool  # set by review_node: True → replan (severe issue, or human-selected suggestions); False → pass

@@ -10,11 +10,10 @@ USER_SKILLS_DIR = os.path.expanduser("~/.claude/skills")
 SKILLS_DIRS = [PROJECT_SKILLS_DIR, USER_SKILLS_DIR]
 
 # 只注入完整內容的 skill 白名單；其餘只列名稱
-# 這些 skill 的確切流程（提問方式、文件存放規則、平行 sub-agent 呼叫方式等）必須完整注入才能正確遵循。
-# 其中 grill-with-docs / to-spec / implement 設有 disable-model-invocation，
-# Claude 不會自動觸發，更是非注入不可
+# grilling / domain-modeling：提問方式與詞彙／ADR 寫入規則必須完整注入。
+# code-review：平行 sub-agent 與 smell baseline 必須完整注入（fixed point / spec 來源由 review 節點參數覆蓋）。
 _FULL_CONTENT_SKILLS: set[str] = {
-    "grill-with-docs", "grilling", "domain-modeling", "to-spec", "implement", "code-review",
+    "grilling", "domain-modeling", "code-review",
 }
 
 
