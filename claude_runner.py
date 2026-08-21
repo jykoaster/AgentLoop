@@ -48,6 +48,14 @@ _RESET   = "\033[0m"
 QUESTION_MARKER = "QUESTION:"
 _QUESTION_LINE_RE = re.compile(r"(?:^|\n)\s*" + re.escape(QUESTION_MARKER))
 
+_RESUME_AFTER_LIMIT_PROMPT = (
+    "系統偵測到上一輪呼叫因 token / rate limit 中斷，現在恢復執行。"
+    "在繼續之前，請先重新確認目前的檔案內容與 tasks.md 的勾選狀態"
+    "（中斷前可能已經寫入部分變更或打勾），不要重做已完成的部分，"
+    "也不要假設中斷前的最後一個動作一定完整或正確，"
+    "確認後再從實際進度繼續完成剩餘工作。"
+)
+
 _TOKEN_LIMIT_KEYWORDS = [
     "rate limit",
     "usage limit",
@@ -241,17 +249,21 @@ def call_claude(
             "找不到 `claude` 指令。請確認 Claude Code CLI 已安裝並在 PATH 中。"
         )
 
-    cmd = [
-        "claude", "-p", prompt,
-        "--allowedTools", allowed,
-        "--output-format", "stream-json",
-        "--verbose",
-        "--dangerously-skip-permissions",
-    ]
-    if model:
-        cmd += ["--model", MODEL_IDS.get(model, model)]
-    if resume:
-        cmd += ["--resume", resume]
+    def _build_cmd(p: str, resume_id: str | None) -> list[str]:
+        c = [
+            "claude", "-p", p,
+            "--allowedTools", allowed,
+            "--output-format", "stream-json",
+            "--verbose",
+            "--dangerously-skip-permissions",
+        ]
+        if model:
+            c += ["--model", MODEL_IDS.get(model, model)]
+        if resume_id:
+            c += ["--resume", resume_id]
+        return c
+
+    cmd = _build_cmd(prompt, resume)
 
     while True:
         result = _run_claude_once(timeout, cmd)
@@ -275,7 +287,18 @@ def call_claude(
             if user_input.strip().lower() == "q":
                 print(f"{_YELLOW}  已中止{_RESET}\n", flush=True)
                 return result
-            print(f"{_YELLOW}  重新呼叫 Claude...{_RESET}\n", flush=True)
+
+            if result.session_id:
+                print(
+                    f"{_YELLOW}  接續中斷前的 session（{result.session_id}）繼續...{_RESET}\n",
+                    flush=True,
+                )
+                cmd = _build_cmd(_RESUME_AFTER_LIMIT_PROMPT, result.session_id)
+            else:
+                print(
+                    f"{_YELLOW}  中斷前未取得 session id，改為重新呼叫 Claude...{_RESET}\n",
+                    flush=True,
+                )
             continue
 
         return result

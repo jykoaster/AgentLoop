@@ -451,7 +451,9 @@ Iteration 2:
 - 按 **Enter** → 等待配額更新後重新呼叫 Claude
 - 輸入 **`q`** 後按 Enter → 中止程序並回傳原始錯誤結果
 
-stdin 已關閉（非 TTY / pipe EOF）時自動中止，避免無限等待。此機制讓長時間任務在遇到 API 限流時不需重頭開始，只需等待後繼續。
+stdin 已關閉（非 TTY / pipe EOF）時自動中止，避免無限等待。
+
+**重試時接續原本的 session，不重開新的：** 中斷前那次呼叫若已經透過串流事件拿到 `session_id`（代表 Claude session 已經建立，中途才因限流被打斷），按 Enter 繼續時會改用 `--resume <session_id>` 接上同一個 session，並只送出一段簡短的接續指示（`_RESUME_AFTER_LIMIT_PROMPT`：先確認目前檔案與 tasks.md 實際進度、不要重做已完成的部分、也不要假設中斷前最後一個動作一定完整），而不是重新送出原始的完整 prompt。這避免了「中斷前已經寫入的部分變更/已打勾的 checkbox，被一個完全沒有記憶的新 session 忽略或重做」的問題。只有在中斷發生得太早、連 `session_id` 都還沒拿到時，才會退回重送原始 prompt、開一個全新 session。
 
 ### 模型對應
 
