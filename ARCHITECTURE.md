@@ -239,7 +239,7 @@ CHANGE_NAME: <kebab-case change name>
 
 - 列印分析摘要、TASK 清單（含數量）、OpenSpec change 路徑與工作分支
 - 偵測到非互動式 stdin（如管道重導向）時自動中止，避免無限等待
-- 輸入 `y`（不區分大小寫）→ 返回 `status: "confirmed"` → 工作流程繼續至 `execute`
+- 輸入 `y`（不區分大小寫、忽略空白；`yes` 亦可）→ 返回 `status: "confirmed"` → 工作流程繼續至 `execute`
 - 輸入非 `y` 後，再輸入修改意見（非空白）→ 返回 `status: "needs_revision"` + `human_feedback` → 回到 `analyze_plan` 重新規劃
 - 輸入非 `y` 後，直接按 Enter（空白）、EOFError、KeyboardInterrupt → 返回 `status: "aborted"` → 工作流程結束
 
