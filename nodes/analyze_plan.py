@@ -30,33 +30,73 @@ QUESTION: <你的問題>
 - 使用者可能回覆選項編號（例如「1」）或自訂文字，兩者都視為有效答案並據以判斷後續動作
 - 輸出後立即結束本輪回應，等待使用者回覆後再繼續"""
 
+_SPECINE_ALIGNMENT = """## Specine 規格對齊（grill 結果與規格正文）
+
+規格必須讓後續實作 LLM 對齊使用者目的，而不是只複述任務原句。內容涵蓋 Specine 的十項對齊要素；其中下列三項為**強制、規格裡一定要有具體內容**（即使任務只有一句話，也必須寫出可執行的細節），其餘七項依任務適用才納入、不適用不必硬湊。
+
+### 強制三項（缺一不可）
+
+1. **規範目的（Specification Purpose）**：強調本改動的詳細目標或核心任務，讓實作始終專注預期目標、降低偏離所需功能。
+   - 寫在 `proposal.md` 的 `## Intent`。新建 domain 時，`specs/<domain>/spec.md` 的 `## Purpose` 與 Intent 對齊、不要另寫一套目標。
+2. **輸出要求（Output Requirements）**：強調可觀察輸出的資料類型、格式與約束（例如必顯欄位、精確度、分隔符號、排序規則、狀態列舉）。
+   - 寫進對應 Requirement 的 SHALL/MUST，以及每個主路徑 Scenario 的 THEN。
+3. **範例及解釋（Examples with Explanations）**：提供測試案例的逐步分析，詳細闡述從輸入到輸出的邏輯，讓實作 LLM 看懂程式設計邏輯。
+   - 寫進 Scenario：不得只重述 Requirement。至少一個主路徑 Scenario 要逐步寫清「誰做了什麼 → 系統如何處理 → 使用者看到什麼」。
+   - 若有 `design.md`，測試案例矩陣須與這些逐步範例對齊。
+
+任務只有「幫我實作一個購物車功能」時，規格仍必須具體寫出例如：
+- 範例及解釋：購物車透過點擊商品頁「加入購物車」加入；畫面顯示目前已加入的商品；重新登入後仍看得到購物車。
+- 規範目的：讓使用者一目瞭然看到所有商品價格、數量，並前往結帳頁面。
+- 輸出要求：必須顯示物品名稱、數量、結帳按鈕。
+
+### 其餘七項（適用才寫，不適用可省略）
+
+4. **規範背景（Specification Background）**：問題脈絡、動機、領域知識 → 補在 Intent（目的之後）或 Approach
+5. **關鍵概念（Key Concepts）**：關鍵詞彙定義 → 依 domain-modeling 記錄；Scenario 用詞必須與之一致
+6. **輸入要求（Input Requirements）**：輸入的型別、格式、範圍、前置條件 → Scenario 的 GIVEN/WHEN
+7. **邊界／極端案例（Edge/Corner Cases）**：異常或邊界 → 額外 Scenario，不可只靠主路徑
+8. **APIs**：相關外部 API／函式庫名稱與用途 → Approach 或 `design.md` 的 Technical Approach
+9. **錯誤處理（Error Handling Requirements）**：無效輸入時的預期行為（預設值、例外、特殊機制）→ 獨立 Requirement 或錯誤 Scenario
+10. **提示或建議（Hints or Tips）**：建議演算法、資料結構、既有模組 → Approach / `design.md`；不可用來取代強制三項
+
+純重構／文件／設定且 `skip_specs: true` 時：Intent 仍須寫規範目的；輸出要求與範例及解釋可註明「無外部可觀察行為變化」。"""
+
 _QUESTION_PROTOCOL = f"""## 提問規則（grilling 互動式釐清）
 
 依照 grilling 對本任務逐一提問、以 domain-modeling 即時記錄詞彙與 ADR。
 
 {_QUESTION_FORMAT}
-- 當所有需要釐清的決策都已有共識，才可以繼續進行規格撰寫與最終輸出（此後不得再輸出 QUESTION）"""
+- 初始規劃：強制三項（見「OpenSpec 產出規則」的 Specine 規格對齊）若無法從任務描述＋程式碼探索寫出具體內容（不是任務原句複述），必須繼續提問直到有共識；其餘七項只在需要使用者決策時提問
+- 依人工意見調整：只在修改意見影響強制三項或某項其餘要素時，針對受影響的項提問；不要重跑完整 Specine 清單
+- 當所有需要釐清的決策都已有共識，且強制三項已有可寫進規格的具體內容，才可以繼續進行規格撰寫與最終輸出（此後不得再輸出 QUESTION）"""
 
 _REVIEW_QUESTION_PROTOCOL = f"""## 提問規則（針對 review 結果 grill）
 
 依照 grilling：針對審查結果（Review Result）中每一個被標記的問題點逐一提出質疑性問題，確認：
 - 該問題點的判斷是否成立、影響範圍是否如審查所述
 - 若修正方向有多種可能取捨，請使用者拍板
+不重跑完整 Specine grilling；更新規格時仍須維持強制三項寫在對應檔案位置（見「OpenSpec 產出規則」）。
 
 {_QUESTION_FORMAT}
 - 當 review 標記的每個問題點都已確認完畢，才可以繼續進行後續流程與最終輸出（此後不得再輸出 QUESTION）"""
 
-_OPENSPEC_ARTIFACT_RULES = """## OpenSpec 產出規則（規格文件的實際格式）
+_OPENSPEC_ARTIFACT_RULES = f"""## OpenSpec 產出規則（規格文件的實際格式）
 
 規格文件不寫成單一 Markdown 檔案，而是遵照 OpenSpec 的 change 資料夾格式，寫在目標專案的
-`openspec/changes/<change-name>/` 底下：
+`openspec/changes/<change-name>/` 底下。章節結構維持 OpenSpec，**不要另開「Specine」專章**；
+把對齊要素寫進既有欄位（對照見下方「Specine 規格對齊」）。
+
+{_SPECINE_ALIGNMENT}
+
+寫完後自檢：強制三項是否都已落在上方對應欄位、有具體內容而非任務原句複述；其餘七項是否適用者已納入。缺一項就補寫。
 
 ### proposal.md
 ```markdown
 # Proposal: <Feature/Fix Name>
 
 ## Intent
-<為什麼要做這個改動、要解決的問題>
+<規範目的：本改動的詳細目標或核心任務，讓實作始終對齊使用者目的；不是複述任務原句>
+<適用時補規範背景：問題脈絡、動機、領域知識>
 
 ## Scope
 In scope:
@@ -66,7 +106,7 @@ Out of scope:
 - <明確排除、避免範疇蔓延的事項；沒有則寫「無」>
 
 ## Approach
-<高階解決方案概述>
+<高階解決方案概述；適用時寫入相關 APIs、建議演算法／資料結構／既有模組>
 ```
 
 ### design.md（小改動可略過，採 OpenSpec 預設）
@@ -89,7 +129,7 @@ Out of scope:
 ### 測試案例矩陣（Test Matrix）
 | 輸入值 / 情境 | 預期結果 | 斷言 Target / Reject Key |
 | --- | --- | --- |
-| <案例> | ... | ... |
+| <案例；須涵蓋主路徑的逐步範例，適用時加邊界／錯誤> | ... | ... |
 
 ## Technical Debt & Follow-up Notes
 <需追蹤的技術債；沒有則寫「無」>
@@ -101,12 +141,13 @@ Out of scope:
 ## ADDED Requirements
 
 ### Requirement: <名稱>
-The system SHALL/MUST <一個明確、可觀察的行為>。
+The system SHALL/MUST <一個明確、可觀察的行為；含輸出要求（資料類型、格式、約束）>。
 
 #### Scenario: <情境名稱>
-- GIVEN <前提>
+逐步邏輯：<從觸發（輸入）到可觀察結果（輸出）的處理步驟>
+- GIVEN <前提；適用時含輸入型別／格式／約束>
 - WHEN <觸發>
-- THEN <結果>
+- THEN <結果；必須寫清可觀察輸出的資料類型、格式、約束>
 
 ## MODIFIED Requirements
 （改變既有行為時使用，須包含完整的新版本內容 + 一行說明改了什麼）
@@ -117,7 +158,9 @@ The system SHALL/MUST <一個明確、可觀察的行為>。
 規則：
 - 每個 Requirement 只講一件事、一個 SHALL/MUST/SHOULD；不要把好幾個「而且」塞進同一個 Requirement
 - 每個 Requirement 至少要有一個 Scenario；Scenario 要測到具體情境（含邊界/錯誤情況），不是重述 Requirement
-- 若「Domain 歸屬確認」步驟判定為 domain 首次建立，在 delta 檔案最上面加一段 `## Purpose`（一兩句話說明這個 domain 是做什麼的）；沿用既有 domain 則不需要
+- 涉及使用者可觀察行為的 change：主路徑 Scenario 須含「逐步邏輯」、THEN 須含輸出要求（見上方 Specine 對齊強制三項），不可只寫「購物車可用」這類空泛結果
+- 適用時另寫邊界／錯誤 Scenario（Edge/Corner Cases、Error Handling），不可只靠主路徑
+- 若「Domain 歸屬確認」步驟判定為 domain 首次建立，在 delta 檔案最上面加一段 `## Purpose`（一兩句話，與 proposal Intent 的規範目的對齊）；沿用既有 domain 則不需要
 - 不需要獨立的「User Stories」章節——Scenario 已經是驗收條件的正式化版本
 - 若本次任務純粹是重構/文件/設定調整、完全沒有外部可觀察行為變化，可以在該 change 的 `.openspec.yaml` 加 `skip_specs: true` 並略過 specs delta；若 REMOVED 移除了某個 domain 的最後一個 Requirement，需在 `.openspec.yaml` 加 `retire_capabilities: true` 才能讓 archive 一併刪除該 domain 的 spec 檔
 
@@ -216,7 +259,8 @@ _SYSTEM_INITIAL = f"""你是一位資深全端工程師，負責「分析與規�
 1. **最優先執行**：依下方「確認目標專案與 Domain」完成目標專案與 domain 的確認（該步驟本身就是
    強制的，不可省略）
 2. 用 Read/Glob/Grep 閱讀相關程式碼，找出需修改的位置與潛在衝突
-3. 依 grilling 對本任務進行互動式釐清（見下方「提問規則」），過程中依 domain-modeling 即時記錄詞彙與 ADR
+3. 依 grilling 對本任務進行互動式釐清（見下方「提問規則」），過程中依 domain-modeling 即時記錄詞彙與 ADR；
+   grill 結果須能支撐 Specine 強制三項的具體內容（見下方「OpenSpec 產出規則」），其餘七項依適用納入
 4. 共識達成後，依下方「建立 OpenSpec Change」與「OpenSpec 產出規則」完成規格文件
    （探索程式碼以確認測試 seam，優先使用既有 seam、避免新增）
 
@@ -263,12 +307,12 @@ _SYSTEM_REPLAN = f"""你是一位資深全端工程師，負責「重新分析�
    - 確認 rollback 完成後再繼續（`openspec/` 必須仍在，尤其是
      `openspec/changes/<<CHANGE_NAME_VALUE>>/`）
 2. 重新閱讀現有程式碼；依下方「提問規則」針對審查結果逐點 grill 確認，不需重新進行完整的 grilling 釐清或文件同步
-3. 依下方「更新既有的 OpenSpec Change」與「OpenSpec 產出規則」重新撰寫規格文件
+3. 依下方「更新既有的 OpenSpec Change」與「OpenSpec 產出規則」重新撰寫規格文件（強制三項仍須寫在對應位置）
 
 ### 若為「修補」：
 1. 不需要 rollback，保留已完成的修改
 2. 閱讀現有程式碼，精確定位需要修正的地方；依下方「提問規則」針對審查結果逐點 grill 確認
-3. 依下方「更新既有的 OpenSpec Change」與「OpenSpec 產出規則」更新規格文件相關段落（不必整份重寫，但維持章節結構，不可整段刪除某章節）
+3. 依下方「更新既有的 OpenSpec Change」與「OpenSpec 產出規則」更新規格文件相關段落（不必整份重寫，但維持章節結構，不可整段刪除某章節；強制三項仍須保留）
 
 {_CHANGE_SETUP_EXISTING}
 {_REWRITE_CHECKBOX_RESET}
@@ -300,7 +344,8 @@ _SYSTEM_HUMAN_REVISE = f"""你是一位資深全端工程師，負責「根據�
 1. 仔細理解使用者的修改意見；若意見不夠明確，依下方「提問規則」提問確認，不要自行臆測
 2. 視需要用 Read/Glob/Grep 重新閱讀相關程式碼
 3. 若修改意見牽涉到詞彙或架構決策的變更，依 domain-modeling 更新 CONTEXT.md / docs/adr/
-4. 依下方「更新既有的 OpenSpec Change」與「OpenSpec 產出規則」更新規格文件（維持章節結構，不可整段刪除某章節）
+4. 依下方「更新既有的 OpenSpec Change」與「OpenSpec 產出規則」更新規格文件（維持章節結構，不可整段刪除某章節）；
+   強制三項若被意見改到就一併改寫，沒被改到也不可刪掉
 
 {_CHANGE_SETUP_EXISTING}
 
