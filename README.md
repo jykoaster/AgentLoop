@@ -104,13 +104,16 @@ python -m AgentLoop.main "幫我在後端新增一個 GET /tables/featured 端�
 python -m AgentLoop.main --node analyze_plan "任務描述"
 python -m AgentLoop.main --node execute --state-file /tmp/state.json "任務描述"
 python -m AgentLoop.main --node review "任務描述"
+
+# archive：參數即 OpenSpec change 名稱，會掃描工作區 */openspec/changes/<name>/ 定位後封存
+python -m AgentLoop.main --node archive 54-feat-ai-ad-content-extend-to-1024-chars
 ```
 
 完整工作流跑到 `human_confirm` 時會暫停，在終端機顯示規劃摘要與 TASK 清單，輸入 `y` 才會繼續往下執行。
 
-執行過程中，`analyze_plan` 第一次進行初始規劃時會先在終端機詢問 OpenSpec change 名稱（kebab-case）：直接輸入想要的名稱即可，Claude 會據此在目標專案下建立 `openspec/changes/<名稱>/`；若直接按 Enter 留空，則改用當時目標專案的 git branch 名稱作為 change 名稱。此值會沿用到同一個任務後續的重新規劃／依人工意見調整計畫，不會重複問、也不會重新命名既有 change。
+執行過程中，`analyze_plan` 第一次進行初始規劃時會先在終端機詢問**本次任務要使用的 git 分支名稱（必填）**：已存在則切過去，不存在則從目前 HEAD 新建。OpenSpec change 名稱由此分支轉成 kebab-case（例如 `feature/add-login` → `feature-add-login`），之後規劃、實作、審查、archive 都在這個分支上進行。此值會沿用到同一個任務後續的重新規劃／依人工意見調整，不會重複問。
 
-規格文件遵照 [OpenSpec](https://github.com/Fission-AI/OpenSpec) 的 change/spec-delta 規則，寫在**目標專案**（不是 AgentLoop 這個 repo）下的 `openspec/changes/<change 名稱>/`（`proposal.md`/`design.md`/`tasks.md`/`specs/<domain>/spec.md`）。目標專案第一次被處理時，若尚未有 `openspec/` 目錄，`analyze_plan` 會自動執行一次 `openspec init` bootstrap，不需要手動介入；`openspec` CLI 已由 Dockerfile 自動安裝在容器內。審查通過後，最後一個節點會呼叫 `openspec archive` 把這次的規格差異併入目標專案持久的 `openspec/specs/`，跨任務累積成完整的行為規格。
+規格文件遵照 [OpenSpec](https://github.com/Fission-AI/OpenSpec) 的 change/spec-delta 規則，寫在**目標專案**（不是 AgentLoop 這個 repo）下的 `openspec/changes/<change 名稱>/`（`proposal.md`/`tasks.md`/`specs/<domain>/spec.md`；非小改動時另有 `design.md`）。目標專案第一次被處理時，若尚未有 `openspec/` 目錄，`analyze_plan` 會自動執行一次 `openspec init` bootstrap，不需要手動介入；`openspec` CLI 已由 Dockerfile 自動安裝在容器內。審查通過後，最後一個節點會呼叫 `openspec archive` 把這次的規格差異併入目標專案持久的 `openspec/specs/`，跨任務累積成完整的行為規格。
 
 ---
 
@@ -120,10 +123,10 @@ python -m AgentLoop.main --node review "任務描述"
 
 | 節點             | 角色              | 說明                                                                                                                      |
 | ---------------- | ----------------- | ------------------------------------------------------------------------------------------------------------------------- |
-| `analyze_plan`   | 規劃 Agent        | 讀取任務與目標專案程式碼，必要時互動式提問釐清需求，輸出結構化 TASK 清單與 OpenSpec change 規格文件                       |
-| `human_confirm`  | 人工確認閘        | 顯示計畫摘要，等待使用者輸入 `y` 確認才放行；也可輸入修改意見打回重新規劃，或直接中止                                     |
-| `execute`        | 執行 Agent        | 依序完成計畫中的每個 TASK：改程式碼、同步商業邏輯文件、跑測試並修復失敗、勾選 tasks.md 對應項目                           |
-| `review`         | 審查 Agent        | 唯讀方式比對 `git diff HEAD`，從 Standards（是否符合專案規範）與 Spec（是否符合規格）兩軸審查，判定是否可合併             |
+| `analyze_plan`   | 規劃 Agent        | 讀取任務與目標專案程式碼，必要時互動式提問釐清需求，把規格寫進目標專案的 OpenSpec change 資料夾 |
+| `human_confirm`  | 人工確認閘        | 顯示 proposal.md 與 tasks.md 摘要，等待使用者輸入 `y` 確認才放行；也可輸入修改意見打回重新規劃，或直接中止 |
+| `execute`        | 執行 Agent        | 自行讀取 OpenSpec change，依 tasks.md 依序改程式碼、同步商業邏輯文件、跑測試並修復失敗、勾選對應項目 |
+| `review`         | 審查 Agent        | 唯讀比對 `git diff HEAD` 與 OpenSpec change，從 Standards／Spec 兩軸審查，判定是否可合併 |
 | `archive_change` | 收尾（純 Python） | review 通過後，呼叫 `openspec archive` 把這次的規格差異併入目標專案持久的 `openspec/specs/`；失敗只印警告，不影響流程結束 |
 
 審查只有在發現**嚴重影響功能**的問題時（核心邏輯錯誤、功能無法正常運作、架構根本偏差等）才自動標記「重寫」或「修補」、直接回到 `analyze_plan` 重新規劃；其餘不影響功能的修改建議會逐條列出，在終端機讓使用者選擇要修哪幾條（或全部不修，直接放行），只有選中至少一條才會回到 `analyze_plan` 針對選中的建議重新規劃。重新規劃後再次經過人工確認才重跑 `execute` → `review`，最多重試 3 輪，超過即強制結束（且不會 archive）。
@@ -136,15 +139,12 @@ python -m AgentLoop.main --node review "任務描述"
 
 | Skill                                                                                                     | 使用節點                  | 完整內容 | 用途                                                                      |
 | ----------------------------------------------------------------------------------------------------------- | ------------------------- | -------- | ------------------------------------------------------------------------- |
-| [`grill-with-docs`](https://github.com/mattpocock/skills/blob/main/skills/engineering/grill-with-docs/SKILL.md) | `analyze_plan`            | 是       | 初始規劃／依人工意見重新規劃時，互動式逐一提問釐清需求                     |
-| [`grilling`](https://github.com/mattpocock/skills/blob/main/skills/productivity/grilling/SKILL.md)             | `analyze_plan`            | 是       | 提供 `grill-with-docs` 的提問流程本體                                     |
+| [`grilling`](https://github.com/mattpocock/skills/blob/main/skills/productivity/grilling/SKILL.md)             | `analyze_plan`            | 是       | 互動式逐一提問釐清需求（初始規劃／依人工意見調整；replan 只針對 review 結果） |
 | [`domain-modeling`](https://github.com/mattpocock/skills/blob/main/skills/engineering/domain-modeling/SKILL.md) | `analyze_plan`            | 是       | 提問過程中即時記錄詞彙與 ADR                                              |
-| [`to-spec`](https://github.com/mattpocock/skills/blob/main/skills/engineering/to-spec/SKILL.md)                 | `analyze_plan`            | 是       | 規格文件撰寫依據（實際輸出格式由 `_SPEC_TEMPLATE` 固定覆蓋）              |
 | [`tdd`](https://github.com/mattpocock/skills/blob/main/skills/engineering/tdd/SKILL.md)                         | `analyze_plan`、`execute` | 否       | 規劃「撰寫／更新測試」TASK、執行測試 TASK 時採紅-綠循環                    |
-| [`implement`](https://github.com/mattpocock/skills/blob/main/skills/engineering/implement/SKILL.md)             | `execute`                 | 是       | 執行階段主流程依據（commit 與 `/code-review` 步驟由 `_SYSTEM` 覆蓋關閉）  |
-| [`code-review`](https://github.com/mattpocock/skills/blob/main/skills/engineering/code-review/SKILL.md)         | `review`                  | 是       | Standards／Spec 兩軸審查，各自透過平行 sub-agent 產出報告                 |
+| [`code-review`](https://github.com/mattpocock/skills/blob/main/skills/engineering/code-review/SKILL.md)         | `review`                  | 是       | Standards／Spec 兩軸審查；fixed point / spec 來源由 `review` 節點參數覆蓋 |
 
-以上 skill 皆原本來自 [`mattpocock/skills`](https://github.com/mattpocock/skills)（透過 `~/.agents/.skill-lock.json` 安裝到 `~/.agents/skills/`），現已直接複製一份進 `AgentLoop/.claude/skills/<name>/` 隨本專案版控；若上游更新，需手動重新複製對應目錄以同步。`_FULL_CONTENT_SKILLS`（`skill_loader.py`）白名單決定完整內容注入名單；node 各自的 `_SKILLS` 常數（`nodes/analyze_plan.py`、`nodes/execute.py`）決定該節點會用到哪些 skill。`review` 節點的 `code-review` 是直接呼叫 `build_skills_block(["code-review"])`，不透過 `_SKILLS` 常數。其餘依目標專案技術棧動態選用、本專案未內建的 skill（例如 `vue-best-practices`、`nuxt-vitest-msw`），仍需透過 host 的 `~/.claude/skills/`（`~/.agents/skills/` 的 symlink）唯讀掛載進容器才能被找到。
+以上 skill 皆原本來自 [`mattpocock/skills`](https://github.com/mattpocock/skills)（透過 `~/.agents/.skill-lock.json` 安裝到 `~/.agents/skills/`），現已直接複製一份進 `AgentLoop/.claude/skills/<name>/` 隨本專案版控；若上游更新，需手動重新複製對應目錄以同步。`_FULL_CONTENT_SKILLS`（`skill_loader.py`）白名單目前為 `grilling`、`domain-modeling`、`code-review`；node 各自的 `_SKILLS` 常數（`nodes/analyze_plan.py`、`nodes/execute.py`）決定該節點會用到哪些 skill。`review` 節點的 `code-review` 是直接呼叫 `build_skills_block(["code-review"])`，不透過 `_SKILLS` 常數。其餘依目標專案技術棧動態選用、本專案未內建的 skill（例如 `vue-best-practices`、`nuxt-vitest-msw`），仍需透過 host 的 `~/.claude/skills/`（`~/.agents/skills/` 的 symlink）唯讀掛載進容器才能被找到。
 
 （OpenSpec 的規格產出流程不透過此 skill 機制載入，而是寫死在 `analyze_plan.py` 的 prompt 常數中，並由 `openspec_runner.py` 直接呼叫 `openspec` CLI，詳見上方「執行 Agent 工作流」一節。）
 
