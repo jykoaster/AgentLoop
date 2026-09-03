@@ -108,9 +108,14 @@ _OPENSPEC_ARTIFACT_RULES = f"""## OpenSpec 產出規則（規格文件的實際�
 只描述本次「改了什麼」，不是整份系統規格：`## ADDED Requirements` / `## MODIFIED Requirements` /
 `## REMOVED Requirements` 三種分節，每個 `### Requirement:`（SHALL/MUST/SHOULD）底下至少一個
 `#### Scenario:`（逐步邏輯 + GIVEN/WHEN/THEN）。規則：
+- 先用 Read/Grep 讀 `<project_dir>/openspec/specs/<domain>/spec.md`（已合併進主規格的既有內容，不是這次 change 自己的 delta 檔案），逐一分析既有 Requirement 的規範範圍——不是只比對標題或關鍵字：本次要規範的行為若與某個既有 Requirement 完全相同、或屬於同一件事可以合併進去（而不是另開一個涵蓋範圍重疊的新 Requirement），就用 `MODIFIED Requirements` 改寫該 Requirement（須含合併後完整的新版本內容 + 一行說明改了什麼）；找不到可合併或重複的既有 Requirement，才用 `ADDED Requirements` 視為新規則。domain 首次建立時該檔案還不存在，一律視為 ADDED
+- Requirement 與 Scenario 標題（`### Requirement:` / `#### Scenario:`）用抽象、涵蓋規則本身的措辭命名，不要寫死具體數量或列舉值：寫死的標題（連帶內文）在功能擴充時（例如權限或分頁數量增加）會對不上新情況，被迫另開一個 Requirement/Scenario，而不是原本的規則自然涵蓋。
+  錯誤：`Scenario: user 端兩個權限皆為 true 時兩個子分頁都顯示`；正確：`Scenario: 登入者具備全部受管功能時顯示對應開關`
 - 每個 Requirement 只講一件事、一個 SHALL/MUST/SHOULD；不要把好幾個「而且」塞進同一個 Requirement
 - 每個 Requirement 至少要有一個 Scenario；Scenario 要測到具體情境（含邊界/錯誤情況），不是重述 Requirement
 - 涉及使用者可觀察行為的 change：主路徑 Scenario 須含「逐步邏輯」、THEN 須含輸出要求（見上方 Specine 對齊強制三項），不可只寫「購物車可用」這類空泛結果
+- Requirement 與 Scenario 都只寫規範（系統對外呈現的行為與約束），不寫實作細節——不限特定技術棧，泛指任何屬於「怎麼做到」而非「對外呈現什麼」的內容（例如前端的 DOM 屬性／CSS selector／元件庫名稱，或後端的資料庫欄位型別／SQL／特定框架 API／內部函式或類別或變數名稱）；這些留給 design.md 的 Technical Approach。
+  錯誤：`THEN 該 a-textarea 的 DOM maxlength 屬性為 1024`；正確：`THEN 字元計數以 1024 為上限` + `AND 使用者無法讓該欄位保留超過 1024 字`
 - 適用時另寫邊界／錯誤 Scenario（Edge/Corner Cases、Error Handling），不可只靠主路徑
 - 依下方「目標專案與 Domain」已確認的歸屬：沿用既有 domain 不需要加 `## Purpose`；domain 首次建立才在 delta 檔案最上面加一段 `## Purpose`（一兩句話，與 proposal Intent 的規範目的對齊）
 - 不需要獨立的「User Stories」章節——Scenario 已經是驗收條件的正式化版本
@@ -210,6 +215,13 @@ delta 檔案最上面需加 `## Purpose`，與 proposal Intent 對齊）。"""
 
 _DOMAIN_CONTEXT_NEW = """使用者已確認本次為建立新 domain：請依任務語意自訂新 domain 名稱，視為
 「domain 首次建立」，specs/<domain>/spec.md 最上面需加 `## Purpose`（與 proposal Intent 對齊）。"""
+
+_DOMAIN_CONTEXT_NEW_WITH_PURPOSE = """使用者已確認本次為建立新 domain，並指定了這個 domain 的
+Purpose：<<DOMAIN_PURPOSE_VALUE>>
+
+請依任務語意自訂新 domain 名稱，視為「domain 首次建立」，specs/<domain>/spec.md 最上面的
+`## Purpose` 直接採用使用者這段文字（不要自己另外改寫或簡化），並確認 proposal.md 的 `## Intent`
+與其對齊。"""
 
 _PROJECT_AND_DOMAIN_INFO = """## 目標專案與 Domain（已由系統確認，不需再詢問或用 Bash 檢查）
 
@@ -556,6 +568,24 @@ def _ask_domain_selection(project_dir: str) -> list[str]:
         print(f"{_YELLOW}  請輸入清單中的編號{_RESET}", flush=True)
 
 
+def _ask_domain_purpose() -> str:
+    """本次確定會建立新 domain 時（僅初始規劃）詢問使用者這個 domain 的 Purpose，選填——
+    留白（含非互動式環境、使用者中止）就交由 Claude 依當次任務語意自行撰寫，不視為錯誤。
+    """
+    print(
+        f"\n{_YELLOW}  [分析+規劃 Agent] 這是新建立的 domain，若要指定它的 Purpose 請輸入"
+        f"（選填，直接 Enter 留白則由 Agent 依本次任務自行撰寫）：{_RESET}",
+        flush=True,
+    )
+    if not sys.stdin.isatty():
+        return ""
+    try:
+        return input(f"{_YELLOW}  > {_RESET}").strip()
+    except (EOFError, KeyboardInterrupt):
+        print(f"\n{_YELLOW}  已略過，由 Agent 自行撰寫 Purpose{_RESET}\n", flush=True)
+        return ""
+
+
 def _resolve_project_dir() -> str:
     """初始規劃時（僅一次）決定目標專案目錄：workspace 只支援掛載單一目標專案，直接讀
     .env 的 TARGET_PROJECT，不再掃描 workspace 或詢問使用者。缺少環境變數、或對應目錄
@@ -674,10 +704,16 @@ def analyze_plan_node(state: AgentState) -> dict:
             return _fail(f"openspec init 失敗：{init_result.error_text}")
 
         domains = _ask_domain_selection(project_dir)
-        domain_context_value = (
-            _DOMAIN_CONTEXT_EXISTING.replace("<<DOMAIN_LIST_VALUE>>", "、".join(domains))
-            if domains else _DOMAIN_CONTEXT_NEW
-        )
+        if domains:
+            domain_context_value = _DOMAIN_CONTEXT_EXISTING.replace(
+                "<<DOMAIN_LIST_VALUE>>", "、".join(domains)
+            )
+        else:
+            domain_purpose = _ask_domain_purpose()
+            domain_context_value = (
+                _DOMAIN_CONTEXT_NEW_WITH_PURPOSE.replace("<<DOMAIN_PURPOSE_VALUE>>", domain_purpose)
+                if domain_purpose else _DOMAIN_CONTEXT_NEW
+            )
 
         change_result = ensure_change_created(project_dir_abs, change_name)
         if not change_result.ok:

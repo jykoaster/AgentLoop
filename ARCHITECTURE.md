@@ -201,8 +201,13 @@ OpenSpec change 位置，不需要各自重新判斷；`archive_node` 單獨執�
    domain 時在終端機列出清單 + 一個「以上皆非，建立新 domain」選項，讓使用者輸入編號選擇本次
    規格 delta 歸屬哪個（可用逗號輸入多個編號，對應「同一任務涉及多個既有 domain」的情況）；
    非互動式環境預設視為新建 domain。選定的既有 domain 名稱清單會組進 system prompt 的
-   `_DOMAIN_CONTEXT_EXISTING` 區塊（沿用名稱、不加 `## Purpose`），空清單則用
-   `_DOMAIN_CONTEXT_NEW`（Claude 自行命名，視為「domain 首次建立」，需加 `## Purpose`）
+   `_DOMAIN_CONTEXT_EXISTING` 區塊（沿用名稱、不加 `## Purpose`）。回傳空清單（確定是純粹新建
+   domain：沒有既有 domain，或使用者選了「建立新 domain」）時，額外呼叫 `_ask_domain_purpose()`
+   讓使用者選填這個新 domain 的 Purpose 文字；有填就用 `_DOMAIN_CONTEXT_NEW_WITH_PURPOSE`（Claude
+   直接採用這段文字寫入 `## Purpose`，不自己改寫），留白（含非互動式環境、使用者中止）則用
+   `_DOMAIN_CONTEXT_NEW`（Claude 依任務語意自行命名 domain 並撰寫 `## Purpose`）。若使用者選擇同時
+   涉及既有 domain 又可能需要新 domain（回傳清單非空），是否額外建立新 domain 完全交給 Claude 判斷，
+   不會觸發這個 Purpose 提問——Python 只在「確定會建立新 domain」時才問
 3. `openspec_runner.ensure_change_created()`：change 資料夾不存在才執行 `openspec new change
    <name>`，已存在則直接略過
 
@@ -277,7 +282,7 @@ proposal.md/design.md/specs delta/tasks.md 的空白骨架——這部分只留�
 - **產出規則**（`_OPENSPEC_ARTIFACT_RULES`，三種模式共用）：章節結構維持 OpenSpec，不另開 Specine 專章；`_SPECINE_ALIGNMENT` 把十項對齊要素對應進既有欄位。強制三項缺一不可（純重構且 `skip_specs: true` 時 Intent 仍須寫目的，輸出／範例可註明無外部可觀察行為）：規範目的 → `proposal.md` 的 `## Intent`（新建 domain 的 `## Purpose` 與其對齊）；輸出要求 → Requirement 的 SHALL/MUST 與主路徑 Scenario 的 THEN（資料類型、格式、約束）；範例及解釋 → 至少一個主路徑 Scenario 的「逐步邏輯」（從輸入到輸出）。其餘七項適用才寫：背景 → Intent／Approach；關鍵概念 → domain-modeling；輸入要求 → GIVEN/WHEN；邊界／錯誤處理 → 額外 Scenario；APIs／提示 → Approach 或 `design.md`
   - `proposal.md`：`## Intent`（規範目的，適用時補背景）/ `## Scope`（In scope / Out of scope）/ `## Approach`（適用時寫 APIs、建議演算法／資料結構）
   - `design.md`（採 OpenSpec 預設：小改動可略過、不要建立空檔；有架構取捨、新模組／接縫、或需要留下技術債時才寫）：`## Technical Approach` / `## Architecture Decisions` / `## Testing Strategy`（含「Seam（測試接縫）」「測試案例矩陣（Test Matrix）」固定小節，矩陣須涵蓋主路徑逐步範例）/ `## Technical Debt & Follow-up Notes`；一旦撰寫，沒有內容也要保留標題填「無」，不可留白或整段刪除
-  - `specs/<domain>/spec.md`（delta，可能有多個 domain）：只用 `## ADDED Requirements` / `## MODIFIED Requirements` / `## REMOVED Requirements` 三種分節，`### Requirement:`（SHALL/MUST/SHOULD，一個 Requirement 只講一件事，含輸出要求）+ `#### Scenario:`（逐步邏輯 + GIVEN/WHEN/THEN，至少一個主路徑須含從輸入到輸出的逐步解釋，THEN 須含輸出格式／約束）；新建 domain 才加 `## Purpose`（與 Intent 對齊）；純重構/文件/設定變更可在 `.openspec.yaml` 設 `skip_specs: true` 略過；REMOVED 移除某 domain 最後一個 Requirement 時需設 `retire_capabilities: true` 才會被 archive 一併刪除該 domain 的 spec
+  - `specs/<domain>/spec.md`（delta，可能有多個 domain）：只用 `## ADDED Requirements` / `## MODIFIED Requirements` / `## REMOVED Requirements` 三種分節，`### Requirement:`（SHALL/MUST/SHOULD，一個 Requirement 只講一件事，含輸出要求）+ `#### Scenario:`（逐步邏輯 + GIVEN/WHEN/THEN，至少一個主路徑須含從輸入到輸出的逐步解釋，THEN 須含輸出格式／約束）；新建 domain 才加 `## Purpose`（與 Intent 對齊，或直接採用使用者透過 `_ask_domain_purpose()` 指定的文字，見上方「Domain 歸屬確認」）；純重構/文件/設定變更可在 `.openspec.yaml` 設 `skip_specs: true` 略過；REMOVED 移除某 domain 最後一個 Requirement 時需設 `retire_capabilities: true` 才會被 archive 一併刪除該 domain 的 spec。寫之前須先 Read/Grep 目標專案已合併的 `openspec/specs/<domain>/spec.md`（不是這次 change 的 delta），逐一比對既有 Requirement 的規範範圍：能合併或完全重複就用 MODIFIED 改寫，找不到才用 ADDED，避免同一件事拆成多個重疊的 Requirement；Requirement／Scenario 標題用抽象措辭涵蓋規則本身，不寫死具體數量或列舉值（例如「兩個權限皆為 true」），否則功能擴充時舊標題對不上新情況，被迫另開一個而非既有規則自然涵蓋；兩者都只寫規範（系統對外呈現的行為與約束），不寫實作細節（不限技術棧，泛指前端 DOM/CSS/元件庫或後端 DB 欄位型別/SQL/框架 API/內部函式類別變數名稱），實作方式留給 `design.md` 的 Technical Approach
   - `tasks.md`：`## N. <群組>` + `- [ ] N.M <任務>` checkbox、階層編號——這份檔案本身就是任務清單；`execute` 與 `review` 都自行 Read 完整 change 資料夾（不從 `state["plan"]` 注入扁平清單），`execute` 逐項勾選、`review` 核對完成度
   - Claude 完成撰寫、`_run_with_grilling()` 的問答迴圈結束後，`_run_with_validate()` 呼叫
     `openspec_runner.validate_change()` 執行 `openspec validate <change-name> --json --strict`：
