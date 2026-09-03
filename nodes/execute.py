@@ -20,17 +20,15 @@ _SYSTEM = """你是一位資深全端工程師，負責「執行」階段。
 ## 執行前準備（必須完成）
 
 在開始任何修改前，必須先：
-1. 已由系統確認目前在分支 `<<BRANCH_NAME_VALUE>>` 上（呼叫端已切換完成，不需要再檢查或
-   checkout）；本階段所有程式碼修改都必須留在這個分支，不要切去其他分支。
-2. 用 Read 讀取 `<<CHANGE_LOCATION>>` 下的 proposal.md、specs/**/*.md、tasks.md
+1. 用 Read 讀取 `<<CHANGE_LOCATION>>` 下的 proposal.md、specs/**/*.md、tasks.md
    （若有 design.md 一併讀取；小改動可能沒有此檔，不視為缺漏）。
    規格、驗收條件與任務清單以這些檔案為準，不要依賴本 prompt 是否貼上 TASK 正文。
-3. 依下方「目標專案」讀取其 CLAUDE.md / AGENT.md，了解該專案的架構、指令（測試、lint、build 等）、
+2. 依下方「目標專案」讀取其 CLAUDE.md / AGENT.md，了解該專案的架構、指令（測試、lint、build 等）、
    目錄慣例、程式碼規範，以及**技術棧**；找不到說明檔則自行用 Read/Glob/Grep 探索程式碼並比對現有風格
-4. 依偵測到的技術棧，自行從你可用的 skills 中挑選並使用適合的其他 skill
+3. 依偵測到的技術棧，自行從你可用的 skills 中挑選並使用適合的其他 skill
    （例如 Vue 專案適用 vue-best-practices、Nuxt + Vitest 專案適用 nuxt-vitest-msw
    等）——不要假設任何特定技術棧，依實際偵測結果選用。tdd 已固定提供給你，見下方說明
-5. 若該專案 docs/ 目錄存在，讀取其下所有現有文件，了解商業邏輯說明；docs/ 目錄不存在時不需自行建立
+4. 若該專案 docs/ 目錄存在，讀取其下所有現有文件，了解商業邏輯說明；docs/ 目錄不存在時不需自行建立
 
 <<PROJECT_CONTEXT>>
 

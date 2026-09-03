@@ -12,8 +12,12 @@ SKILLS_DIRS = [PROJECT_SKILLS_DIR, USER_SKILLS_DIR]
 # 只注入完整內容的 skill 白名單；其餘只列名稱
 # grilling / domain-modeling：提問方式與詞彙／ADR 寫入規則必須完整注入。
 # code-review：平行 sub-agent 與 smell baseline 必須完整注入（fixed point / spec 來源由 review 節點參數覆蓋）。
+# tdd：紅-綠循環規則必須完整注入——Claude Code 原生的 skill 探索只認 $HOME/.claude/skills/，
+# 跟 claude_runner.py 呼叫 subprocess 時的 cwd 無關，AgentLoop/.claude/skills/tdd/ 這份隨版控帶著走
+# 的內建副本永遠不會被原生機制發現；只列名稱的話，能不能用完全取決於執行者自己的 ~/.claude/skills/
+# 剛好有沒有同名 skill，違反了本檔案開頭「讓專案自帶所需 skill、不依賴使用者本機設定」的設計目標。
 _FULL_CONTENT_SKILLS: set[str] = {
-    "grilling", "domain-modeling", "code-review",
+    "grilling", "domain-modeling", "code-review", "tdd",
 }
 
 

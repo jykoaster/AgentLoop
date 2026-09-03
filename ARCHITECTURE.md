@@ -268,11 +268,11 @@ validate 的錯誤修正也接到同一套「有問題就等使用者、否則�
 - 涉及新增或修改行為的 TASK，須額外排入對應的「撰寫／更新測試」TASK，讓 `execute` 有明確依據依 tdd skill 執行紅-綠循環；純文件、設定調整或不改變行為的重構可不需要
 - 是否需要新增「更新文件」TASK，依該任務所屬專案的 `CLAUDE.md` / `AGENT.md` 判斷：說明檔要求同步維護 `docs/` 商業邏輯說明文件才排入，未提及此類慣例則不強制新增
 
-**注入的 Skills（完整內容）：** 初始規劃／依人工意見調整用 `_SKILLS`（`grilling`、`domain-modeling`）；
-重新規劃（review 觸發）改用 `_SKILLS_REPLAN`，**不含** `domain-modeling`——`_SYSTEM_REPLAN` 本來就
-明講「不需重新進行完整的 grilling 釐清或文件同步」，注入它的完整內容（三個 skill 裡最大的一塊）
-純屬浪費 token。三種模式都另列名稱（不注入完整內容）：`tdd`。規格格式由 `_OPENSPEC_ARTIFACT_RULES`
-寫死。
+**注入的 Skills（完整內容）：** 初始規劃／依人工意見調整用 `_SKILLS`（`grilling`、`domain-modeling`、`tdd`）；
+重新規劃（review 觸發）改用 `_SKILLS_REPLAN`（`grilling`、`tdd`），**不含** `domain-modeling`——
+`_SYSTEM_REPLAN` 本來就明講「不需重新進行完整的 grilling 釐清或文件同步」，注入它的完整內容（三個
+skill 裡最大的一塊）純屬浪費 token。`tdd` 三種模式都注入完整內容（見下方「Skill 系統作為知識注入」
+關於為什麼不能只列名稱）。規格格式由 `_OPENSPEC_ARTIFACT_RULES` 寫死。
 
 **檔案骨架範本（`_OPENSPEC_TEMPLATES`）只注入初始規劃：** replan／依人工意見調整都是 Edit 既有
 change 資料夾裡已存在的檔案，Claude 直接 Read 就看得到實際格式，不需要再看一次
@@ -331,7 +331,7 @@ proposal.md/design.md/specs delta/tasks.md 的空白骨架——這部分只留�
 1. Python 先用 `git_ops.ensure_on_branch()` 把目標專案切到 `state["branch_name"]`（已存在則 checkout，不存在則建立）；失敗則 `status: "error"`，不呼叫 Claude
 2. Read `openspec/changes/<change_name>/` 下的 proposal.md、specs/**/*.md、tasks.md（若有 design.md 一併讀取）。規格、驗收條件與任務清單以這些檔案為準，**不**把 `state["plan"]` 扁平清單貼進 prompt
 3. 依 `project_context.build_project_doc_hint_for(project_dir)` 指名的目標專案，Read 讀取其 `CLAUDE.md` / `AGENT.md`，了解架構、指令（測試、lint、build 等）、目錄慣例、程式碼規範與技術棧；找不到說明檔則自行 Read/Glob/Grep 探索並比對現有風格
-4. 依偵測到的技術棧，**自行**從可用的 skills 中挑選並使用適合的其他 skill（例如 Vue 專案適用 `vue-best-practices`、Nuxt + Vitest 專案適用 `nuxt-vitest-msw`）——不寫死任何特定技術棧的 skill 清單。`tdd` 已是固定列出名稱的 skill（見下方「注入的 Skills」），不需要另外挑選
+4. 依偵測到的技術棧，**自行**從可用的 skills 中挑選並使用適合的其他 skill（例如 Vue 專案適用 `vue-best-practices`、Nuxt + Vitest 專案適用 `nuxt-vitest-msw`）——不寫死任何特定技術棧的 skill 清單。這些完全不經過 `skill_loader.py`，靠 Claude Code 自己原生的 skill 探索機制（只認執行者 `$HOME/.claude/skills/`，見下方「Skill 系統作為知識注入」）；`tdd` 已固定完整注入（見下方「注入的 Skills」），不需要另外挑選
 5. 若該專案 `docs/` 目錄存在，讀取其下所有現有文件，了解商業邏輯說明；`docs/` 目錄不存在時不需自行建立
 
 **執行方式：** 依 change 資料夾內 `tasks.md` 的順序嚴格依序完成：
@@ -353,7 +353,7 @@ proposal.md/design.md/specs delta/tasks.md 的空白骨架——這部分只留�
 2. 所有已新增/修改的說明文件清單
 3. 每個 TASK 的完成狀態（✅ 已完成 / ❌ 未完成 + 原因）
 
-**注入的 Skills：** `tdd`（列名稱）；其餘依偵測到的技術棧由 Agent 自行從可用 skills 中挑選使用。不 commit、不自行 `/code-review`，流程寫在 `_SYSTEM`。
+**注入的 Skills：** `tdd`（完整內容，見下方「Skill 系統作為知識注入」關於為什麼不能只列名稱）；其餘依偵測到的技術棧由 Agent 自行從可用 skills 中挑選使用（依賴 Claude Code 自己的原生 skill 探索，不經過 `skill_loader.py`）。不 commit、不自行 `/code-review`，流程寫在 `_SYSTEM`。
 
 ---
 
@@ -475,7 +475,11 @@ SUGGESTION 2: [建議內容與理由]
 
 ### 5. Skill 系統作為知識注入
 
-`skill_loader.py` 讀取 Claude Code Skill 文件，以完整內容或僅列名稱的方式注入系統提示。查找順序為專案內建的 `AgentLoop/.claude/skills/<name>/` 優先，找不到才 fallback 到使用者本機的 `~/.claude/skills/<name>/`。目前注入的 skill 是 `grilling`、`domain-modeling`、`tdd`、`code-review`（前兩者與 `code-review` 走 `_FULL_CONTENT_SKILLS` 完整注入；`tdd` 只列名稱）。規格格式由 `analyze_plan` 的 `_OPENSPEC_ARTIFACT_RULES` 寫死，執行流程寫在 `execute` 的 `_SYSTEM`。fallback 路徑保留給其餘依技術棧動態選用、專案未內建的 skill（例如 `vue-best-practices`、`nuxt-vitest-msw`）。
+`skill_loader.py` 讀取 Claude Code Skill 文件，以完整內容或僅列名稱的方式注入系統提示。查找順序為專案內建的 `AgentLoop/.claude/skills/<name>/` 優先，找不到才 fallback 到使用者本機的 `~/.claude/skills/<name>/`。目前 `_FULL_CONTENT_SKILLS` 白名單完整注入的是 `grilling`、`domain-modeling`、`code-review`、`tdd`。
+
+**為什麼 `tdd` 也一定要完整注入，不能只列名稱：** 實測過 `claude -p`（`claude_runner.py` 唯一呼叫 `claude` CLI 的地方）發現，Claude Code **原生**的 skill 探索機制（在系統提示的 `available skills` 清單、`Skill` 工具背後）只認執行者的 `$HOME/.claude/skills/`，跟 `claude_runner.py:165` 呼叫 subprocess 時設的 `cwd=REPO_ROOT` 完全無關——不管 cwd 指到哪裡，找到的永遠是同一份 `$HOME/.claude/skills/` 清單（曾用一個完全空的 cwd 目錄重複驗證過）。這代表 `AgentLoop/.claude/skills/` 底下隨版控帶著走的內建副本，原生機制**永遠不會發現**；只列名稱的 skill 能不能被 Claude 用到，完全取決於執行者自己的 `~/.claude/skills/` 剛好有沒有同名 skill——換一台機器、換一個沒有這些 skill 的使用者，就會失效，違反本檔案開頭「讓專案自帶所需 skill、不依賴使用者本機設定」的設計目標。白名單機制（Python 直接讀檔、逐字塞進 prompt）不經過原生探索，因此不受這個限制，是唯一能保證跨機器一致運作的方式。
+
+規格格式由 `analyze_plan` 的 `_OPENSPEC_ARTIFACT_RULES` 寫死，執行流程寫在 `execute` 的 `_SYSTEM`。fallback 路徑（`~/.claude/skills/<name>/`）仍保留給其餘依技術棧動態選用、專案未內建的 skill（例如 `vue-best-practices`、`nuxt-vitest-msw`）——這些完全交給 Claude Code 自己原生的 skill 探索機制處理，不經過 `skill_loader.py`，所以確實受「執行者本機有沒有這個 skill」影響；這是刻意的設計取捨，因為 AgentLoop 不可能預先知道每個目標專案會用到哪些技術棧專屬的 skill。
 
 ### 6. 反饋迴圈
 
