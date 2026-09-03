@@ -29,52 +29,31 @@ def _change_names_to_try(raw: str) -> list[str]:
     return names
 
 
-def _projects_with_change(change_name: str) -> list[str]:
-    found: list[str] = []
-    try:
-        entries = os.listdir(REPO_ROOT)
-    except OSError:
-        return found
-    for entry in sorted(entries):
-        if entry.startswith("."):
-            continue
-        change_dir = os.path.join(REPO_ROOT, entry, "openspec", "changes", change_name)
-        if os.path.isdir(change_dir) and os.path.isfile(os.path.join(change_dir, "proposal.md")):
-            found.append(entry)
-    return found
-
-
 def _resolve_location(change_name: str, project_dir: str) -> tuple[str, str, str]:
-    """回傳 (project_dir, change_name, error)。error 非空表示無法定位。"""
+    """回傳 (project_dir, change_name, error)。error 非空表示無法定位。
+
+    workspace 只支援掛載單一目標專案：project_dir 未指定時直接採用環境變數
+    TARGET_PROJECT，不再掃描工作區比對哪個專案有這個 change。
+    """
     names = _change_names_to_try(change_name)
     if not names:
         return "", "", "缺少 change 名稱"
 
     if project_dir:
         # 工作流已指定專案時先不要檢查目錄是否存在：change 可能只在即將
-        # checkout 的分支上。名稱用呼叫端給的原值（必要時的 kebab 備援由掃描路徑處理）。
+        # checkout 的分支上。名稱用呼叫端給的原值（必要時的 kebab 備援由下方比對處理）。
         return project_dir, names[0], ""
 
-    matches: list[tuple[str, str]] = []
-    for name in names:
-        for proj in _projects_with_change(name):
-            matches.append((proj, name))
-
-    if not matches:
-        return "", "", f"工作區找不到 openspec/changes/{change_name}/"
-
-    if len(matches) == 1:
-        proj, name = matches[0]
-        return proj, name, ""
-
     target = os.environ.get("TARGET_PROJECT", "").strip()
-    preferred = [m for m in matches if m[0] == target]
-    if len(preferred) == 1:
-        proj, name = preferred[0]
-        return proj, name, ""
+    if not target:
+        return "", "", "缺少 project_dir，且環境變數 TARGET_PROJECT 未設定"
 
-    listed = "、".join(f"{p}/openspec/changes/{n}" for p, n in matches)
-    return "", "", f"同一個 change 出現在多個專案，請用 --state-file 指定 project_dir：{listed}"
+    for name in names:
+        change_dir = os.path.join(REPO_ROOT, target, "openspec", "changes", name)
+        if os.path.isdir(change_dir) and os.path.isfile(os.path.join(change_dir, "proposal.md")):
+            return target, name, ""
+
+    return "", "", f"{target}/openspec/changes/ 底下找不到 {change_name}"
 
 
 def archive_node(state: AgentState) -> dict:
@@ -83,8 +62,8 @@ def archive_node(state: AgentState) -> dict:
     失敗只印警告、不讓整個工作流程失敗——程式碼已經審查通過，archive 只是收尾動作，
     失敗頂多之後手動補跑。
 
-    單獨執行時沒有 project_dir／change_name 的話，用 task 當 change 名稱，
-    掃描工作區 `*/openspec/changes/<name>/` 定位目標專案。
+    單獨執行時沒有 change_name 的話，用 task 當 change 名稱；沒有 project_dir 的話，
+    直接採用環境變數 TARGET_PROJECT 定位目標專案。
     """
     print(f"\n{_BANNER}{'═'*50}\n  [Archive] 開始\n{'═'*50}{_RESET}\n", flush=True)
 

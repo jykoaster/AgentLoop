@@ -10,9 +10,7 @@ services:
       # 操控 host 上同一顆 daemon，daemon 建立目標專案的 bind mount 時，用的是這裡
       # 掛載路徑本身的字串，該路徑必須在 host 上真實存在，否則會掛載到空目錄
       - ${HOST_WORKSPACE_ROOT}/AgentLoop:${HOST_WORKSPACE_ROOT}/AgentLoop
-      # 目標專案掛載，資料夾名稱由 .env 的 TARGET_PROJECT 決定。
-      # 需要同時掛載多個目標專案時，在 .env 新增 TARGET_PROJECT_2、TARGET_PROJECT_3...，
-      # 並在這裡依樣加一行 ${HOST_WORKSPACE_ROOT}/${TARGET_PROJECT_2}:${HOST_WORKSPACE_ROOT}/${TARGET_PROJECT_2}
+      # 目標專案掛載，資料夾名稱由 .env 的 TARGET_PROJECT 決定。只支援單一目標專案。
       - ${HOST_WORKSPACE_ROOT}/${TARGET_PROJECT}:${HOST_WORKSPACE_ROOT}/${TARGET_PROJECT}
       # 讓容器內的 docker CLI 操控 host 的 docker engine（Docker outside of Docker）
       - /var/run/docker.sock:/var/run/docker.sock

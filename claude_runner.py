@@ -11,9 +11,11 @@ REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
 TOOL_PRESETS = {
     "readonly": "Read,Glob,Grep",
-    # 含 Bash 是為了讓 analyze_plan 能 checkout 指定分支、跑 openspec CLI
-    # 不含 Edit（規劃階段只新增規格文件，不改既有程式碼）
-    "plan":     "Read,Write,Bash,Glob,Grep",
+    # analyze_plan 的初始規劃：只新增規格文件（不含 Edit），checkout／openspec CLI／validate
+    # 都已由 Python 端處理，不需要 Bash
+    "plan":     "Read,Write,Glob,Grep",
+    # analyze_plan 的 replan／依人工意見調整：要 Edit 既有的規格文件；同樣不需要 Bash
+    "revise":   "Read,Write,Edit,Glob,Grep",
     "full":     "Read,Write,Edit,Bash,Glob,Grep",
     "check":    "Read,Glob,Grep,Bash",
     # code-review skill 需要 Task 工具以平行呼叫 Standards / Spec 兩個 sub-agent
