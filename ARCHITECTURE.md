@@ -367,7 +367,7 @@ proposal.md/design.md/specs delta/tasks.md 的空白骨架——這部分只留�
 
 **審查依據：**
 
-異動與規格都以檔案為準，prompt **不**注入 `state["plan"]` 扁平清單，也 **不**注入 `execution_result`。`code-review` skill 的「Pin the fixed point」「Identify the spec source」（含 issue tracker）由本節點參數覆蓋，不要再詢問使用者。
+異動與規格都以檔案為準，prompt **不**注入 `state["plan"]` 扁平清單，也 **不**注入 `execution_result`。fixed point（固定為 `HEAD`）與 spec 來源（OpenSpec change 資料夾）由本節點參數提供給 `code-review` skill，不經由 skill 自己詢問使用者或找 issue tracker——這兩步在 `AgentLoop/.claude/skills/code-review/SKILL.md` 這份專案內建副本裡已經直接拿掉（見下方「Skill 系統作為知識注入」的說明）。
 
 - **Fixed point**：本次修改尚未 commit，固定為 `HEAD`（`git diff HEAD` 取得完整異動，不用三點 diff）
 - **Spec 來源**：`<project_dir>/openspec/changes/<change_name>/`（`AgentState["project_dir"]`/`["change_name"]` 組成的路徑）——Read 讀取其下 proposal.md / tasks.md / specs/**/*.md（若有 design.md 一併讀取；小改動可能沒有此檔，不視為缺漏），也可用 `openspec show <change_name> --json` 快速確認結構；若該 change 已被前一輪迭代 archive，改讀 `<project_dir>/openspec/specs/` 下對應 domain 的 spec.md
@@ -480,6 +480,8 @@ SUGGESTION 2: [建議內容與理由]
 **為什麼 `tdd` 也一定要完整注入，不能只列名稱：** 實測過 `claude -p`（`claude_runner.py` 唯一呼叫 `claude` CLI 的地方）發現，Claude Code **原生**的 skill 探索機制（在系統提示的 `available skills` 清單、`Skill` 工具背後）只認執行者的 `$HOME/.claude/skills/`，跟 `claude_runner.py:165` 呼叫 subprocess 時設的 `cwd=REPO_ROOT` 完全無關——不管 cwd 指到哪裡，找到的永遠是同一份 `$HOME/.claude/skills/` 清單（曾用一個完全空的 cwd 目錄重複驗證過）。這代表 `AgentLoop/.claude/skills/` 底下隨版控帶著走的內建副本，原生機制**永遠不會發現**；只列名稱的 skill 能不能被 Claude 用到，完全取決於執行者自己的 `~/.claude/skills/` 剛好有沒有同名 skill——換一台機器、換一個沒有這些 skill 的使用者，就會失效，違反本檔案開頭「讓專案自帶所需 skill、不依賴使用者本機設定」的設計目標。白名單機制（Python 直接讀檔、逐字塞進 prompt）不經過原生探索，因此不受這個限制，是唯一能保證跨機器一致運作的方式。
 
 規格格式由 `analyze_plan` 的 `_OPENSPEC_ARTIFACT_RULES` 寫死，執行流程寫在 `execute` 的 `_SYSTEM`。fallback 路徑（`~/.claude/skills/<name>/`）仍保留給其餘依技術棧動態選用、專案未內建的 skill（例如 `vue-best-practices`、`nuxt-vitest-msw`）——這些完全交給 Claude Code 自己原生的 skill 探索機制處理，不經過 `skill_loader.py`，所以確實受「執行者本機有沒有這個 skill」影響；這是刻意的設計取捨，因為 AgentLoop 不可能預先知道每個目標專案會用到哪些技術棧專屬的 skill。
+
+**`AgentLoop/.claude/skills/code-review/SKILL.md` 是刻意跟個人版本分岔的專案內建副本，不是單純 vendor 進來的原文複製。** 原版 skill 的「Pin the fixed point」「Identify the spec source」兩步（問使用者要比對哪個 fixed point、去 issue tracker／`docs/`／`.scratch/` 找規格）在 `review` 這裡完全不會被執行到——`review_node()` 把這兩個參數釘死成固定值（fixed point 永遠是 `HEAD`、spec 來源永遠是 OpenSpec change 資料夾，見 `_SYSTEM` 的「依 code-review skill 執行時的具體參數」），原本得靠 `_SYSTEM` 開頭額外寫一段話覆蓋這兩步。這份專案內建副本直接把這兩步從 skill 文字裡拿掉（`## Process` 從「Identify the standards sources」開始算第 1 步），改成一句話聲明「fixed point 與 spec 來源由呼叫端提供，不要詢問使用者或自找」，讓 `_SYSTEM` 那段覆蓋文字也跟著簡化——省下約 1035 字元、且不再讓 Claude 同時看到「skill 說要問使用者」跟「`_SYSTEM` 說不要問」兩份互相矛盾的指示。之後若要同步升級這個 skill（例如 smell baseline 或 sub-agent brief 有更新），要手動比對 `~/.claude/skills/code-review/SKILL.md` 合併，不會自動同步。
 
 ### 6. 反饋迴圈
 

@@ -17,8 +17,7 @@ _MODEL = "sonnet"
 _SYSTEM = """你是一位資深程式碼審查者，負責「Code Review」階段。
 
 請依照下方 code-review skill 的流程進行審查（Standards 與 Spec 兩軸，各自透過平行 sub-agent 產出報告）。
-skill 裡「Pin the fixed point」「Identify the spec source」兩步以本節點已固定的參數為準，不要再詢問使用者，
-也不要去 issue tracker / `docs/specs` / `.scratch/` 自找規格，更不要執行 `docs/agents/issue-tracker.md` 相關流程。
+fixed point 與 spec 來源見下方「依 code-review skill 執行時的具體參數」，已由本節點固定，不需再自行判斷。
 
 <<CODE_REVIEW_SKILL>>
 
