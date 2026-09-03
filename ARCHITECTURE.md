@@ -120,8 +120,10 @@ START
        └─── 輸入 N + 空白 (aborted) ────────→ END 🛑
 ```
 
-`archive_change` 是純 Python 節點，不呼叫 Claude：呼叫 `openspec archive <change_name> --yes --json`
-把這次的 spec delta 併入目標專案持久的 `openspec/specs/`，失敗只印警告，不影響工作流程結束狀態。
+`archive_change` 是純 Python 節點，不呼叫 Claude：終端機問一次是否要 archive（`_ask_should_archive()`，
+答 `y` 才繼續），同意才呼叫 `openspec archive <change_name> --yes --json` 把這次的 spec delta 併入
+目標專案持久的 `openspec/specs/`；使用者選擇不 archive、或 archive 本身失敗，都只印警告，不影響
+工作流程結束狀態。
 
 ### 關鍵函式
 
@@ -130,7 +132,7 @@ START
 | `route_after_confirm()` | `workflow.py` | 條件路由：`confirmed` → execute；`needs_revision` → replan；`aborted` / `error` → END |
 | `route_after_review()`  | `workflow.py` | 條件路由：只讀取 `review_node` 已判定好的 `review_blocking`（不再自行解析 review 文字）——`False`（通過）→ `archive_change`；`True` 且已達 iteration 上限 → END（放棄重試，不 archive）；其餘 → replan |
 | `increment_iteration()` | `workflow.py` | 增加重試計數，重設 status 為 `pending`                                                |
-| `archive_node()`        | `nodes/archive.py` | review 通過後呼叫 `openspec_runner.archive_change()`；純機械式動作，不佔用 Claude 呼叫，失敗只印警告 |
+| `archive_node()`        | `nodes/archive.py` | review 通過後先問一次是否要 archive（`_ask_should_archive()`），同意才呼叫 `openspec_runner.archive_change()`；純機械式動作，不佔用 Claude 呼叫，略過或失敗都只印警告 |
 | `build_workflow()`      | `workflow.py` | 編譯 `StateGraph`，回傳可執行的 app                                                   |
 
 常數 `MAX_ITERATIONS = 3`：超過後強制結束，避免無限迴圈。
@@ -418,6 +420,8 @@ SUGGESTION 2: [建議內容與理由]
 **職責：** review 判定通過（`review_blocking=False`）後的機械式收尾動作——把這次的 OpenSpec change 併入目標專案持久的 `openspec/specs/`。這是「該不該 archive」的判斷（review 通過就 archive），不需要 Claude 的判斷力，因此**不呼叫 `call_claude()`**，純 Python 直接跑 `openspec` CLI，不佔用一次 Claude 呼叫、不耗費 token。
 
 **觸發時機：** 只在 `route_after_review()` 判定 `review_blocking=False` 時進入；`status=="error"` 或 `review_blocking=True` 且已達 iteration 上限（放棄重試）時直接 END，不會進入這個節點——沒有通過審查的東西不併入持久 specs/。
+
+**人工卡控：** 定位到 change 位置、（有需要時）checkout 完分支後，實際呼叫 `openspec archive` 前，`_ask_should_archive()` 在終端機問一次「是否要將此 change 併入 `<project_dir>/openspec/specs/`？[y/N]」——單層問法，答 `y` 才 archive，其餘（`N`、直接 Enter、非互動式環境、Ctrl-C/EOF）一律視為否、略過 archive 並印出手動指令，跟其他 archive 略過的情況一樣不讓整個工作流程失敗。CJK 提示文字改用 `print(..., end="")` 印出、`input()` 不帶 prompt 參數，避免重蹈 `human_confirm` 曾修過的「CJK readline 提示吃字元」問題（見 `f59edb4`）。
 
 **執行內容：** 透過 `openspec_runner.archive_change(project_dir_abs, change_name)`（`openspec_runner.py`，跟 `claude_runner.py` 是「唯一跟 claude CLI 對話的地方」同樣的角色，這裡是唯一跟 `openspec` CLI 對話的地方）執行 `openspec archive <change_name> --yes --json`，把 change 的 spec delta 合併進 `openspec/specs/`、change 資料夾搬到 `openspec/changes/archive/YYYY-MM-DD-<name>/`。
 
