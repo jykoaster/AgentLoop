@@ -5,7 +5,7 @@ import time
 from ..state import AgentState
 from ..claude_runner import call_claude, format_usage_stats, QUESTION_MARKER
 from ..skill_loader import build_skills_block
-from ..project_context import build_project_docs_hint, REPO_ROOT
+from ..project_context import build_project_doc_hint_for, REPO_ROOT
 from ..git_ops import ensure_on_branch, rollback_except_openspec
 from ..openspec_runner import ensure_initialized, ensure_change_created, validate_change
 
@@ -730,7 +730,7 @@ def analyze_plan_node(state: AgentState) -> dict:
     try:
         skills_block = build_skills_block(_SKILLS_REPLAN if is_replan else _SKILLS)
 
-        project_context = build_project_docs_hint()
+        project_context = build_project_doc_hint_for(project_dir)
 
         if is_replan:
             review_ctx = review_result

@@ -7,7 +7,7 @@ from datetime import datetime
 from ..state import AgentState
 from ..claude_runner import call_claude, format_usage_stats
 from ..skill_loader import build_skills_block
-from ..project_context import build_project_docs_hint
+from ..project_context import build_project_doc_hint_for
 from ..git_ops import ensure_on_branch
 
 # 使用的模型（"haiku" | "sonnet" | "opus" | "fable"，見 claude_runner.MODEL_IDS；
@@ -39,9 +39,8 @@ skill 裡「Pin the fixed point」「Identify the spec source」兩步以本節�
   小改動可能沒有此檔，不視為缺漏）；也可用
   `openspec show <<CHANGE_NAME_VALUE>> --json` 快速確認結構。若該 change 已被前一輪迭代
   archive，改讀 `<<PROJECT_DIR_VALUE>>/openspec/specs/` 下對應 domain 的 spec.md）
-- **Standards 來源**：依下方「專案說明檔」判斷本次任務涉及的專案，讀取該專案的 CLAUDE.md / AGENT.md，
-  以及其中提及或專案根目錄下的 CODING_STANDARDS.md / CONTRIBUTING.md（若有）作為 Standards 依據；
-  若任務同時涉及多個專案（例如前後端），分別讀取
+- **Standards 來源**：依下方「目標專案」讀取其 CLAUDE.md / AGENT.md，以及其中提及或專案根目錄下的
+  CODING_STANDARDS.md / CONTRIBUTING.md（若有）作為 Standards 依據
 - 其餘仍依 skill：Fowler smell baseline、平行 sub-agent、以 `## Standards` / `## Spec` 並陳報告
 
 <<PROJECT_CONTEXT>>
@@ -50,7 +49,7 @@ skill 裡「Pin the fixed point」「Identify the spec source」兩步以本節�
 
 1. 確認 TASK 清單完整性：Read `<<CHANGE_LOCATION>>/tasks.md`，依其 checkbox 狀態
    （`- [x]` 已完成／`- [ ]` 未完成）逐項核對，列出未完成的 TASK 編號
-2. 依偵測到的專案，讀取其 CLAUDE.md / AGENT.md 中列出的測試指令並實際用 Bash 執行測試
+2. 依目標專案的 CLAUDE.md / AGENT.md 中列出的測試指令並實際用 Bash 執行測試
    （若說明檔未列出，探索 package.json / pyproject.toml 等設定檔判斷）；測試失敗計入 Standards 軸的問題
 3. 若該任務所屬專案的 CLAUDE.md / AGENT.md（或其他說明檔）要求同步維護 docs/ 下的商業邏輯說明文件，
    確認是否已依本次修改更新；說明檔未提及此類慣例時，不需要求有文件變更
@@ -185,7 +184,7 @@ def review_node(state: AgentState) -> dict:
             .replace("<<PROJECT_DIR_VALUE>>", project_dir)
             .replace("<<CHANGE_NAME_VALUE>>", change_name)
             .replace("<<BRANCH_NAME_VALUE>>", branch_name)
-            .replace("<<PROJECT_CONTEXT>>", build_project_docs_hint())
+            .replace("<<PROJECT_CONTEXT>>", build_project_doc_hint_for(project_dir))
         )
         result = call_claude(prompt, tools="review", timeout=600, model=_MODEL)
     except Exception as e:

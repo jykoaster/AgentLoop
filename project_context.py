@@ -39,3 +39,29 @@ def build_project_docs_hint() -> str:
         "若任務同時涉及多個專案（例如前後端），須分別讀取各自的說明檔。"
         "若說明檔未涵蓋的細節，比對該專案現有程式碼風格。"
     )
+
+
+def build_project_doc_hint_for(project_dir: str) -> str:
+    """組成提示區塊：目標專案已確定時直接指向它的說明檔，不必再掃描整個 workspace、
+    也不需要 Agent 自己判斷這次任務屬於哪個專案——那是 build_project_docs_hint() 在還
+    不知道 project_dir 時的做法。analyze_plan／execute／review 這三個節點呼叫這裡時，
+    project_dir 都已經確定，直接指名可以省下列出其他無關專案的 token，也避免 Agent
+    在多個同名系列的專案（例如同時存在好幾個 *-frontend-vue）之間選錯。
+
+    project_dir 意外為空（例如手動塞的 state 檔缺欄位）時，退回原本的整個 workspace 掃描。
+    """
+    if not project_dir:
+        return build_project_docs_hint()
+
+    for filename in _CANDIDATE_FILES:
+        if os.path.isfile(os.path.join(REPO_ROOT, project_dir, filename)):
+            return (
+                f"目標專案：{project_dir}。請用 Read 讀取 `{project_dir}/{filename}`，"
+                "以了解該專案的架構、指令（測試、lint、build 等）、目錄慣例與程式碼規範。"
+                "若說明檔未涵蓋的細節，比對該專案現有程式碼風格。"
+            )
+
+    return (
+        f"目標專案：{project_dir}。該目錄未偵測到 CLAUDE.md / AGENT.md / AGENTS.md，"
+        "請自行用 Read/Glob/Grep 探索程式碼以了解專案結構與慣例。"
+    )

@@ -141,9 +141,17 @@ START
 
 ## 動態專案偵測：`project_context.py`
 
-系統不把目標專案的目錄結構寫死在 prompt 裡。`list_project_docs()` 掃描工作區根目錄下每個子目錄，找出含有 `CLAUDE.md` / `AGENT.md` / `AGENTS.md` 的專案；`build_project_docs_hint()` 把偵測到的清單組成提示區塊，注入 `analyze_plan`、`execute`、`review` 三個節點的 system prompt，讓 Agent 自行判斷本次任務涉及哪個（或哪些）專案、該讀哪份說明檔。
-
-若任務同時涉及多個專案（例如前後端分屬不同目錄），Agent 需分別讀取各自的說明檔；找不到任何說明檔時，退回用 Read/Glob/Grep 自行探索程式碼風格。
+系統不把目標專案的目錄結構寫死在 prompt 裡，但也不需要每次都讓 Agent 自己「猜」是哪個專案——
+`analyze_plan`、`execute`、`review` 三個節點呼叫這段邏輯時，`project_dir` 都已經確定（workspace
+只支援單一 `TARGET_PROJECT`，見上方「目標專案與 Domain」），所以三者一律呼叫
+`build_project_doc_hint_for(project_dir)`：直接指名 `<project_dir>/CLAUDE.md`（或 AGENT.md /
+AGENTS.md）要求 Read，不列出、也不需要判斷其他專案。這比舊版的 `build_project_docs_hint()`（掃描
+整個 workspace root、列出所有偵測到的專案說明檔、交由 Agent 自行判斷）省下大量 token——在一個掛了
+好幾個同系列 side project 的 workspace 裡，舊版可能列出五、六個完全無關的專案，還讓 Agent 有選錯
+的風險。`list_project_docs()` / `build_project_docs_hint()` 仍保留在 `project_context.py`：只在
+`project_dir` 意外為空（例如手動指定的 state 檔缺欄位）時，`build_project_doc_hint_for()` 內部
+才會退回這個舊的整個 workspace 掃描邏輯作為 fallback；目標專案本身找不到任何說明檔時，也是退回用
+Read/Glob/Grep 自行探索程式碼風格。
 
 ---
 
@@ -322,7 +330,7 @@ proposal.md/design.md/specs delta/tasks.md 的空白骨架——這部分只留�
 
 1. Python 先用 `git_ops.ensure_on_branch()` 把目標專案切到 `state["branch_name"]`（已存在則 checkout，不存在則建立）；失敗則 `status: "error"`，不呼叫 Claude
 2. Read `openspec/changes/<change_name>/` 下的 proposal.md、specs/**/*.md、tasks.md（若有 design.md 一併讀取）。規格、驗收條件與任務清單以這些檔案為準，**不**把 `state["plan"]` 扁平清單貼進 prompt
-3. 依 `project_context.py` 提供的專案清單，判斷本次任務涉及哪個（或哪些）專案目錄，Read 讀取其 `CLAUDE.md` / `AGENT.md`，了解架構、指令（測試、lint、build 等）、目錄慣例、程式碼規範與技術棧；找不到說明檔則自行 Read/Glob/Grep 探索並比對現有風格
+3. 依 `project_context.build_project_doc_hint_for(project_dir)` 指名的目標專案，Read 讀取其 `CLAUDE.md` / `AGENT.md`，了解架構、指令（測試、lint、build 等）、目錄慣例、程式碼規範與技術棧；找不到說明檔則自行 Read/Glob/Grep 探索並比對現有風格
 4. 依偵測到的技術棧，**自行**從可用的 skills 中挑選並使用適合的其他 skill（例如 Vue 專案適用 `vue-best-practices`、Nuxt + Vitest 專案適用 `nuxt-vitest-msw`）——不寫死任何特定技術棧的 skill 清單。`tdd` 已是固定列出名稱的 skill（見下方「注入的 Skills」），不需要另外挑選
 5. 若該專案 `docs/` 目錄存在，讀取其下所有現有文件，了解商業邏輯說明；`docs/` 目錄不存在時不需自行建立
 
@@ -363,7 +371,7 @@ proposal.md/design.md/specs delta/tasks.md 的空白骨架——這部分只留�
 
 - **Fixed point**：本次修改尚未 commit，固定為 `HEAD`（`git diff HEAD` 取得完整異動，不用三點 diff）
 - **Spec 來源**：`<project_dir>/openspec/changes/<change_name>/`（`AgentState["project_dir"]`/`["change_name"]` 組成的路徑）——Read 讀取其下 proposal.md / tasks.md / specs/**/*.md（若有 design.md 一併讀取；小改動可能沒有此檔，不視為缺漏），也可用 `openspec show <change_name> --json` 快速確認結構；若該 change 已被前一輪迭代 archive，改讀 `<project_dir>/openspec/specs/` 下對應 domain 的 spec.md
-- **Standards 來源**：依 `project_context.py` 判斷本次任務涉及的專案，讀取其 `CLAUDE.md` / `AGENT.md`，以及其中提及或專案根目錄下的 `CODING_STANDARDS.md` / `CONTRIBUTING.md`（若有）；涉及多個專案時分別讀取
+- **Standards 來源**：依 `project_context.build_project_doc_hint_for(project_dir)` 指名的目標專案，讀取其 `CLAUDE.md` / `AGENT.md`，以及其中提及或專案根目錄下的 `CODING_STANDARDS.md` / `CONTRIBUTING.md`（若有）
 - 其餘仍依 skill：Fowler smell baseline、平行 sub-agent、以 `## Standards` / `## Spec` 並陳報告
 
 **額外操作指示：**
@@ -447,7 +455,10 @@ SUGGESTION 2: [建議內容與理由]
 
 ### 2. 動態專案偵測作為共同上下文
 
-`project_context.py` 不寫死任何目標專案，`analyze_plan`、`execute`、`review` 三個節點都各自呼叫 `build_project_docs_hint()`，依當下工作區實際內容判斷涉及哪些專案。
+`project_context.py` 不寫死任何目標專案，但 `analyze_plan`、`execute`、`review` 三個節點呼叫時
+`project_dir` 都已確定，因此都呼叫 `build_project_doc_hint_for(project_dir)` 直接指名要 Read 哪份
+說明檔，而不是呼叫會掃描整個 workspace、列出所有專案交由 Agent 自行判斷的 `build_project_docs_hint()`
+（後者只在 `project_dir` 意外為空時當作 fallback）。
 
 ### 3. 檔案系統作為共享記憶
 

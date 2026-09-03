@@ -2,7 +2,7 @@ import time
 from ..state import AgentState
 from ..claude_runner import call_claude, format_usage_stats
 from ..skill_loader import build_skills_block
-from ..project_context import build_project_docs_hint
+from ..project_context import build_project_doc_hint_for
 from ..git_ops import ensure_on_branch
 
 _SKILLS = [
@@ -20,15 +20,13 @@ _SYSTEM = """你是一位資深全端工程師，負責「執行」階段。
 ## 執行前準備（必須完成）
 
 在開始任何修改前，必須先：
-1. 確認目標專案已在分支 `<<BRANCH_NAME_VALUE>>` 上工作（呼叫端會先切換；若你發現目前不在此分支，立刻 checkout）。
-   本階段所有程式碼修改都必須落在這個分支，不要切去其他分支。
+1. 已由系統確認目前在分支 `<<BRANCH_NAME_VALUE>>` 上（呼叫端已切換完成，不需要再檢查或
+   checkout）；本階段所有程式碼修改都必須留在這個分支，不要切去其他分支。
 2. 用 Read 讀取 `<<CHANGE_LOCATION>>` 下的 proposal.md、specs/**/*.md、tasks.md
    （若有 design.md 一併讀取；小改動可能沒有此檔，不視為缺漏）。
    規格、驗收條件與任務清單以這些檔案為準，不要依賴本 prompt 是否貼上 TASK 正文。
-3. 依下方「專案說明檔」判斷本次任務涉及的專案目錄，用 Read 讀取其 CLAUDE.md / AGENT.md，
-   了解該專案的架構、指令（測試、lint、build 等）、目錄慣例、程式碼規範，以及**技術棧**
-   - 若任務同時涉及多個專案（例如前後端），須分別讀取各自的說明檔
-   - 若找不到 CLAUDE.md / AGENT.md，自行用 Read/Glob/Grep 探索程式碼並比對現有風格
+3. 依下方「目標專案」讀取其 CLAUDE.md / AGENT.md，了解該專案的架構、指令（測試、lint、build 等）、
+   目錄慣例、程式碼規範，以及**技術棧**；找不到說明檔則自行用 Read/Glob/Grep 探索程式碼並比對現有風格
 4. 依偵測到的技術棧，自行從你可用的 skills 中挑選並使用適合的其他 skill
    （例如 Vue 專案適用 vue-best-practices、Nuxt + Vitest 專案適用 nuxt-vitest-msw
    等）——不要假設任何特定技術棧，依實際偵測結果選用。tdd 已固定提供給你，見下方說明
@@ -107,16 +105,11 @@ def execute_node(state: AgentState) -> dict:
         change_location = f"{project_dir}/openspec/changes/{state.get('change_name', '')}"
         system = (
             _SYSTEM
-            .replace("<<PROJECT_CONTEXT>>", build_project_docs_hint())
+            .replace("<<PROJECT_CONTEXT>>", build_project_doc_hint_for(project_dir))
             .replace("<<CHANGE_LOCATION>>", change_location)
             .replace("<<BRANCH_NAME_VALUE>>", branch_name)
         )
-        prompt = (
-            f"{system}\n\n{skills_block}\n\n"
-            f"任務：{state['task']}\n\n"
-            f"規格與任務清單的事實來源：`{change_location}/`\n"
-            f"請先 Read 該資料夾，再依 tasks.md 嚴格依序執行，不得跳過。"
-        )
+        prompt = f"{system}\n\n{skills_block}\n\n任務：{state['task']}"
         result = call_claude(prompt, tools="full", timeout=900, model=_MODEL)
     except Exception as e:
         print(f"{_RED}  [執行 Agent] 發生例外：{e}{_RESET}\n", flush=True)
