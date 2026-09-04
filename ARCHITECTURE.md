@@ -363,7 +363,29 @@ proposal.md/design.md/specs delta/tasks.md 的空白骨架——這部分只留�
 
 **工具權限：** `review`（Read, Glob, Grep, Bash, **Task**）—**不可修改任何檔案**
 （`Task` 是必要的：`code-review` skill 需要平行呼叫 Standards / Spec 兩個 sub-agent）
-**Timeout：** 600 秒
+**Timeout：** 600 秒（每次嘗試）
+
+**完整性檢查與重試（`_is_well_formed_review()`）：** `claude -p` 是一次性、非互動呼叫，沒有「之後
+再回來補完」這回事——但實測過（含一次真實失敗案例的 log 分析）發現 Claude 有機率把 Task sub-agent
+或 Bash 測試指令視為可以延後處理，寫下「等測試結果回來後整合最終報告」之類的話就提前結束這輪回應，
+而不是真的等到 tool_result。從實際失敗的 log 來看，兩個 sub-agent 本身確實是同步等到結果才繼續的，
+斷點出現在後續「額外操作指示」要求跑的實際測試指令——Claude 在尚未拿到該指令的 tool_result 前就
+寫出總結文字並結束回應。`_SYSTEM` 裡加了一段「完整性要求」明講不可以背景執行、不可以用「稍後」之類
+的話結束回應，但這只是自然語言指示：實測證明**單靠這段指示不足以可靠防止問題**——一個經過完整
+skill 全文、兩輪 sub-agent 往返、額外驗證步驟之後的深層決策點，指示的影響力會被稀釋，且 Claude
+當下往往已經主觀認定「答案已經確認」而不覺得需要真的等測試跑完，所以指示留著只當作便宜的第一道
+防線，不能單獨依賴。
+
+真正可靠的是事後檢查：這種提前結束的回應缺少 code-review skill aggregate 步驟一定會產出的
+`## Standards`／`## Spec` 標題，若不攔截，`has_blocking_issues()` 找不到「Ready to merge?」會
+預設回傳 `True`（阻擋），`extract_review_level()` 找不到 `REVIEW_LEVEL:` 會預設回傳「修補」——
+等於把這段不完整的文字當成一份「發現嚴重問題」的正常審查結果存檔、送進 replan，讓下一輪規劃收到
+毫無意義的假回饋。`review_node()` 因此在拿到回應後先用 `_is_well_formed_review()`（檢查是否同時
+有 `## Standards` 與 `## Spec`）判斷是否跑完整個流程；沒跑完就用 `--resume` 接續同一個 session
+（不重新從頭跑一次 sub-agent／測試，省時間也省 token）丟 `_REVIEW_CONTINUE_PROMPT` 要求它真的等
+結果、把報告寫完，最多重試 `_MAX_REVIEW_ATTEMPTS`（3）次；仍然不完整就回傳 `status: "error"`，
+不讓這種回應進入正常的 blocking／replan 判斷。這個檢查不管 Claude 是為什麼提前結束都能攔下來，
+不像 `_SYSTEM` 的指示得靠 Claude 自己遵守。
 
 **審查依據：**
 
@@ -378,7 +400,10 @@ proposal.md/design.md/specs delta/tasks.md 的空白骨架——這部分只留�
 
 1. 確認 TASK 清單完整性：Read `tasks.md`，依其 checkbox 狀態（`- [x]` 已完成／`- [ ]` 未完成）逐項核對，列出未完成的 TASK 編號
 2. 依偵測到的專案讀取其說明檔中列出的測試指令並實際用 Bash 執行測試（找不到則探索 `package.json` / `pyproject.toml`）；測試失敗計入 Standards 軸的問題
-3. 若該任務所屬專案的說明檔要求同步維護 `docs/` 商業邏輯說明文件，確認是否已依本次修改更新；說明檔未提及此類慣例時不需要求有文件變更
+
+（原本這裡還有第 3 步「確認 docs/ 商業邏輯說明文件是否同步更新」，已從 `_SYSTEM` 移除——`execute`
+自己已經有「文件同步要求」，review 端再重複檢查一次不是必要步驟，且步驟越多，Claude 在深層
+agentic 流程中提前結束回應的風險越高，見上方「完整性檢查與重試」的說明。）
 
 **輸出格式：**
 
