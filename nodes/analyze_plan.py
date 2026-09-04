@@ -114,8 +114,16 @@ _OPENSPEC_ARTIFACT_RULES = f"""## OpenSpec 產出規則（規格文件的實際�
 - 每個 Requirement 只講一件事、一個 SHALL/MUST/SHOULD；不要把好幾個「而且」塞進同一個 Requirement
 - 每個 Requirement 至少要有一個 Scenario；Scenario 要測到具體情境（含邊界/錯誤情況），不是重述 Requirement
 - 涉及使用者可觀察行為的 change：主路徑 Scenario 須含「逐步邏輯」、THEN 須含輸出要求（見上方 Specine 對齊強制三項），不可只寫「購物車可用」這類空泛結果
-- Requirement 與 Scenario 都只寫規範（系統對外呈現的行為與約束），不寫實作細節——不限特定技術棧，泛指任何屬於「怎麼做到」而非「對外呈現什麼」的內容（例如前端的 DOM 屬性／CSS selector／元件庫名稱，或後端的資料庫欄位型別／SQL／特定框架 API／內部函式或類別或變數名稱）；這些留給 design.md 的 Technical Approach。
+- Requirement 與 Scenario（含逐步邏輯）都只能用自然語言描述規範（系統對外呈現的行為與約束），
+  不寫實作細節——不限特定技術棧，泛指任何屬於「怎麼做到」而非「對外呈現什麼」的內容：不寫具體程式碼
+  片段或條件式（例如 `a.b === true`）、不點名元件／模組／類別／函式／變數名稱、不使用框架特定的
+  生命週期或渲染機制用語（掛載、mount、render、re-render 等）、不寫 DOM 屬性／CSS selector／
+  資料庫欄位型別／SQL／特定框架 API。判斷依據一律換成使用者或系統看得到的業務語言（例如「具備某項
+  權限」而不是引用實際的欄位與比較式）；實作方式（用什麼元件、屬性、條件判斷式達成）留給 design.md
+  的 Technical Approach。
   錯誤：`THEN 該 a-textarea 的 DOM maxlength 屬性為 1024`；正確：`THEN 字元計數以 1024 為上限` + `AND 使用者無法讓該欄位保留超過 1024 字`
+  錯誤：`逐步邏輯：系統依 selfInformation.allowOriginAuth === true 判定...使用者點擊後 OriginAuthModule 才會被掛載並發出請求`；
+  正確：`逐步邏輯：系統依登入者是否具備回源鑒權權限判定...使用者點擊該分頁後，右側才顯示回源鑒權模組的列表內容`
 - 適用時另寫邊界／錯誤 Scenario（Edge/Corner Cases、Error Handling），不可只靠主路徑
 - 依下方「目標專案與 Domain」已確認的歸屬：沿用既有 domain 不需要加 `## Purpose`；domain 首次建立才在 delta 檔案最上面加一段 `## Purpose`（一兩句話，與 proposal Intent 的規範目的對齊）
 - 不需要獨立的「User Stories」章節——Scenario 已經是驗收條件的正式化版本
