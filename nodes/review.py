@@ -4,11 +4,8 @@ import time
 import os
 from pathlib import Path
 from datetime import datetime
-from ..state import AgentState
-from ..claude_runner import call_claude, format_usage_stats
-from ..skill_loader import build_skills_block
-from ..project_context import build_project_doc_hint_for
-from ..git_ops import ensure_on_branch
+from ..core import AgentState
+from ..lib import call_claude, format_usage_stats, build_skills_block, build_project_doc_hint_for, ensure_on_branch
 
 # 使用的模型（"haiku" | "sonnet" | "opus" | "fable"，見 claude_runner.MODEL_IDS；
 # None 則沿用 claude CLI 本身的預設模型）

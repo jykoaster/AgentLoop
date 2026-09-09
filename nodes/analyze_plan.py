@@ -2,12 +2,14 @@ import os
 import re
 import sys
 import time
-from ..state import AgentState
-from ..claude_runner import call_claude, format_usage_stats, QUESTION_MARKER
-from ..skill_loader import build_skills_block
-from ..project_context import build_project_doc_hint_for, REPO_ROOT
-from ..git_ops import ensure_on_branch, rollback_except_openspec
-from ..openspec_runner import ensure_initialized, ensure_change_created, validate_change
+from ..core import AgentState
+from ..lib import (
+    call_claude, format_usage_stats, QUESTION_MARKER,
+    build_skills_block,
+    build_project_doc_hint_for, REPO_ROOT,
+    ensure_on_branch, rollback_except_openspec,
+    ensure_initialized, ensure_change_created, validate_change,
+)
 
 # 初始規劃／依人工意見調整：完整 grilling + domain-modeling（人工意見可能牽涉詞彙或架構決策）
 _SKILLS = [

@@ -1,10 +1,8 @@
 import os
 import re
 import sys
-from ..state import AgentState
-from ..project_context import REPO_ROOT
-from ..openspec_runner import archive_change
-from ..git_ops import ensure_on_branch
+from ..core import AgentState
+from ..lib import REPO_ROOT, archive_change, ensure_on_branch
 
 _BANNER = "\033[1;35m"
 _YELLOW = "\033[1;33m"

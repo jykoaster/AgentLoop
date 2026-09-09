@@ -2,7 +2,9 @@
 而不是把單一專案的結構寫死在 prompt 裡。"""
 import os
 
-REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+_LIB_DIR = os.path.dirname(os.path.abspath(__file__))
+PACKAGE_ROOT = os.path.dirname(_LIB_DIR)   # AgentLoop/ 本身（skill_loader 找內建 skill 用）
+REPO_ROOT = os.path.dirname(PACKAGE_ROOT)  # workspace root（AgentLoop/ 的上層目錄）
 _CANDIDATE_FILES = ("CLAUDE.md", "AGENT.md", "AGENTS.md")
 
 

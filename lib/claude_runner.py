@@ -1,13 +1,11 @@
 """呼叫本機 `claude -p` CLI，不需要 Anthropic API 額度。"""
 import json
-import os
 import re
 import shutil
 import subprocess
 import sys
 from dataclasses import dataclass
-
-REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+from .project_context import REPO_ROOT
 
 TOOL_PRESETS = {
     "readonly": "Read,Glob,Grep",

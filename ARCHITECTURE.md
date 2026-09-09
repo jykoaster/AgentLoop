@@ -10,14 +10,16 @@
 
 ```
 AgentLoop/
-├── main.py               # CLI 入口
-├── workflow.py            # LangGraph 工作流程定義
-├── state.py                # AgentState 型別定義
-├── claude_runner.py         # Claude Code CLI 封裝層
-├── openspec_runner.py         # OpenSpec CLI 封裝層（唯一跟 `openspec` CLI 對話的地方；目前只有 archive）
-├── skill_loader.py           # Skill 注入器
-├── project_context.py         # 動態偵測工作區內各專案的 CLAUDE.md / AGENT.md
-├── git_ops.py                 # 在目標專案 checkout／建立 AgentState["branch_name"]
+├── main.py               # CLI 入口（固定用 `python -m AgentLoop.main` 呼叫，維持在頂層）
+├── core/                    # 系統的核心骨架：狀態契約與 LangGraph 圖組裝
+│   ├── state.py               # AgentState 型別定義
+│   └── workflow.py            # LangGraph 工作流程定義（`from ..nodes import ...` 組圖）
+├── lib/                     # 節點共用的工具層（見下方各節點對這些模組的說明）
+│   ├── claude_runner.py       # Claude Code CLI 封裝層
+│   ├── openspec_runner.py     # OpenSpec CLI 封裝層（唯一跟 `openspec` CLI 對話的地方；目前只有 archive）
+│   ├── skill_loader.py        # Skill 注入器
+│   ├── project_context.py     # 動態偵測工作區內各專案的 CLAUDE.md / AGENT.md；PACKAGE_ROOT／REPO_ROOT 的唯一定義處
+│   └── git_ops.py             # 在目標專案 checkout／建立 AgentState["branch_name"]
 ├── requirements.txt
 ├── Dockerfile
 ├── docker-compose.yml
@@ -32,6 +34,14 @@ AgentLoop/
 └── docs/
     └── nodes/review/        # review 節點產出的審查報告（YYYY-MM-DD-iterN.md）
 ```
+
+頂層只留 `main.py`（固定的 CLI 進入點）；其餘依角色分三層：`core/`（狀態契約 + 圖組裝，全系統的骨架）、
+`lib/`（節點共用的工具層，包裝外部 CLI／偵測專案／注入 skill）、`nodes/`（實際的 Agent 行為）。`nodes/*.py`
+一律用 `from ..core import AgentState`、`from ..lib import ...` 讀取（`core/__init__.py`／`lib/__init__.py`
+各自統一 re-export），不直接深入到子模組；`core/workflow.py` 反過來用 `from ..nodes import ...` 組圖，
+是唯一「上層 import 下層」的方向。`lib/` 底下五個模組互相依賴 `PACKAGE_ROOT`／`REPO_ROOT`
+（`project_context.py` 是唯一定義處，`claude_runner.py`／`git_ops.py`／`skill_loader.py` 都從這裡
+import，不再各自用 `__file__` 反推路徑）。
 
 規格文件本身不再存在 AgentLoop 這個 repo 底下，而是寫進**目標專案**的
 `<project_dir>/openspec/changes/<change_name>/`（`proposal.md` / `tasks.md` /

@@ -12,7 +12,7 @@ See `ARCHITECTURE.md` for the full node-by-node design and `README.md` for setup
 
 This repo has no test suite to catch documentation drift, so it's happened before (e.g. `ARCHITECTURE.md` once said `docker.sock` wasn't mounted after it already had been). Whenever a change touches one of the following, update the matching doc **in the same change**, not as a follow-up:
 
-- `nodes/*.py`, `workflow.py`, `state.py`, `claude_runner.py` → update the relevant node/flow description in `ARCHITECTURE.md`
+- `nodes/*.py`, `core/*.py`, `lib/*.py` → update the relevant node/flow description in `ARCHITECTURE.md`
 - `Dockerfile`, `docker-compose.yml`, `.env` → update the 容器化層/DooD section in `ARCHITECTURE.md` and the setup steps in `README.md`
 - anything changing how the workflow is invoked or configured → update `README.md`'s 安裝與使用 section
 

@@ -1,6 +1,6 @@
 from langgraph.graph import StateGraph, END
 from .state import AgentState
-from .nodes import analyze_plan_node, execute_node, review_node, human_confirm_node, archive_node
+from ..nodes import analyze_plan_node, execute_node, review_node, human_confirm_node, archive_node
 
 MAX_ITERATIONS = 3
 

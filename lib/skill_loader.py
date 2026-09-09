@@ -4,8 +4,9 @@
 使用者本機設定；找不到時 fallback 到使用者本機的 ~/.claude/skills/。
 """
 import os
+from .project_context import PACKAGE_ROOT
 
-PROJECT_SKILLS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".claude", "skills")
+PROJECT_SKILLS_DIR = os.path.join(PACKAGE_ROOT, ".claude", "skills")
 USER_SKILLS_DIR = os.path.expanduser("~/.claude/skills")
 SKILLS_DIRS = [PROJECT_SKILLS_DIR, USER_SKILLS_DIR]
 
