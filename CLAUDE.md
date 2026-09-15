@@ -39,6 +39,10 @@ python -m AgentLoop.main --node analyze_plan "task description"
 python -m AgentLoop.main --node execute --state-file /tmp/state.json "task description"
 python -m AgentLoop.main --node review "task description"
 python -m AgentLoop.main --node archive <change_name>
+
+# semantic search over TARGET_PROJECT's openspec (see search.py)
+python -m AgentLoop.search "query"
+python -m AgentLoop.search --reindex "query"   # force rebuild index before searching
 ```
 
 `--state-file` preloads `AgentState` fields (e.g. `plan`, `execution_result`) from a JSON file so you can debug one node without re-running the ones before it.

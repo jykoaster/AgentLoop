@@ -11,6 +11,7 @@
 ```
 AgentLoop/
 ├── main.py               # CLI 入口（固定用 `python -m AgentLoop.main` 呼叫，維持在頂層）
+├── search.py             # 獨立搜尋工具（`python -m AgentLoop.search "query"`，不屬於 workflow）
 ├── core/                    # 系統的核心骨架：狀態契約與 LangGraph 圖組裝
 │   ├── state.py               # AgentState 型別定義
 │   └── workflow.py            # LangGraph 工作流程定義（`from ..nodes import ...` 組圖）
@@ -476,6 +477,46 @@ SUGGESTION 2: [建議內容與理由]
 
 ---
 
+## 開發者搜尋工具：`search.py`
+
+**用途：** 對目標專案的 `openspec/` 做語意向量搜尋，以自然語言提問，由 Claude 合成答案（RAG）。這是獨立的開發者工具，不屬於 LangGraph workflow，也不呼叫 `claude` CLI。
+
+```bash
+python -m AgentLoop.search "advanced protection 的規格是什麼？"
+python -m AgentLoop.search --reindex "query"   # 強制重建索引後再搜尋
+```
+
+**所需 env var：** `TARGET_PROJECT`（同主流程）；`ANTHROPIC_API_KEY` 設定時用 Python SDK，未設定時 fallback 到容器 OAuth (`claude` CLI)。可用 `SEARCH_MODEL` 覆蓋模型（`haiku`/`sonnet`/`opus`/`fable`，解析同 `claude_runner.MODEL_IDS`），預設 `haiku`。
+
+**索引生命週期：**
+
+索引儲存於目標專案的 `openspec/.vector_index/vector.db`（SQLite，由 `sqlite-vec` 擴充提供向量搜尋功能）。每次查詢前自動偵測是否需要重建：只要 `openspec/` 底下有任何 `.md` 檔案比 `vector.db` 新，就自動觸發 reindex。第一次執行（或容器重建後）會由 `fastembed` 自動下載 embedding 模型（`sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2`，約 100 MB），下載後快取於容器的 `~/.cache/fastembed/`；容器重建後需重新下載。
+
+**索引範圍：**
+
+`openspec/specs/`（合併後的主規格，`doc_type=spec`）與 `openspec/changes/`（各 change 的 proposal / design / tasks / spec delta，`doc_type=change_*` 或 `archive_*`）全部索引，每份 `.md` 檔案為一個文件單元。
+
+**搜尋與 RAG 流程：**
+
+```
+query
+  │
+  ▼
+fastembed.query_embed()          ← paraphrase-multilingual-MiniLM-L12-v2 ONNX（本地推論）
+  ▼
+sqlite-vec KNN search            ← L2 distance，top 5 結果
+  │  JOIN documents 取回 path + content
+  ▼
+_ask_claude()   ← ANTHROPIC_API_KEY 存在時用 SDK；否則 fallback 到 claude CLI
+  │  僅允許依文件內容回答，不補充訓練資料
+  ▼
+自然語言答案 + Referenced files 清單
+```
+
+embedding 模型輸出 L2 正規化後的 384 維向量，存為 `float[384]` blob；查詢向量同樣正規化，L2 distance 等價於 cosine similarity 排序。
+
+---
+
 ## 節點間協作機制
 
 ### 1. 狀態字典傳遞
@@ -595,11 +636,14 @@ MODEL_IDS = {
 
 ### Python 層
 
-| 技術              | 版本   | 用途                                        |
-| ----------------- | ------ | ------------------------------------------- |
-| **LangGraph**     | ≥0.2.0 | StateGraph 工作流程編排、條件路由、節點串接 |
-| **python-dotenv** | ≥1.0.0 | 讀取 `.env` 環境變數                        |
-| **Python**        | 3.11   | 執行環境                                    |
+| 技術              | 版本    | 用途                                        |
+| ----------------- | ------- | ------------------------------------------- |
+| **LangGraph**     | ≥0.2.0  | StateGraph 工作流程編排、條件路由、節點串接 |
+| **python-dotenv** | ≥1.0.0  | 讀取 `.env` 環境變數                        |
+| **fastembed**     | ≥0.2.6  | 本地 ONNX embedding 推論（`search.py` 用）  |
+| **sqlite-vec**    | ≥0.1.0  | SQLite 向量搜尋擴充（`search.py` 用）       |
+| **anthropic**     | ≥0.40.0 | Anthropic Python SDK（`search.py` RAG 用）  |
+| **Python**        | 3.11    | 執行環境                                    |
 
 ### Claude Code CLI 層
 

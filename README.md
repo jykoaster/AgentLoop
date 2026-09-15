@@ -107,6 +107,17 @@ python -m AgentLoop.main --node archive 54-feat-ai-ad-content-extend-to-1024-cha
 
 規格文件遵照 [OpenSpec](https://github.com/Fission-AI/OpenSpec) 的 change/spec-delta 規則，寫在**目標專案**（不是 AgentLoop 這個 repo）下的 `openspec/changes/<change 名稱>/`（`proposal.md`/`tasks.md`/`specs/<domain>/spec.md`；非小改動時另有 `design.md`）。目標專案第一次被處理時，若尚未有 `openspec/` 目錄，`analyze_plan` 會自動執行一次 `openspec init` bootstrap，不需要手動介入；`openspec` CLI 已由 Dockerfile 自動安裝在容器內。審查通過後，最後一個節點會呼叫 `openspec archive` 把這次的規格差異併入目標專案持久的 `openspec/specs/`，跨任務累積成完整的行為規格。
 
+### 語意搜尋目標專案的規格
+
+```bash
+python -m AgentLoop.search "目前有哪些功能有被權限控管"
+python -m AgentLoop.search --reindex "query"   # 強制重建索引後再搜尋
+```
+
+對目標專案的整個 `openspec/`（`specs/` + `changes/`）做向量語意搜尋，然後由 Claude 依搜尋結果合成自然語言答案（RAG）。索引儲存於目標專案的 `openspec/.vector_index/vector.db`，每次查詢前自動偵測是否有新的規格檔案，有則重建；第一次執行會下載 embedding 模型（約 100 MB，快取於容器的 `~/.cache/fastembed/`）。
+
+**認證**：優先使用 `.env` 的 `ANTHROPIC_API_KEY`；未設定時自動 fallback 到 `claude` CLI（使用容器現有的 OAuth 登入狀態）。可用 `SEARCH_MODEL` 覆蓋模型（`haiku`/`sonnet`/`opus`/`fable`），預設為 `haiku`。
+
 ---
 
 ## Agent 流程簡介
