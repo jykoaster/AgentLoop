@@ -127,6 +127,7 @@ _OPENSPEC_ARTIFACT_RULES = f"""## OpenSpec 產出規則（規格文件的實際�
   錯誤：`逐步邏輯：系統依 selfInformation.allowOriginAuth === true 判定...使用者點擊後 OriginAuthModule 才會被掛載並發出請求`；
   正確：`逐步邏輯：系統依登入者是否具備回源鑒權權限判定...使用者點擊該分頁後，右側才顯示回源鑒權模組的列表內容`
 - 適用時另寫邊界／錯誤 Scenario（Edge/Corner Cases、Error Handling），不可只靠主路徑
+- 每個 Scenario 都必須有至少一個與其 Scenario Title 名稱相同的 `describe` 或 `test`（驗收測試名稱須與 Scenario 標題一致，確保規格與測試可追溯）
 - 依下方「目標專案與 Domain」已確認的歸屬：沿用既有 domain 不需要加 `## Purpose`；domain 首次建立才在 delta 檔案最上面加一段 `## Purpose`（一兩句話，與 proposal Intent 的規範目的對齊）
 - 不需要獨立的「User Stories」章節——Scenario 已經是驗收條件的正式化版本
 - 若本次任務純粹是重構/文件/設定調整、完全沒有外部可觀察行為變化，可以在該 change 的 `.openspec.yaml` 加 `skip_specs: true` 並略過 specs delta；若 REMOVED 移除了某個 domain 的最後一個 Requirement，需在 `.openspec.yaml` 加 `retire_capabilities: true` 才能讓 archive 一併刪除該 domain 的 spec 檔
