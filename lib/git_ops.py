@@ -42,3 +42,26 @@ def ensure_on_branch(project_dir: str, branch_name: str) -> tuple[bool, str]:
 
     err = (created.stderr or checked_out.stderr or created.stdout or checked_out.stdout).strip()
     return False, err or f"無法切換到分支 {branch_name}"
+
+
+def rollback_except_openspec(project_dir: str) -> tuple[bool, str]:
+    """還原 `<workspace>/<project_dir>` 未提交的程式碼變更（含 untracked 新檔），
+    但保留 `openspec/` 目錄不動——規格文件必須留下給後續步驟更新。
+
+    先試 `git stash`；若沒有可 stash 的變更或 stash 失敗，改用 `checkout` + `clean` 還原。
+    回傳 `(成功, 訊息)`。
+    """
+    repo = os.path.join(REPO_ROOT, project_dir)
+
+    stash = _git(repo, "stash", "push", "--include-untracked", "--", ".", ":!openspec")
+    if stash.returncode == 0:
+        msg = (stash.stdout or stash.stderr or "").strip()
+        return True, msg or f"{project_dir} 已 stash 未提交的變更（openspec/ 除外）"
+
+    checkout = _git(repo, "checkout", "--", ".", ":!openspec")
+    clean = _git(repo, "clean", "-fd", "--exclude=openspec/")
+    if checkout.returncode == 0 and clean.returncode == 0:
+        return True, f"{project_dir} 已用 checkout + clean 還原未提交的變更（openspec/ 除外）"
+
+    err = (checkout.stderr or clean.stderr or stash.stderr or "rollback 失敗").strip()
+    return False, err

@@ -1,7 +1,7 @@
 import re
 import sys
 import unicodedata
-from ..state import AgentState
+from ..core import AgentState
 
 _CYAN   = "\033[1;36m"
 _YELLOW = "\033[1;33m"

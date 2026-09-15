@@ -31,15 +31,7 @@
    TARGET_PROJECT=my-project
    ```
 
-   `docker-compose.yml` 會依 `TARGET_PROJECT` 掛載 `${HOST_WORKSPACE_ROOT}/${TARGET_PROJECT}`，不需要再手動改 `docker-compose.yml`。
-
-   **需要同時掛載多個目標專案時**：目前只內建一個 `TARGET_PROJECT` 環境變數，若要擴充，在 `.env` 依樣新增 `TARGET_PROJECT_2`、`TARGET_PROJECT_3`……，並在 `docker-compose.yml` 的 `volumes` 底下依樣加一行：
-
-   ```yaml
-   - ${HOST_WORKSPACE_ROOT}/${TARGET_PROJECT_2}:${HOST_WORKSPACE_ROOT}/${TARGET_PROJECT_2}
-   ```
-
-   （`docker-compose.yml` 內已有對應註解提示這一點。）
+   `docker-compose.yml` 會依 `TARGET_PROJECT` 掛載 `${HOST_WORKSPACE_ROOT}/${TARGET_PROJECT}`，不需要再手動改 `docker-compose.yml`。只支援單一目標專案，不提供多專案掛載的擴充方式。
 
 2. 確認目標專案內已放好 [`CLAUDE.md` / `AGENT.md`](#目標專案文件需求)——這是系統判斷架構與慣例的主要依據。
 

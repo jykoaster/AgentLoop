@@ -24,8 +24,7 @@ from dotenv import load_dotenv
 
 load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
 
-from .workflow import app
-from .state import AgentState
+from .core import app, AgentState
 
 _BOLD  = "\033[1m"
 _RESET = "\033[0m"

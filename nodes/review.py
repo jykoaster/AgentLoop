@@ -4,11 +4,8 @@ import time
 import os
 from pathlib import Path
 from datetime import datetime
-from ..state import AgentState
-from ..claude_runner import call_claude, format_usage_stats
-from ..skill_loader import build_skills_block
-from ..project_context import build_project_docs_hint
-from ..git_ops import ensure_on_branch
+from ..core import AgentState
+from ..lib import call_claude, format_usage_stats, build_skills_block, build_project_doc_hint_for, ensure_on_branch
 
 # 使用的模型（"haiku" | "sonnet" | "opus" | "fable"，見 claude_runner.MODEL_IDS；
 # None 則沿用 claude CLI 本身的預設模型）
@@ -17,8 +14,7 @@ _MODEL = "sonnet"
 _SYSTEM = """你是一位資深程式碼審查者，負責「Code Review」階段。
 
 請依照下方 code-review skill 的流程進行審查（Standards 與 Spec 兩軸，各自透過平行 sub-agent 產出報告）。
-skill 裡「Pin the fixed point」「Identify the spec source」兩步以本節點已固定的參數為準，不要再詢問使用者，
-也不要去 issue tracker / `docs/specs` / `.scratch/` 自找規格，更不要執行 `docs/agents/issue-tracker.md` 相關流程。
+fixed point 與 spec 來源見下方「依 code-review skill 執行時的具體參數」，已由本節點固定，不需再自行判斷。
 
 <<CODE_REVIEW_SKILL>>
 
@@ -39,9 +35,8 @@ skill 裡「Pin the fixed point」「Identify the spec source」兩步以本節�
   小改動可能沒有此檔，不視為缺漏）；也可用
   `openspec show <<CHANGE_NAME_VALUE>> --json` 快速確認結構。若該 change 已被前一輪迭代
   archive，改讀 `<<PROJECT_DIR_VALUE>>/openspec/specs/` 下對應 domain 的 spec.md）
-- **Standards 來源**：依下方「專案說明檔」判斷本次任務涉及的專案，讀取該專案的 CLAUDE.md / AGENT.md，
-  以及其中提及或專案根目錄下的 CODING_STANDARDS.md / CONTRIBUTING.md（若有）作為 Standards 依據；
-  若任務同時涉及多個專案（例如前後端），分別讀取
+- **Standards 來源**：依下方「目標專案」讀取其 CLAUDE.md / AGENT.md，以及其中提及或專案根目錄下的
+  CODING_STANDARDS.md / CONTRIBUTING.md（若有）作為 Standards 依據
 - 其餘仍依 skill：Fowler smell baseline、平行 sub-agent、以 `## Standards` / `## Spec` 並陳報告
 
 <<PROJECT_CONTEXT>>
@@ -50,10 +45,20 @@ skill 裡「Pin the fixed point」「Identify the spec source」兩步以本節�
 
 1. 確認 TASK 清單完整性：Read `<<CHANGE_LOCATION>>/tasks.md`，依其 checkbox 狀態
    （`- [x]` 已完成／`- [ ]` 未完成）逐項核對，列出未完成的 TASK 編號
-2. 依偵測到的專案，讀取其 CLAUDE.md / AGENT.md 中列出的測試指令並實際用 Bash 執行測試
+2. 依目標專案的 CLAUDE.md / AGENT.md 中列出的測試指令並實際用 Bash 執行測試
    （若說明檔未列出，探索 package.json / pyproject.toml 等設定檔判斷）；測試失敗計入 Standards 軸的問題
-3. 若該任務所屬專案的 CLAUDE.md / AGENT.md（或其他說明檔）要求同步維護 docs/ 下的商業邏輯說明文件，
-   確認是否已依本次修改更新；說明檔未提及此類慣例時，不需要求有文件變更
+
+## 完整性要求（絕對不可省略）
+
+本節點是一次性、非互動的呼叫：這輪回應結束後不會再有下一輪讓你補完，工作流程只會讀這輪回應的
+最終文字，不會等你「之後再回來整合」。
+
+- 呼叫 Task 工具做平行 sub-agent 審查、或用 Bash 執行測試，都必須等到真的拿到結果（tool_result）
+  後才能繼續下一步；不可以把這些呼叫丟到背景執行、自己先把這輪回應結束
+- 不可以用「稍後」「等結果回來後」「等測試跑完再補」這類說法取代真正等待結果——這輪回應只能在
+  你已經拿到所有 sub-agent 報告與實際測試結果之後才能結束
+- 最終回應**必須**已經包含完整的 `## Standards`／`## Spec` 報告、實際測試結果，以及下方
+  「最終輸出格式」要求的所有項目；缺少任何一項都視為還沒做完，必須先完成才能結束回應
 
 ## 最終輸出格式
 
@@ -86,6 +91,27 @@ _RED    = "\033[1;31m"
 _RESET  = "\033[0m"
 
 _REVIEW_SAVE_DIR = Path(os.path.dirname(__file__)).parent / "docs" / "nodes" / "review"
+
+_MAX_REVIEW_ATTEMPTS = 3
+
+_REVIEW_CONTINUE_PROMPT = (
+    "你上一輪的回應在還沒完成前就結束了（缺少完整的 `## Standards` / `## Spec` 報告，"
+    "疑似把 sub-agent 或測試丟出去後就提前結束回應，而不是真的等到結果）。"
+    "請確認 sub-agent 與測試的結果是否已經拿到——沒拿到就繼續等待，拿到後直接在這一輪把"
+    "完整報告（依「最終輸出格式」的所有要求）寫出來，不要再次省略或延後。"
+)
+
+
+def _is_well_formed_review(review_text: str) -> bool:
+    """判斷這輪回應是不是真的跑完整個 code-review 流程，而不是中途把 sub-agent／測試丟出去
+    後就提前結束這輪回應（例如只寫「等測試結果回來後整合最終報告」）。code-review skill 的
+    aggregate 步驟一定會產出這兩個標題，缺一個就代表流程沒跑完。
+
+    這是唯一真正可靠的防線：`_SYSTEM` 裡的「完整性要求」只是自然語言指示，深層多步驟的
+    agentic 流程走了幾輪 sub-agent／工具呼叫之後，指示的影響力會被稀釋，不能單獨依賴；
+    這裡的檢查不管 Claude 是為什麼提前結束，都能攔下來並要求它接續補完。
+    """
+    return "## Standards" in review_text and "## Spec" in review_text
 
 
 def has_blocking_issues(review_text: str) -> bool:
@@ -185,9 +211,24 @@ def review_node(state: AgentState) -> dict:
             .replace("<<PROJECT_DIR_VALUE>>", project_dir)
             .replace("<<CHANGE_NAME_VALUE>>", change_name)
             .replace("<<BRANCH_NAME_VALUE>>", branch_name)
-            .replace("<<PROJECT_CONTEXT>>", build_project_docs_hint())
+            .replace("<<PROJECT_CONTEXT>>", build_project_doc_hint_for(project_dir))
         )
-        result = call_claude(prompt, tools="review", timeout=600, model=_MODEL)
+        attempt = 0
+        session_id = None
+        while True:
+            attempt += 1
+            result = call_claude(prompt, tools="review", timeout=600, model=_MODEL, resume=session_id)
+            session_id = result.session_id or session_id
+            if result.is_error or _is_well_formed_review(result.text):
+                break
+            print(
+                f"{_YELLOW}  [Review Agent] 回應疑似提前結束（缺少 ## Standards／## Spec），"
+                f"第 {attempt} 次，接續同一 session 要求補完{_RESET}\n",
+                flush=True,
+            )
+            if attempt >= _MAX_REVIEW_ATTEMPTS:
+                break
+            prompt = _REVIEW_CONTINUE_PROMPT
     except Exception as e:
         print(f"{_RED}  [Review Agent] 發生例外：{e}{_RESET}\n", flush=True)
         return {"status": "error", "review_result": f"Review 發生例外：{e}", "review_level": ""}
@@ -201,6 +242,20 @@ def review_node(state: AgentState) -> dict:
     if result.is_error:
         print(f"{_RED}  [Review Agent] Claude 執行失敗：{result.text}{_RESET}\n", flush=True)
         return {"status": "error", "review_result": result.text, "review_level": ""}
+
+    if not _is_well_formed_review(result.text):
+        print(
+            f"{_RED}  [Review Agent] 連續 {attempt} 次回應都不完整（疑似提前結束），放棄重試{_RESET}\n",
+            flush=True,
+        )
+        return {
+            "status": "error",
+            "review_result": (
+                f"review 連續 {attempt} 次回應不完整（缺少 ## Standards／## Spec，"
+                f"疑似把 sub-agent 或測試丟給背景執行就中止回應）：\n\n{result.text}"
+            ),
+            "review_level": "",
+        }
 
     review_text = result.text
     iteration = state.get("iteration", 0)
