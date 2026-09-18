@@ -127,7 +127,15 @@ _OPENSPEC_ARTIFACT_RULES = f"""## OpenSpec 產出規則（規格文件的實際�
   錯誤：`逐步邏輯：系統依 selfInformation.allowOriginAuth === true 判定...使用者點擊後 OriginAuthModule 才會被掛載並發出請求`；
   正確：`逐步邏輯：系統依登入者是否具備回源鑒權權限判定...使用者點擊該分頁後，右側才顯示回源鑒權模組的列表內容`
 - 適用時另寫邊界／錯誤 Scenario（Edge/Corner Cases、Error Handling），不可只靠主路徑
-- Scenario 只描述系統應有的行為（正向規範），**不寫「功能不存在」「行為被禁止」的負向 Scenario**；需求刪減或行為縮減時，只需在 `REMOVED Requirements` 宣告或縮減 `MODIFIED Requirements` 的範圍，不需要為缺少的行為另寫 Scenario
+- **規格只描述系統「做什麼」，永遠不描述「不做什麼」**。具體規則：
+  - 先讀既有 `openspec/specs/<domain>/spec.md`，只對「既有 spec 中提及、且本次任務要移除或縮減」的功能動筆（MODIFIED 或 REMOVED）；
+    原本 spec 從未提及的功能，**不需要也不可以**在 delta 裡加任何條文——包括 REMOVED、也包括以「看不到 X」「不顯示 X」為主旨的 Scenario
+  - MODIFIED Requirements 的作法是：**改寫 Requirement 正文，使其只描述縮減後仍存在的行為**；
+    例如移除某一開關，應把那一列從對照表刪掉，Scenarios 改成描述僅剩開關的正向行為；
+    不要在 Requirement 或 Scenario 裡補一句「X MUST NOT 出現」或另開一個「看不到 X」的 Scenario
+  - 以 MUST NOT 描述「某 UI 元件不存在」的 Scenario 等同負向寫法，同樣禁止；
+    唯一允許的 MUST NOT 出現在 Scenario THEN 中，是為了完整描述正向 Scenario 的副作用
+    （例：正向 Scenario 是「顯示有授權的子分頁」，副作用 AND 子句 MUST NOT 發出無授權子分頁的請求）
 - 每個 Scenario 都必須有至少一個與其 Scenario Title 名稱相同的 `describe` 或 `test`（驗收測試名稱須與 Scenario 標題一致，確保規格與測試可追溯）
 - 依下方「目標專案與 Domain」已確認的歸屬：沿用既有 domain 不需要加 `## Purpose`；domain 首次建立才在 delta 檔案最上面加一段 `## Purpose`（一兩句話，與 proposal Intent 的規範目的對齊）
 - 不需要獨立的「User Stories」章節——Scenario 已經是驗收條件的正式化版本
@@ -203,7 +211,7 @@ The system SHALL/MUST <一個明確、可觀察的行為；含輸出要求（資
 - THEN <結果；必須寫清可觀察輸出的資料類型、格式、約束>
 
 ## MODIFIED Requirements
-（改變既有行為時使用，須包含合併後完整的新版本內容；直接改寫規格，不附加「改了什麼」說明或括號註釋）
+（既有 Requirement 縮減或調整時使用；直接改寫成縮減後的正向規格，不附加「改了什麼」說明，也不加「X MUST NOT 出現」條文；移除某功能時，把該功能從 Requirement 正文與 Scenarios 中刪掉，只保留仍存在的行為）
 
 ## REMOVED Requirements
 （行為被移除時使用，須說明原因）
