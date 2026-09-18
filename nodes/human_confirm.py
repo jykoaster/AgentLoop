@@ -58,12 +58,20 @@ def human_confirm_node(state: AgentState) -> dict:
     # 中文／全形字元不可放進 input() 的 prompt：GNU readline 用字元數而非
     # 顯示欄寬計算游標，會把第一個輸入字元吃掉或混進控制碼，導致畫面上看
     # 得到 y、比對卻失敗。提示改由 print 輸出，input() 只負責讀一行。
-    print(f"{_YELLOW}  繼續執行？[y/N] {_RESET}", end="", flush=True)
-    try:
-        answer = _normalize_confirm(input())
-    except (EOFError, KeyboardInterrupt):
-        print(f"\n{_RED}  [人工確認] 已取消。{_RESET}\n", flush=True)
-        return {"status": "aborted"}
+    #
+    # 空字串（誤觸 Enter）視為重新提示，不直接進入拒絕流程，
+    # 避免 grilling 等待 Claude 期間多餘的 Enter 被緩衝讀走，
+    # 把使用者緊接輸入的真正 'y' 誤判為修改意見。
+    while True:
+        print(f"{_YELLOW}  繼續執行？[y/N] {_RESET}", end="", flush=True)
+        try:
+            answer = _normalize_confirm(input())
+        except (EOFError, KeyboardInterrupt):
+            print(f"\n{_RED}  [人工確認] 已取消。{_RESET}\n", flush=True)
+            return {"status": "aborted"}
+        if answer:
+            break
+        # 空字串：誤觸 Enter，重新顯示提示
 
     if answer in {"y", "yes"}:
         print(f"\n{_GREEN}  [人工確認] 確認，開始執行。{_RESET}\n", flush=True)
