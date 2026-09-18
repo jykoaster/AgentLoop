@@ -43,6 +43,11 @@ RUN mkdir -p /home/agent/.claude/skills && chown -R agent:agent /home/agent/.cla
 RUN echo "agent ALL=(root) NOPASSWD: /usr/bin/docker" > /etc/sudoers.d/agent-docker && \
     chmod 0440 /etc/sudoers.d/agent-docker
 
+# /usr/local/bin/docker 優先於 /usr/bin/docker，讓容器內任何 `docker` 呼叫
+# 自動走 sudo，不需要呼叫端記得加 sudo 前綴。
+RUN printf '#!/bin/sh\nexec sudo /usr/bin/docker "$@"\n' \
+      > /usr/local/bin/docker && chmod +x /usr/local/bin/docker
+
 USER agent
 WORKDIR /repo
 
