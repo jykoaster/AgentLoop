@@ -1,6 +1,7 @@
+import os
 import time
 from ..core import AgentState
-from ..lib import call_claude, format_usage_stats, build_skills_block, build_project_doc_hint_for, ensure_on_branch
+from ..lib import call_claude, format_usage_stats, build_skills_block, build_project_doc_hint_for, ensure_on_branch, REPO_ROOT
 
 _SKILLS = [
     "tdd",
@@ -41,6 +42,10 @@ _SYSTEM = """你是一位資深全端工程師，負責「執行」階段。
   `- [ ]` 改成 `- [x]`，讓這份檔案即時反映實際完成進度（後續 Review Agent 會依此核對）
 - 若 tasks.md 中出現「撰寫／更新測試」的 TASK，**必須**依 tdd skill 的紅-綠循環執行該 TASK：
   先寫一個會失敗的測試，再寫最小可行的實作讓測試通過，最後重構；不可先完成其他 TASK 的實作、事後才回頭補測試
+- 撰寫或更新測試前，先用 Grep/Read **讀取現有測試**，確認此次變動涉及的 Scenario 是否已有相同或可覆蓋情境的測試：
+  - 若現有測試已覆蓋相同情境，**不重複撰寫**；若情境相似但覆蓋範圍不完整，**合併**成一個測試即可
+  - 允許刪除或合併舊有重複測試，但**刪除後必須確認每個 Scenario 仍有至少一個對應測試**；
+    不可讓原本有測試的 Scenario 在修改後變成沒有任何測試
 - 過程中定期執行型別檢查與單一測試檔案；全部 TASK 完成後再跑完整測試（見下方）
 - **不要** commit——修改是否提交由使用者事後決定
 - **不要**自行呼叫 /code-review——後續有獨立的 Review Agent 依專案規格審查本次修改，此處只需完成實作與測試
@@ -49,6 +54,7 @@ _SYSTEM = """你是一位資深全端工程師，負責「執行」階段。
 
 - 寫入前先讀取原始內容，避免覆蓋不相關程式碼
 - 不修改任何 auto-generated 檔案（CLAUDE.md / AGENT.md 通常會標示這類目錄）
+- **非必要不撰寫程式碼註解**：只在「為什麼」非顯而易見時（隱藏限制、微妙不變量、特定 bug 的繞過方式）才加一行短註解；說明程式碼「做什麼」的註解一律省略
 
 ## 文件同步要求
 
@@ -83,10 +89,20 @@ _RESET  = "\033[0m"
 def execute_node(state: AgentState) -> dict:
     print(f"\n{_BANNER}{'═'*50}\n  [執行 Agent] 開始\n{'═'*50}{_RESET}\n", flush=True)
 
+    project_dir = state.get("project_dir", "")
+    change_name = state.get("change_name", "")
+    change_dir = os.path.join(REPO_ROOT, project_dir, "openspec", "changes", change_name)
+    if not os.path.isdir(change_dir):
+        print(
+            f"{_RED}  [執行 Agent] 找不到 OpenSpec change 目錄：{change_dir}，"
+            f"請先執行 analyze_plan{_RESET}\n",
+            flush=True,
+        )
+        return {"status": "error", "execution_result": f"找不到 OpenSpec change 目錄：{change_dir}"}
+
     start = time.monotonic()
 
     try:
-        project_dir = state.get("project_dir", "")
         branch_name = state.get("branch_name", "")
         if project_dir and branch_name:
             ok, msg = ensure_on_branch(project_dir, branch_name)
@@ -97,7 +113,7 @@ def execute_node(state: AgentState) -> dict:
             return {"status": "error", "execution_result": "缺少 branch_name，無法在指定分支上實作"}
 
         skills_block = build_skills_block(_SKILLS)
-        change_location = f"{project_dir}/openspec/changes/{state.get('change_name', '')}"
+        change_location = f"{project_dir}/openspec/changes/{change_name}"
         system = (
             _SYSTEM
             .replace("<<PROJECT_CONTEXT>>", build_project_doc_hint_for(project_dir))

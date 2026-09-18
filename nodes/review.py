@@ -2,10 +2,8 @@ import re
 import sys
 import time
 import os
-from pathlib import Path
-from datetime import datetime
 from ..core import AgentState
-from ..lib import call_claude, format_usage_stats, build_skills_block, build_project_doc_hint_for, ensure_on_branch
+from ..lib import call_claude, format_usage_stats, build_skills_block, build_project_doc_hint_for, ensure_on_branch, REPO_ROOT
 
 # 使用的模型（"haiku" | "sonnet" | "opus" | "fable"，見 claude_runner.MODEL_IDS；
 # None 則沿用 claude CLI 本身的預設模型）
@@ -47,6 +45,15 @@ fixed point 與 spec 來源見下方「依 code-review skill 執行時的具體�
    （`- [x]` 已完成／`- [ ]` 未完成）逐項核對，列出未完成的 TASK 編號
 2. 依目標專案的 CLAUDE.md / AGENT.md 中列出的測試指令並實際用 Bash 執行測試
    （若說明檔未列出，探索 package.json / pyproject.toml 等設定檔判斷）；測試失敗計入 Standards 軸的問題
+3. **Spec ↔ 測試追溯檢查**：Read `<<CHANGE_LOCATION>>/specs/**/*.md`，列出所有
+   `#### Scenario:` 標題；對每個 Scenario 標題，用 Grep 搜尋目標專案原始碼中是否存在
+   名稱完全相同的 `describe(...)` 或 `test(...)`（或其語言對應語法，例如 `it(...)`、
+   `@Test`、`def test_...`）。**任何 Scenario 缺少對應測試，計入 Spec 軸的阻塞性問題，
+   結論必須為 Ready to merge? No。**
+   同時檢查本次修改新增或改動的測試是否與現有測試重複或情境可合併：
+   - 若有重複或可覆蓋的情境，計入 Spec 軸建議事項，以 SUGGESTION 格式列出應合併或移除的測試
+   - 若重複情境已導致某 Scenario 有超過一個幾乎相同的測試（覆蓋範圍高度重疊），視為冗餘，
+     同樣以 SUGGESTION 列出；但**不得建議刪除到讓任何 Scenario 完全沒有對應測試**
 
 ## 完整性要求（絕對不可省略）
 
@@ -89,8 +96,6 @@ _BANNER = "\033[1;33m"
 _YELLOW = "\033[1;33m"
 _RED    = "\033[1;31m"
 _RESET  = "\033[0m"
-
-_REVIEW_SAVE_DIR = Path(os.path.dirname(__file__)).parent / "docs" / "nodes" / "review"
 
 _MAX_REVIEW_ATTEMPTS = 3
 
@@ -152,35 +157,29 @@ def _parse_suggestion_selection(answer: str, count: int) -> list[int]:
     return sorted(selected)
 
 
-def _save_review_report(task: str, review_text: str, review_level: str, iteration: int) -> None:
-    try:
-        _REVIEW_SAVE_DIR.mkdir(parents=True, exist_ok=True)
-        date_str = datetime.now().strftime("%Y-%m-%d")
-        filename = f"{date_str}-iter{iteration}.md"
-        filepath = _REVIEW_SAVE_DIR / filename
-        content = (
-            f"# Review Report — Iteration {iteration}\n\n"
-            f"**Task:** {task}\n\n"
-            f"**Date:** {date_str}\n\n"
-            f"**Review Level:** {review_level}\n\n"
-            f"---\n\n"
-            f"{review_text}"
-        )
-        filepath.write_text(content, encoding="utf-8")
-        print(f"{_BANNER}  [Review Agent] 已儲存報告：docs/nodes/review/{filename}{_RESET}", flush=True)
-    except Exception as e:
-        print(f"{_RED}  [Review Agent] 儲存報告失敗：{e}{_RESET}", flush=True)
-
 
 def review_node(state: AgentState) -> dict:
     if state.get("status") == "error":
         print(f"\n{_BANNER}{'═'*50}\n  [Review Agent] 上游發生錯誤，跳過\n{'═'*50}{_RESET}\n", flush=True)
         return {"review_result": "", "review_level": "", "review_blocking": False, "status": "error"}
 
-    print(f"\n{_BANNER}{'═'*50}\n  [Review Agent] 開始\n{'═'*50}{_RESET}\n", flush=True)
-
     project_dir = state.get("project_dir", "")
     change_name = state.get("change_name", "")
+    change_dir = os.path.join(REPO_ROOT, project_dir, "openspec", "changes", change_name)
+    if not os.path.isdir(change_dir):
+        print(
+            f"\n{_RED}{'═'*50}\n  [Review Agent] 找不到 OpenSpec change 目錄：{change_dir}，"
+            f"請先執行 analyze_plan\n{'═'*50}{_RESET}\n",
+            flush=True,
+        )
+        return {
+            "status": "error",
+            "review_result": f"找不到 OpenSpec change 目錄：{change_dir}",
+            "review_level": "",
+            "review_blocking": False,
+        }
+
+    print(f"\n{_BANNER}{'═'*50}\n  [Review Agent] 開始\n{'═'*50}{_RESET}\n", flush=True)
     branch_name = state.get("branch_name", "")
     if project_dir and branch_name:
         ok, msg = ensure_on_branch(project_dir, branch_name)
@@ -263,7 +262,6 @@ def review_node(state: AgentState) -> dict:
     if has_blocking_issues(review_text):
         # 嚴重影響功能的問題：維持原本嚴格行為，不詢問人工，直接產出報告並重新規劃
         review_level = extract_review_level(review_text)
-        _save_review_report(state["task"], review_text, review_level, iteration)
         print(f"{_BANNER}  [Review Agent] 發現嚴重影響功能的問題，審查等級：{review_level}{_RESET}\n", flush=True)
         return {"review_result": review_text, "review_level": review_level, "review_blocking": True}
 
@@ -302,6 +300,5 @@ def review_node(state: AgentState) -> dict:
         f"以下為經人工確認、需要處理的建議（其餘未選中的建議維持現狀，不需修改）：\n\n"
         f"{selected_block}"
     )
-    _save_review_report(state["task"], review_result, "修補", iteration)
     print(f"{_BANNER}  [Review Agent] 已選定 {len(selected)} 項建議進行修補，重新規劃{_RESET}\n", flush=True)
     return {"review_result": review_result, "review_level": "修補", "review_blocking": True}
