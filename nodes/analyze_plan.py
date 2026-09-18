@@ -110,7 +110,7 @@ _OPENSPEC_ARTIFACT_RULES = f"""## OpenSpec 產出規則（規格文件的實際�
 只描述本次「改了什麼」，不是整份系統規格：`## ADDED Requirements` / `## MODIFIED Requirements` /
 `## REMOVED Requirements` 三種分節，每個 `### Requirement:`（SHALL/MUST/SHOULD）底下至少一個
 `#### Scenario:`（逐步邏輯 + GIVEN/WHEN/THEN）。規則：
-- 先用 Read/Grep 讀 `<project_dir>/openspec/specs/<domain>/spec.md`（已合併進主規格的既有內容，不是這次 change 自己的 delta 檔案），逐一分析既有 Requirement 的規範範圍——不是只比對標題或關鍵字：本次要規範的行為若與某個既有 Requirement 完全相同、或屬於同一件事可以合併進去（而不是另開一個涵蓋範圍重疊的新 Requirement），就用 `MODIFIED Requirements` 改寫該 Requirement（須含合併後完整的新版本內容 + 一行說明改了什麼）；找不到可合併或重複的既有 Requirement，才用 `ADDED Requirements` 視為新規則。domain 首次建立時該檔案還不存在，一律視為 ADDED
+- 先用 Read/Grep 讀 `<project_dir>/openspec/specs/<domain>/spec.md`（已合併進主規格的既有內容，不是這次 change 自己的 delta 檔案），逐一分析既有 Requirement 的規範範圍——不是只比對標題或關鍵字：本次要規範的行為若與某個既有 Requirement 完全相同、或屬於同一件事可以合併進去（而不是另開一個涵蓋範圍重疊的新 Requirement），就用 `MODIFIED Requirements` 改寫該 Requirement（須含合併後完整的新版本內容，直接改寫規格本身，**不要在規格內附加「改了什麼」說明或括號註釋**）；找不到可合併或重複的既有 Requirement，才用 `ADDED Requirements` 視為新規則。domain 首次建立時該檔案還不存在，一律視為 ADDED
 - Requirement 與 Scenario 標題（`### Requirement:` / `#### Scenario:`）用抽象、涵蓋規則本身的措辭命名，不要寫死具體數量或列舉值：寫死的標題（連帶內文）在功能擴充時（例如權限或分頁數量增加）會對不上新情況，被迫另開一個 Requirement/Scenario，而不是原本的規則自然涵蓋。
   錯誤：`Scenario: user 端兩個權限皆為 true 時兩個子分頁都顯示`；正確：`Scenario: 登入者具備全部受管功能時顯示對應開關`
 - 每個 Requirement 只講一件事、一個 SHALL/MUST/SHOULD；不要把好幾個「而且」塞進同一個 Requirement
@@ -127,6 +127,7 @@ _OPENSPEC_ARTIFACT_RULES = f"""## OpenSpec 產出規則（規格文件的實際�
   錯誤：`逐步邏輯：系統依 selfInformation.allowOriginAuth === true 判定...使用者點擊後 OriginAuthModule 才會被掛載並發出請求`；
   正確：`逐步邏輯：系統依登入者是否具備回源鑒權權限判定...使用者點擊該分頁後，右側才顯示回源鑒權模組的列表內容`
 - 適用時另寫邊界／錯誤 Scenario（Edge/Corner Cases、Error Handling），不可只靠主路徑
+- Scenario 只描述系統應有的行為（正向規範），**不寫「功能不存在」「行為被禁止」的負向 Scenario**；需求刪減或行為縮減時，只需在 `REMOVED Requirements` 宣告或縮減 `MODIFIED Requirements` 的範圍，不需要為缺少的行為另寫 Scenario
 - 每個 Scenario 都必須有至少一個與其 Scenario Title 名稱相同的 `describe` 或 `test`（驗收測試名稱須與 Scenario 標題一致，確保規格與測試可追溯）
 - 依下方「目標專案與 Domain」已確認的歸屬：沿用既有 domain 不需要加 `## Purpose`；domain 首次建立才在 delta 檔案最上面加一段 `## Purpose`（一兩句話，與 proposal Intent 的規範目的對齊）
 - 不需要獨立的「User Stories」章節——Scenario 已經是驗收條件的正式化版本
@@ -202,7 +203,7 @@ The system SHALL/MUST <一個明確、可觀察的行為；含輸出要求（資
 - THEN <結果；必須寫清可觀察輸出的資料類型、格式、約束>
 
 ## MODIFIED Requirements
-（改變既有行為時使用，須包含完整的新版本內容 + 一行說明改了什麼）
+（改變既有行為時使用，須包含合併後完整的新版本內容；直接改寫規格，不附加「改了什麼」說明或括號註釋）
 
 ## REMOVED Requirements
 （行為被移除時使用，須說明原因）
@@ -257,6 +258,15 @@ _CHANGE_SETUP_EXISTING = """## 既有的 OpenSpec Change 位置
 （維持既有內容裡跟本次無關的部分，只改需要調整的段落）。已有 design.md 則一併更新；尚未有
 且本輪仍是小改動則不必新增；本輪已不再是小改動才 Write design.md。"""
 
+_ANALYZE_PROHIBITIONS = """## 嚴格禁止事項
+
+以下事項**嚴格禁止**，違反即為執行錯誤：
+
+- **不得修改任何應用程式原始碼**（`.py`、`.ts`、`.vue`、`.go` 等實作檔案）——程式碼修改由 execute node 負責；
+  此階段僅允許讀取程式碼（Read/Glob/Grep），以及寫入 OpenSpec change 資料夾下的規格文件
+- **不得將 `tasks.md` 中的 `- [ ]` 改為 `- [x]`**——task 完成標記由 execute node 在實作後即時更新；
+  analyze 階段只寫或改 task 的文字描述，不能標記完成"""
+
 _SYSTEM_INITIAL = f"""你是一位資深全端工程師，負責「分析與規劃」階段。
 
 <<PROJECT_CONTEXT>>
@@ -275,6 +285,8 @@ _SYSTEM_INITIAL = f"""你是一位資深全端工程師，負責「分析與規�
 {_OPENSPEC_ARTIFACT_RULES}
 
 {_OPENSPEC_TEMPLATES}
+
+{_ANALYZE_PROHIBITIONS}
 
 ## 最終輸出
 
@@ -313,6 +325,8 @@ _SYSTEM_REPLAN = f"""你是一位資深全端工程師，負責「重新分析�
 
 {_OPENSPEC_ARTIFACT_RULES}
 
+{_ANALYZE_PROHIBITIONS}
+
 ## 最終輸出
 
 規格內容以既有 OpenSpec change 資料夾為準，不要在聊天裡重複輸出分析／計畫／TASK 清單，一句話
@@ -344,6 +358,8 @@ _SYSTEM_HUMAN_REVISE = f"""你是一位資深全端工程師，負責「根據�
 {_CHANGE_SETUP_EXISTING}
 
 {_OPENSPEC_ARTIFACT_RULES}
+
+{_ANALYZE_PROHIBITIONS}
 
 ## 最終輸出
 
@@ -664,6 +680,25 @@ def analyze_plan_node(state: AgentState) -> dict:
             "branch_name": branch_name,
             "project_dir": project_dir,
         }
+
+    # Guard: 初始規劃已完成，不可再次執行初始規劃（只允許重新規劃或修補）
+    if not is_replan and not is_human_revise and state.get("analysis"):
+        print(
+            f"{_RED}  [分析+規劃 Agent] 此 change 已完成初始規劃，"
+            f"不可重複執行初始規劃（僅允許重新規劃或修補）{_RESET}\n",
+            flush=True,
+        )
+        return _fail("此 change 已完成初始規劃，不可重複執行初始規劃")
+
+    # Guard: review_blocking=True 但 review_result 為空 → 狀態不一致，無法重新規劃
+    # human_feedback 提供的人工修補不依賴 review_result，不受此 guard 限制
+    if not is_human_revise and state.get("review_blocking") and not review_result:
+        print(
+            f"{_RED}  [分析+規劃 Agent] review_blocking=True 但 review_result 為空，"
+            f"無法執行重新規劃{_RESET}\n",
+            flush=True,
+        )
+        return _fail("review_result 為空，無法重新規劃")
 
     model = _MODEL
     domain_context_value = ""
