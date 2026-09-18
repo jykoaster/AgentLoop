@@ -34,9 +34,11 @@ Inside the container, working directory is `${HOST_WORKSPACE_ROOT}` (the parent 
 # full workflow
 python -m AgentLoop.main "task description"
 
-# run a single node in isolation (human_confirm cannot be run standalone)
+# run from a specific node; lists available changes in TARGET_PROJECT/.agentloop/changes/ for selection,
+# then continues the rest of the workflow (human_confirm cannot be run standalone)
+# execute/review require an existing state written by analyze_plan; analyze_plan allows a fresh start
 python -m AgentLoop.main --node analyze_plan "task description"
-python -m AgentLoop.main --node execute --state-file /tmp/state.json "task description"
+python -m AgentLoop.main --node execute "task description"
 python -m AgentLoop.main --node review "task description"
 python -m AgentLoop.main --node archive <change_name>
 
@@ -45,9 +47,20 @@ python -m AgentLoop.search "query"
 python -m AgentLoop.search --reindex "query"   # force rebuild index before searching
 ```
 
-`--state-file` preloads `AgentState` fields (e.g. `plan`, `execution_result`) from a JSON file so you can debug one node without re-running the ones before it.
+Run tests inside the container from `${HOST_WORKSPACE_ROOT}`:
 
-There is no test/lint/build step for this repo itself — the only thing to verify when editing a node is that its `_SYSTEM` prompt still produces output the regexes in that node (or in `workflow.py`'s routing functions) can parse.
+```bash
+# unit tests (state persistence, routing logic) — fast, no Claude CLI needed
+pytest AgentLoop/tests/test_state_persistence.py -v
+
+# workflow entry point tests (LangGraph routing with mocked nodes) — no Claude CLI needed
+pytest AgentLoop/tests/test_workflow_entrypoints.py -v
+
+# all tests
+pytest AgentLoop/tests/ -v
+```
+
+When editing a node, also verify its `_SYSTEM` prompt still produces output the regexes in that node (or in `workflow.py`'s routing functions) can parse.
 
 ## Architecture: what requires cross-file reading
 

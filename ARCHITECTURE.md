@@ -455,7 +455,7 @@ SUGGESTION 2: [建議內容與理由]
 
 **路由結論：** 以上兩種情況（嚴重問題 / 人工選中建議）都會把 `review_blocking` 設為 `True`，交由 `route_after_review` 讀取決定是否重新規劃；其餘情況 `review_blocking` 為 `False`，直接結束流程。
 
-**審查報告儲存至：** `docs/nodes/review/YYYY-MM-DD-iterN.md`（`_save_review_report()`，含 task、date、review level、完整報告內容；僅在 `review_blocking=True` 時儲存）
+**審查結果：** 完整的 `review_result` 字串隨 `state.json` 一併持久化（每次 review node 結束後由 `main.py` 的 `_save_state()` 寫入，不論通過或不通過），不再另存獨立的 review 報告檔案。
 
 ---
 
@@ -542,7 +542,8 @@ embedding 模型輸出 L2 正規化後的 384 維向量，存為 `float[384]` bl
 | -------- | ---------------------------------------- | ------------------------------------------- |
 | OpenSpec Change | `<project_dir>/openspec/changes/<change_name>/`（`proposal.md`/`tasks.md`/`specs/**/*.md`，非小改動時另有 `design.md`；`<project_dir>`/`<change_name>` 為 `AgentState` 對應欄位） | `analyze_plan` 寫；`human_confirm` 讀 proposal.md + tasks.md 供顯示；`execute` 讀完整 change 後實作並勾選 tasks.md；`review`、`archive_change` 讀 |
 | 持久規格 | `<project_dir>/openspec/specs/<domain>/spec.md` | `archive_change` 呼叫 `openspec archive` 合併寫入，跨任務累積 |
-| 審查報告 | `docs/nodes/review/YYYY-MM-DD-iterN.md`  | `review` 寫，下次迭代的 `analyze_plan` 可讀 |
+| 審查結果 | `<project_dir>/.agentloop/changes/<change_name>/state.json` 的 `review_result` 欄位 | `review` 執行後由 `_save_state()` 寫入；`analyze_plan` 重新規劃時從 `AgentState` 讀取 |
+| AgentLoop State | `<project_dir>/.agentloop/changes/<change_name>/state.json`（`AgentState` 去除 `project_dir` 的 JSON 序列化；每個 node 結束後自動覆蓋） | `main.py` 寫（`_save_state()`）；`--node` 模式下作為入口 state 載入，`project_dir` 在載入時由 `TARGET_PROJECT` 環境變數補回 |
 | 業務文件 | 各偵測到專案的 `docs/` 目錄              | `execute` 寫，`review` 驗證                 |
 
 ### 4. Git Diff 作為稽核媒介
@@ -681,16 +682,19 @@ AgentLoop 容器本身不跑 Docker daemon，而是讓容器內的 Docker CLI �
 python -m AgentLoop.main "幫我在後端新增一個 GET /tables/featured 端點"
 ```
 
-### 單節點偵錯模式
+### 單節點起點模式
 
 ```bash
+# 列出目標專案的 changes 供選擇，跑完後繼續後面的完整流程
 python -m AgentLoop.main --node analyze_plan "任務描述"
-python -m AgentLoop.main --node execute --state-file /tmp/state.json "任務描述"
-python -m AgentLoop.main --node review "任務描述"
+python -m AgentLoop.main --node execute "任務描述"   # 需先有 analyze_plan 產出的 state
+python -m AgentLoop.main --node review "任務描述"    # 需先有 analyze_plan 產出的 state
+
+# archive 是終點，跑完即止
 python -m AgentLoop.main --node archive 54-feat-ai-ad-content-extend-to-1024-chars
 ```
 
-State file 可預載 `plan`、`execution_result` 等欄位，便於針對單一節點除錯。`archive` 單獨執行時參數即 change 名稱，會掃描工作區定位 `openspec/changes/<name>/`，不需要 `--state-file`。`human_confirm` 不在 `--node` 可選清單中，只能作為完整工作流程的一部分執行。
+`--node X` 的語意是「從 X 開始跑剩下的完整工作流程」：指定 node 跑完並存 state 後，透過 `_stream_and_save()` 以 `config={"configurable": {"start_from": <next_node>}}` 繼續執行剩餘 node（`workflow.py` 的 `_route_start` 讀取此 config 決定 entry point）。`review` 的 next_node 由 `_route_after_review()` 決定（通過 → `archive_change`；可重試 → `increment`；error/超限 → 直接結束），`analyze_plan` → `human_confirm`，`execute` → `review`。State 一律從 `<project_dir>/.agentloop/changes/<change_name>/state.json` 載入（列出已有 state.json 的 changes 供選擇），`project_dir` 由 `TARGET_PROJECT` 環境變數補回；`execute`、`review` 若找不到任何 change 則拒絕執行，`analyze_plan` 找不到時允許全新開始。`human_confirm` 不在 `--node` 可選清單中，只能作為完整工作流程的一部分執行。`--state-file` 已移除，state 只能來自 `.agentloop/`。
 
 ---
 
