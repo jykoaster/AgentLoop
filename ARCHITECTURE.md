@@ -70,6 +70,10 @@ class AgentState(TypedDict):
     human_feedback: str    # 使用者在 human_confirm 拒絕計畫時填寫的修改意見
     change_name: str       # OpenSpec change 名稱（由 branch_name 轉 kebab-case）；任務開始時問一次，全程沿用
     branch_name: str       # 使用者指定的 git 分支（必填）；規劃／執行／審查／archive 都切到此分支
+    session_node: str      # 中斷中的 Claude session 屬於哪個 node（""＝沒有）；每個 change 同時
+                           # 只會有一個，analyze_plan／execute／review 共用這一個插槽
+    session_id: str        # 該 session 的 id，撞到用量上限後可 --resume 接回；只透過
+                           # core/session.py 的 take_session()／store_session() 讀寫
     project_dir: str       # 本次任務對應的目標專案目錄（相對 workspace root）；由 analyze_plan
                            # 初始規劃時在呼叫 Claude 前決定，之後所有節點據此定位 openspec/changes/<change_name>/
 ```
@@ -254,7 +258,9 @@ untracked 新檔），但保留 `openspec/`，失敗即視為錯誤（`status: "
 
 `_run_with_grilling()` 現在多接受一個可選的 `resume` 參數，讓呼叫端可以從一個既有 session
 （而非全新對話）開始這個迴圈——`_run_with_validate()`（見下）就是靠這個參數，把 openspec
-validate 的錯誤修正也接到同一套「有問題就等使用者、否則繼續」的迴圈裡。
+validate 的錯誤修正也接到同一套「有問題就等使用者、否則繼續」的迴圈裡；跨程序接回上次撞到
+用量上限而中斷的 session（見下方「跨程序接回：session 插槽」）走的也是同一個參數。接回時會
+**略過 domain 歸屬提問**，因為那個答案只用來組完整 prompt，接回時不會送出。
 
 **依模式而異的提問規則：**
 
@@ -366,6 +372,8 @@ proposal.md/design.md/specs delta/tasks.md 的空白骨架——這部分只留�
 
 **注入的 Skills：** `tdd`（完整內容，見下方「Skill 系統作為知識注入」關於為什麼不能只列名稱）；其餘依偵測到的技術棧由 Agent 自行從可用 skills 中挑選使用（依賴 Claude Code 自己的原生 skill 探索，不經過 `skill_loader.py`）。不 commit、不自行 `/code-review`，流程寫在 `_SYSTEM`。
 
+**撞到用量上限後跨程序接回同一個 session：** 中斷時把 session id 存進 `AgentState` 的插槽，重跑 `python -m AgentLoop.main --node execute` 並選同一個 change 就會接回續作，不重跑已完成的 TASK。機制與 `analyze_plan`／`review` 共用，見下方「跨程序接回：session 插槽」。
+
 ---
 
 ### 4. `review`（程式碼審查 Agent）
@@ -397,6 +405,10 @@ skill 全文、兩輪 sub-agent 往返、額外驗證步驟之後的深層決策
 結果、把報告寫完，最多重試 `_MAX_REVIEW_ATTEMPTS`（3）次；仍然不完整就回傳 `status: "error"`，
 不讓這種回應進入正常的 blocking／replan 判斷。這個檢查不管 Claude 是為什麼提前結束都能攔下來，
 不像 `_SYSTEM` 的指示得靠 Claude 自己遵守。
+
+這整個補完迴圈被 `call_resuming()` 包在外層（見下方「跨程序接回：session 插槽」），所以 review
+也能接回上次撞到用量上限而中斷的 session。接回失敗而退回完整 prompt 時，`_MAX_REVIEW_ATTEMPTS`
+的額度會重新計算，不沿用接回那一輪已經用掉的次數。
 
 **審查依據：**
 
@@ -607,16 +619,45 @@ Iteration 2:
 
 `ClaudeResult` 帶有 `session_id`；`_log_event()` 偵測到助理輸出以 `QUESTION_MARKER`（`"QUESTION:"`）開頭時，會用醒目格式即時印出提問內容。`call_claude()` 的 `resume` 參數可帶入先前呼叫回傳的 `session_id`，讓上層（目前僅 `analyze_plan._run_with_grilling()`）能以同一個 Claude session 延續多輪一問一答，不必每輪重新提供完整上下文。
 
-### Token / Rate-Limit 暫停機制
+### 用量上限暫停機制
 
-`call_claude()` 包含一個 `while True` 重試迴圈：若偵測到錯誤訊息含有以下關鍵字（`rate limit`、`429`、`credit balance`、`billing` 等），則**暫停工作流程**並在 terminal 提示使用者：
+`call_claude()` 包含一個 `while True` 重試迴圈：`is_usage_limit_error()` 判定錯誤屬於「等重置就會好」的用量上限時，**暫停工作流程**並在 terminal 提示使用者：
 
-- 按 **Enter** → 等待配額更新後重新呼叫 Claude
+- 按 **Enter** → 等待用量重置後重新呼叫 Claude
 - 輸入 **`q`** 後按 Enter → 中止程序並回傳原始錯誤結果
 
 stdin 已關閉（非 TTY / pipe EOF）時自動中止，避免無限等待。
 
-**重試時接續原本的 session，不重開新的：** 中斷前那次呼叫若已經透過串流事件拿到 `session_id`（代表 Claude session 已經建立，中途才因限流被打斷），按 Enter 繼續時會改用 `--resume <session_id>` 接上同一個 session，並只送出一段簡短的接續指示（`_RESUME_AFTER_LIMIT_PROMPT`：先確認目前檔案與 tasks.md 實際進度、不要重做已完成的部分、也不要假設中斷前最後一個動作一定完整），而不是重新送出原始的完整 prompt。這避免了「中斷前已經寫入的部分變更/已打勾的 checkbox，被一個完全沒有記憶的新 session 忽略或重做」的問題。只有在中斷發生得太早、連 `session_id` 都還沒拿到時，才會退回重送原始 prompt、開一個全新 session。
+**判定方式是關鍵字清單＋句型比對兩層，缺一不可。** `_TOKEN_LIMIT_KEYWORDS`（`rate limit`、`429`、`credit balance`、`billing` 等）只涵蓋 API／計費類訊息；訂閱制（Pro / Max / Team 席位）印的是另一組句子，**一個關鍵字都對不上**：
+
+```
+You've hit your session limit · resets 3:45pm
+You've hit your weekly limit · resets Mon 12:00am
+You've hit your Opus limit · resets 3:45pm
+```
+
+漏判的後果不是重試失敗，而是整個節點直接以 `status: "error"` 收場（實際發生過：`execute` 在 1.8 秒內結束，`review` 跟著以「上游發生錯誤」跳過，工作流結束）。因此 `_LIMIT_MESSAGE_RE`（`hit your …… limit`）額外比對整句形狀，也涵蓋未來可能出現的其他 per-model 上限。反向排除 `context limit`——脈絡視窗滿了等重置也不會好（由 auto-compact 處理），不可停在等待人工按鍵的狀態。
+
+**重試時接續原本的 session，不重開新的：** 中斷前那次呼叫若已經透過串流事件拿到 `session_id`（代表 Claude session 已經建立，中途才因限流被打斷），按 Enter 繼續時會改用 `--resume <session_id>` 接上同一個 session，並只送出一段簡短的接續指示（`RESUME_AFTER_INTERRUPT_PROMPT`：先確認目前檔案與 tasks.md 實際進度、不要重做已完成的部分、也不要假設中斷前最後一個動作一定完整），而不是重新送出原始的完整 prompt。這避免了「中斷前已經寫入的部分變更/已打勾的 checkbox，被一個完全沒有記憶的新 session 忽略或重做」的問題。只有在中斷發生得太早、連 `session_id` 都還沒拿到時，才會退回重送原始 prompt、開一個全新 session。
+
+這個迴圈只在**程序還活著**時有用。使用者輸入 `q`、Ctrl-C，或節點回傳 error 讓工作流結束之後，就要靠下面的 session 插槽把 id 持久化到 `state.json` 才接得回去。
+
+### 跨程序接回：session 插槽
+
+`AgentState` 的 `session_node` / `session_id` 是一個**單一插槽**，`analyze_plan`、`execute`、`review` 三個節點共用，只透過 `core/session.py` 的 `take_session(state, node)` / `store_session(node, session_id)` 讀寫。
+
+**為什麼是單一插槽而不是 node → id 的字典：** 每個 change 同時只會有一個中斷中的 session。節點撞到上限就讓整個工作流停下（`review` 看到上游 `status: "error"` 直接跳過、`route_after_review` 也在 error 時 END），不可能有第二個節點接著跑到一半又被中斷；節點正常產出結論時也會清掉自己的插槽。`store_session()` 因此是整份取代而非合併——換節點時舊的自然被丟掉，不會留下沒人清的殘留 id。
+
+**插槽仍然記著 owner node**，因為 `--node` 可以從任一節點切入：`execute` 絕對不能去 `--resume` 一個 `analyze_plan` 留下的 session（工具權限 `plan` vs `full`、當時交辦的工作都不同）。`take_session()` 看到 owner 不符就回空字串，讓該節點開全新 session。
+
+三個節點的行為一致，由 `claude_runner.call_resuming()` 統一處理：
+
+- 中斷時存下 `ClaudeResult.session_id`；該次連 id 都沒拿到（上限發生在最開頭）則保留插槽原本的值，不覆蓋成空。`analyze_plan` 的 guard／前置步驟（切分支、`openspec init`）失敗時也保留，因為那時根本還沒呼叫 Claude
+- 產出結論時**清掉**——之後再接回只會帶進過期脈絡（例如下一輪 `execute` 面對的規格可能已被 replan 改寫）
+- 重跑（`--node <節點>` 選同一個 change）時用 `--resume` 接回，並只送 `RESUME_AFTER_INTERRUPT_PROMPT` 這段續作指示，**不重送完整 prompt**——否則沒有記憶的新 session 會依 `_SYSTEM` 的「逐一執行每個 TASK、不跳過」把已完成的實作重做一遍（`_SYSTEM` 本身沒有「已打勾的跳過」這條規則，這個保護只存在於續作指示裡）
+- session 已失效（換機器、`agent_home` volume 重建、Claude 端過期）時退回完整 prompt 重跑；但**接回後又撞上限不算失效**，維持回報以便再存一次 id，避免退回完整 prompt 而重做已完成的工作
+
+`call_resuming()` 接收呼叫端提供的 `run(prompt, resume)`，因為各節點對 Claude 的呼叫包著不同的自有迴圈：`analyze_plan` 是 grilling 問答加 `openspec validate` 修正迴圈（後者自己也會撞上限，所以 `_run_with_validate()` 一併回傳最後的 session id），`review` 是「報告提前結束就要求補完」的重試迴圈（接回失敗而退回完整 prompt 時，補完次數的額度會重新計算）。`analyze_plan` 接回時還會**略過 domain 歸屬提問**——那個答案只用來組完整 prompt，接回時不會送出。
 
 ### 模型對應
 

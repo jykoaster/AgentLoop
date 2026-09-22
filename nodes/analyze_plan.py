@@ -2,10 +2,10 @@ import os
 import re
 import sys
 import time
-from ..core import AgentState
+from ..core import AgentState, take_session, store_session
 from ..lib import (
-    call_claude, format_usage_stats, QUESTION_MARKER,
-    build_skills_block,
+    call_claude, call_resuming, format_usage_stats, QUESTION_MARKER,
+    is_usage_limit_error, build_skills_block,
     build_project_doc_hint_for, REPO_ROOT,
     ensure_on_branch, rollback_except_openspec,
     ensure_initialized, ensure_change_created, validate_change,
@@ -210,6 +210,9 @@ _RESET  = "\033[0m"
 _MAX_QUESTIONS = 15
 _MAX_VALIDATE_RETRIES = 5
 
+# 中斷 session 插槽的 owner 名稱（見 core/session.py）
+_SESSION_KEY = "analyze_plan"
+
 
 _QUESTION_LINE_RE = re.compile(r"^\s*" + re.escape(QUESTION_MARKER), re.MULTILINE)
 _TASK_CHECKBOX_RE = re.compile(r"^-\s\[[ xX]\]\s*(.+)$", re.MULTILINE)
@@ -313,11 +316,14 @@ def _run_with_grilling(prompt: str, tools: str, model: str, timeout: int, resume
         prompt = answer if answer else "請採用你自己建議的答案，並繼續下一個問題或流程。"
 
 
-def _run_with_validate(result, project_dir: str, change_name: str, tools: str, model: str) -> str:
+def _run_with_validate(
+    result, project_dir: str, change_name: str, tools: str, model: str
+) -> tuple[str, str]:
     """驗證迴圈：`openspec validate` 有 error 就把錯誤訊息回傳給同一個 session 修正，
     重試到通過或達上限為止（取代原本要求 Claude 自己在 Bash 裡跑 validate 迴圈）。
 
-    回傳空字串表示驗證通過；否則回傳失敗原因，由呼叫端視為錯誤。
+    回傳 `(失敗原因, 最後的 session_id)`；失敗原因為空字串表示驗證通過。一併回傳
+    session_id 是因為這個迴圈自己也會撞到用量上限，呼叫端要拿它存進 state 才接得回。
     """
     session_id = result.session_id
     project_dir_abs = os.path.join(REPO_ROOT, project_dir)
@@ -325,7 +331,7 @@ def _run_with_validate(result, project_dir: str, change_name: str, tools: str, m
     for attempt in range(1, _MAX_VALIDATE_RETRIES + 1):
         validation = validate_change(project_dir_abs, change_name)
         if validation.ok:
-            return ""
+            return "", session_id
 
         print(
             f"{_YELLOW}  [分析+規劃 Agent] openspec validate 發現問題（第 {attempt} 次）：\n"
@@ -333,7 +339,10 @@ def _run_with_validate(result, project_dir: str, change_name: str, tools: str, m
             flush=True,
         )
         if not session_id:
-            return f"openspec validate 失敗且沒有可延續的 session：\n{validation.error_text}"
+            return (
+                f"openspec validate 失敗且沒有可延續的 session：\n{validation.error_text}",
+                "",
+            )
 
         fix_prompt = (
             "`openspec validate --strict` 發現以下 error，請修正對應檔案後我會重新驗證，"
@@ -342,9 +351,9 @@ def _run_with_validate(result, project_dir: str, change_name: str, tools: str, m
         result = _run_with_grilling(fix_prompt, tools=tools, model=model, timeout=300, resume=session_id)
         session_id = result.session_id or session_id
         if result.is_error:
-            return result.text
+            return result.text, session_id
 
-    return f"openspec validate 重試 {_MAX_VALIDATE_RETRIES} 次仍未通過"
+    return f"openspec validate 重試 {_MAX_VALIDATE_RETRIES} 次仍未通過", session_id
 
 
 def _reset_task_checkboxes(project_dir: str, change_name: str) -> None:
@@ -587,7 +596,11 @@ def analyze_plan_node(state: AgentState) -> dict:
     branch_name = state.get("branch_name", "")
     project_dir = state.get("project_dir", "")
 
-    def _fail(analysis: str) -> dict:
+    prior_session = take_session(state, _SESSION_KEY)
+
+    def _fail(analysis: str, session_id: str | None = None) -> dict:
+        """session_id 省略時沿用插槽裡原本的值：guard 與前置步驟（切分支、openspec init）
+        失敗時還沒產生新的 session，不該把先前中斷留下的 id 清掉。"""
         return {
             "status": "error",
             "analysis": analysis,
@@ -595,6 +608,7 @@ def analyze_plan_node(state: AgentState) -> dict:
             "change_name": change_name,
             "branch_name": branch_name,
             "project_dir": project_dir,
+            **store_session(_SESSION_KEY, prior_session if session_id is None else session_id),
         }
 
     # Guard: 初始規劃已完成，不可再次執行初始規劃（只允許重新規劃或修補）
@@ -665,14 +679,21 @@ def analyze_plan_node(state: AgentState) -> dict:
             print(f"{_RED}  [分析+規劃 Agent] openspec init 失敗：{init_result.error_text}{_RESET}\n", flush=True)
             return _fail(f"openspec init 失敗：{init_result.error_text}")
 
-        domains, new_domain_name = _ask_domain_selection(project_dir)
-        if domains:
-            domain_context_value = _DOMAIN_CONTEXT_EXISTING.replace(
-                "<<DOMAIN_LIST_VALUE>>", "、".join(domains)
+        if prior_session:
+            # 接回中斷的 session 時不會重送完整 prompt，domain 提示不會被用到，別再問一次
+            print(
+                f"{_YELLOW}  [分析+規劃 Agent] 接續中斷的 session，略過 domain 歸屬提問{_RESET}",
+                flush=True,
             )
         else:
-            domain_purpose = _ask_domain_purpose()
-            domain_context_value = _build_new_domain_context(new_domain_name, domain_purpose)
+            domains, new_domain_name = _ask_domain_selection(project_dir)
+            if domains:
+                domain_context_value = _DOMAIN_CONTEXT_EXISTING.replace(
+                    "<<DOMAIN_LIST_VALUE>>", "、".join(domains)
+                )
+            else:
+                domain_purpose = _ask_domain_purpose()
+                domain_context_value = _build_new_domain_context(new_domain_name, domain_purpose)
 
         change_result = ensure_change_created(project_dir_abs, change_name)
         if not change_result.ok:
@@ -724,7 +745,16 @@ def analyze_plan_node(state: AgentState) -> dict:
             )
 
         prompt = f"{system}\n\n{skills_block}\n\n任務：{state['task']}"
-        result = _run_with_grilling(prompt, tools=tools, model=model, timeout=300)
+
+        last_session = prior_session
+
+        def _run(p: str, resume: str | None):
+            nonlocal last_session
+            r = _run_with_grilling(p, tools=tools, model=model, timeout=300, resume=resume)
+            last_session = r.session_id or last_session
+            return r
+
+        result = call_resuming(_run, prompt, prior_session, "分析+規劃 Agent")
     except Exception as e:
         print(f"{_RED}  [分析+規劃 Agent] 發生例外：{e}{_RESET}\n", flush=True)
         return _fail(f"分析階段發生例外：{e}")
@@ -737,12 +767,18 @@ def analyze_plan_node(state: AgentState) -> dict:
 
     if result.is_error:
         print(f"{_RED}  [分析+規劃 Agent] Claude 執行失敗：{result.text}{_RESET}\n", flush=True)
-        return _fail(result.text)
+        if is_usage_limit_error(result.text):
+            print(
+                f"{_YELLOW}  [分析+規劃 Agent] 用量重置後重跑 `--node analyze_plan` 並選同一個 "
+                f"change，即會接回這次的 session 續作{_RESET}\n",
+                flush=True,
+            )
+        return _fail(result.text, last_session)
 
-    validate_error = _run_with_validate(result, project_dir, change_name, tools, model)
+    validate_error, validate_session = _run_with_validate(result, project_dir, change_name, tools, model)
     if validate_error:
         print(f"{_RED}  [分析+規劃 Agent] {validate_error}{_RESET}\n", flush=True)
-        return _fail(validate_error)
+        return _fail(validate_error, validate_session or last_session)
 
     if is_replan and review_level == "重寫":
         _reset_task_checkboxes(project_dir, change_name)
@@ -767,4 +803,5 @@ def analyze_plan_node(state: AgentState) -> dict:
         "change_name": change_name,
         "branch_name": branch_name,
         "project_dir": project_dir,
+        **store_session(_SESSION_KEY, ""),
     }

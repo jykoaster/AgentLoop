@@ -1,7 +1,10 @@
 import os
 import time
-from ..core import AgentState
-from ..lib import call_claude, format_usage_stats, build_skills_block, build_project_doc_hint_for, ensure_on_branch, REPO_ROOT
+from ..core import AgentState, take_session, store_session
+from ..lib import (
+    call_claude, call_resuming, format_usage_stats, build_skills_block,
+    build_project_doc_hint_for, ensure_on_branch, is_usage_limit_error, REPO_ROOT,
+)
 
 _SKILLS = [
     "tdd",
@@ -10,6 +13,11 @@ _SKILLS = [
 # 使用的模型（"haiku" | "sonnet" | "opus" | "fable"，見 claude_runner.MODEL_IDS；
 # None 則沿用 claude CLI 本身的預設模型）
 _MODEL = "sonnet"
+
+_TIMEOUT = 900
+
+# 中斷 session 插槽的 owner 名稱（見 core/session.py）
+_SESSION_KEY = "execute"
 
 _SYSTEM = """你是一位資深全端工程師，負責「執行」階段。
 
@@ -46,6 +54,9 @@ _SYSTEM = """你是一位資深全端工程師，負責「執行」階段。
   - 若現有測試已覆蓋相同情境，**不重複撰寫**；若情境相似但覆蓋範圍不完整，**合併**成一個測試即可
   - 允許刪除或合併舊有重複測試，但**刪除後必須確認每個 Scenario 仍有至少一個對應測試**；
     不可讓原本有測試的 Scenario 在修改後變成沒有任何測試
+- **Scenario ↔ 測試名稱對應**：`<<CHANGE_LOCATION>>/specs/**/*.md` 裡每一個 `#### Scenario:` 標題，
+  都必須有一個名稱**完全相同**的 `describe(...)` / `test(...)` / `it(...)`（或對應語言的測試語法）。
+  所有 TASK 完成後，用 Grep 逐一確認；若有 Scenario 缺少對應測試，**必須補寫後才能輸出最終摘要**
 - 過程中定期執行型別檢查與單一測試檔案；全部 TASK 完成後再跑完整測試（見下方）
 - **不要** commit——修改是否提交由使用者事後決定
 - **不要**自行呼叫 /code-review——後續有獨立的 Review Agent 依專案規格審查本次修改，此處只需完成實作與測試
@@ -100,6 +111,8 @@ def execute_node(state: AgentState) -> dict:
         )
         return {"status": "error", "execution_result": f"找不到 OpenSpec change 目錄：{change_dir}"}
 
+    prior_session = take_session(state, _SESSION_KEY)
+
     start = time.monotonic()
 
     try:
@@ -121,7 +134,10 @@ def execute_node(state: AgentState) -> dict:
             .replace("<<BRANCH_NAME_VALUE>>", branch_name)
         )
         prompt = f"{system}\n\n{skills_block}\n\n任務：{state['task']}"
-        result = call_claude(prompt, tools="full", timeout=900, model=_MODEL)
+        result = call_resuming(
+            lambda p, resume: call_claude(p, tools="full", timeout=_TIMEOUT, model=_MODEL, resume=resume),
+            prompt, prior_session, "執行 Agent",
+        )
     except Exception as e:
         print(f"{_RED}  [執行 Agent] 發生例外：{e}{_RESET}\n", flush=True)
         return {"status": "error", "execution_result": f"執行階段發生例外：{e}"}
@@ -134,7 +150,21 @@ def execute_node(state: AgentState) -> dict:
 
     if result.is_error:
         print(f"{_RED}  [執行 Agent] Claude 執行失敗：{result.text}{_RESET}\n", flush=True)
-        return {"status": "error", "execution_result": result.text}
+        if is_usage_limit_error(result.text):
+            print(
+                f"{_YELLOW}  [執行 Agent] 用量重置後重跑 `--node execute` 並選同一個 change，"
+                f"即會接回這次的 session 續作{_RESET}\n",
+                flush=True,
+            )
+        return {
+            "status": "error",
+            "execution_result": result.text,
+            **store_session(_SESSION_KEY, result.session_id or prior_session),
+        }
 
     trimmed = result.text[-4000:] if len(result.text) > 4000 else result.text
-    return {"execution_result": trimmed}
+    return {
+        "status": "ok",
+        "execution_result": trimmed,
+        **store_session(_SESSION_KEY, ""),
+    }

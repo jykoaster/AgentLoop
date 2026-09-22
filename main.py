@@ -113,6 +113,8 @@ def _empty_state(task: str) -> AgentState:
         "change_name": "",
         "branch_name": "",
         "project_dir": "",
+        "session_node": "",
+        "session_id": "",
         "start_from": "",
     }
 

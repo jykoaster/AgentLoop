@@ -105,6 +105,25 @@ python -m AgentLoop.main --node archive 54-feat-ai-ad-content-extend-to-1024-cha
 
 執行過程中，`analyze_plan` 第一次進行初始規劃時會先在終端機詢問**本次任務要使用的 git 分支名稱（必填）**：已存在則切過去，不存在則從目前 HEAD 新建。OpenSpec change 名稱由此分支轉成 kebab-case（例如 `feature/add-login` → `feature-add-login`），之後規劃、實作、審查、archive 都在這個分支上進行。此值會沿用到同一個任務後續的重新規劃／依人工意見調整，不會重複問。
 
+### 撞到 Claude 用量上限時
+
+任一節點跑到一半撞上用量上限（`You've hit your session limit · resets 3:45pm` 這類訊息，訂閱制另有 weekly 與 Opus 各自的上限）時，工作流程會**暫停**並在終端機等待：
+
+- 等到訊息裡的 `resets` 時間、用量重置後按 **Enter** → 接回中斷前的同一個 Claude session 繼續（只送一段「先確認 tasks.md 實際進度再續作」的指示，不重跑已完成的部分）
+- 輸入 **`q`** 後按 Enter → 中止
+
+**只要別關掉終端機，按 Enter 就好。** 若已經按 `q`、Ctrl-C 或程序已結束，中斷節點的 session id 會被存進目標專案的 `.agentloop/changes/<change>/state.json`，所以重置後重跑**中斷的那個節點**、並選同一個 change，就會 `--resume` 接回原本的 session 續作：
+
+```bash
+python -m AgentLoop.main --node analyze_plan
+python -m AgentLoop.main --node execute
+python -m AgentLoop.main --node review
+```
+
+`analyze_plan`、`execute`、`review` 三個節點都支援。每個 change 同時只會有一個中斷中的 session，節點正常跑完就自動清掉，所以不需要自己記是哪個節點斷的——記錯也不會接錯，節點只認屬於自己的 session。
+
+注意 `analyze_plan` 預設用 Opus 且 grilling 最多問 15 題，很容易先把 5 小時窗口吃掉，導致後面的 `execute` 一開跑就沒額度。
+
 規格文件遵照 [OpenSpec](https://github.com/Fission-AI/OpenSpec) 的 change/spec-delta 規則，寫在**目標專案**（不是 AgentLoop 這個 repo）下的 `openspec/changes/<change 名稱>/`（`proposal.md`/`tasks.md`/`specs/<domain>/spec.md`；非小改動時另有 `design.md`）。目標專案第一次被處理時，若尚未有 `openspec/` 目錄，`analyze_plan` 會自動執行一次 `openspec init` bootstrap，不需要手動介入；`openspec` CLI 已由 Dockerfile 自動安裝在容器內。審查通過後，最後一個節點會呼叫 `openspec archive` 把這次的規格差異併入目標專案持久的 `openspec/specs/`，跨任務累積成完整的行為規格。
 
 ### 語意搜尋目標專案的規格

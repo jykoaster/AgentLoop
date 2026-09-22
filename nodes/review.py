@@ -4,12 +4,18 @@ import subprocess
 import sys
 import time
 import os
-from ..core import AgentState
-from ..lib import call_claude, format_usage_stats, build_skills_block, build_project_doc_hint_for, ensure_on_branch, REPO_ROOT
+from ..core import AgentState, take_session, store_session
+from ..lib import (
+    call_claude, call_resuming, format_usage_stats, build_skills_block,
+    build_project_doc_hint_for, ensure_on_branch, is_usage_limit_error, REPO_ROOT,
+)
 
 # 使用的模型（"haiku" | "sonnet" | "opus" | "fable"，見 claude_runner.MODEL_IDS；
 # None 則沿用 claude CLI 本身的預設模型）
 _MODEL = "sonnet"
+
+# 中斷 session 插槽的 owner 名稱（見 core/session.py）
+_SESSION_KEY = "review"
 
 _SYSTEM = """你是一位資深程式碼審查者，負責「Code Review」階段。
 
@@ -271,7 +277,10 @@ def review_node(state: AgentState) -> dict:
     code_review_skill = build_skills_block(["code-review"])
     if not code_review_skill:
         print(f"{_BANNER}  [Review Agent] 找不到 code-review skill，跳過{_RESET}\n", flush=True)
-        return {"review_result": "SKIPPED", "review_level": "", "review_blocking": False}
+        return {
+            "review_result": "SKIPPED", "review_level": "", "review_blocking": False,
+            **store_session(_SESSION_KEY, ""),
+        }
 
     change_location = f"{project_dir}/openspec/changes/{change_name}"
     project_abs = os.path.join(REPO_ROOT, project_dir)
@@ -286,7 +295,12 @@ def review_node(state: AgentState) -> dict:
             f"Ready to merge? No\nREVIEW_LEVEL: 修補"
         )
         print(f"{_RED}  [Review Agent] Spec 測試追溯失敗，直接返回修補{_RESET}\n", flush=True)
-        return {"review_result": review_result, "review_level": "修補", "review_blocking": True}
+        return {
+            "review_result": review_result, "review_level": "修補", "review_blocking": True,
+            **store_session(_SESSION_KEY, ""),
+        }
+
+    prior_session = take_session(state, _SESSION_KEY)
 
     start = time.monotonic()
 
@@ -303,21 +317,33 @@ def review_node(state: AgentState) -> dict:
             .replace("<<SPEC_TRACE_RESULT>>", spec_trace_result)
         )
         attempt = 0
-        session_id = None
-        while True:
-            attempt += 1
-            result = call_claude(prompt, tools="review", timeout=600, model=_MODEL, resume=session_id)
-            session_id = result.session_id or session_id
-            if result.is_error or _is_well_formed_review(result.text):
-                break
-            print(
-                f"{_YELLOW}  [Review Agent] 回應疑似提前結束（缺少 ## Standards／## Spec），"
-                f"第 {attempt} 次，接續同一 session 要求補完{_RESET}\n",
-                flush=True,
-            )
-            if attempt >= _MAX_REVIEW_ATTEMPTS:
-                break
-            prompt = _REVIEW_CONTINUE_PROMPT
+        last_session = prior_session
+
+        def _run(initial_prompt: str, resume: str | None):
+            """review 自有的「回應提前結束就接續補完」重試迴圈（最多 _MAX_REVIEW_ATTEMPTS 次）。
+            attempt 每次進入都歸零：接回失敗而退回完整 prompt 時，補完次數的額度要重新計算，
+            不能沿用前一次已經用掉的。"""
+            nonlocal attempt, last_session
+            attempt = 0
+            p = initial_prompt
+            session = resume
+            while True:
+                attempt += 1
+                r = call_claude(p, tools="review", timeout=600, model=_MODEL, resume=session)
+                session = r.session_id or session
+                last_session = session or last_session
+                if r.is_error or _is_well_formed_review(r.text):
+                    return r
+                print(
+                    f"{_YELLOW}  [Review Agent] 回應疑似提前結束（缺少 ## Standards／## Spec），"
+                    f"第 {attempt} 次，接續同一 session 要求補完{_RESET}\n",
+                    flush=True,
+                )
+                if attempt >= _MAX_REVIEW_ATTEMPTS:
+                    return r
+                p = _REVIEW_CONTINUE_PROMPT
+
+        result = call_resuming(_run, prompt, prior_session, "Review Agent")
     except Exception as e:
         print(f"{_RED}  [Review Agent] 發生例外：{e}{_RESET}\n", flush=True)
         return {"status": "error", "review_result": f"Review 發生例外：{e}", "review_level": ""}
@@ -330,7 +356,16 @@ def review_node(state: AgentState) -> dict:
 
     if result.is_error:
         print(f"{_RED}  [Review Agent] Claude 執行失敗：{result.text}{_RESET}\n", flush=True)
-        return {"status": "error", "review_result": result.text, "review_level": ""}
+        if is_usage_limit_error(result.text):
+            print(
+                f"{_YELLOW}  [Review Agent] 用量重置後重跑 `--node review` 並選同一個 change，"
+                f"即會接回這次的 session 續作{_RESET}\n",
+                flush=True,
+            )
+        return {
+            "status": "error", "review_result": result.text, "review_level": "",
+            **store_session(_SESSION_KEY, result.session_id or last_session),
+        }
 
     if not _is_well_formed_review(result.text):
         print(
@@ -344,6 +379,7 @@ def review_node(state: AgentState) -> dict:
                 f"疑似把 sub-agent 或測試丟給背景執行就中止回應）：\n\n{result.text}"
             ),
             "review_level": "",
+            **store_session(_SESSION_KEY, result.session_id or last_session),
         }
 
     review_text = result.text
@@ -353,12 +389,18 @@ def review_node(state: AgentState) -> dict:
         # 嚴重影響功能的問題：維持原本嚴格行為，不詢問人工，直接產出報告並重新規劃
         review_level = extract_review_level(review_text)
         print(f"{_BANNER}  [Review Agent] 發現嚴重影響功能的問題，審查等級：{review_level}{_RESET}\n", flush=True)
-        return {"review_result": review_text, "review_level": review_level, "review_blocking": True}
+        return {
+            "review_result": review_text, "review_level": review_level, "review_blocking": True,
+            **store_session(_SESSION_KEY, ""),
+        }
 
     suggestions = extract_suggestions(review_text)
     if not suggestions:
         print(f"{_BANNER}  [Review Agent] 通過，無嚴重問題亦無其他建議，直接前往 Check{_RESET}\n", flush=True)
-        return {"review_result": review_text, "review_level": "", "review_blocking": False}
+        return {
+            "review_result": review_text, "review_level": "", "review_blocking": False,
+            **store_session(_SESSION_KEY, ""),
+        }
 
     print(f"\n{_BANNER}{'─'*50}", flush=True)
     print("  [Review Agent] 無嚴重影響功能的問題，但有以下修改建議：", flush=True)
@@ -382,7 +424,10 @@ def review_node(state: AgentState) -> dict:
 
     if not selected:
         print(f"{_BANNER}  [Review Agent] 維持現狀，直接前往 Check{_RESET}\n", flush=True)
-        return {"review_result": review_text, "review_level": "", "review_blocking": False}
+        return {
+            "review_result": review_text, "review_level": "", "review_blocking": False,
+            **store_session(_SESSION_KEY, ""),
+        }
 
     selected_block = "\n".join(f"SUGGESTION {i}: {suggestions[i - 1]}" for i in selected)
     review_result = (
@@ -391,4 +436,7 @@ def review_node(state: AgentState) -> dict:
         f"{selected_block}"
     )
     print(f"{_BANNER}  [Review Agent] 已選定 {len(selected)} 項建議進行修補，重新規劃{_RESET}\n", flush=True)
-    return {"review_result": review_result, "review_level": "修補", "review_blocking": True}
+    return {
+        "review_result": review_result, "review_level": "修補", "review_blocking": True,
+        **store_session(_SESSION_KEY, ""),
+    }
