@@ -1,4 +1,6 @@
+import glob
 import re
+import subprocess
 import sys
 import time
 import os
@@ -39,18 +41,22 @@ fixed point 與 spec 來源見下方「依 code-review skill 執行時的具體�
 
 <<PROJECT_CONTEXT>>
 
+## Spec 測試追溯（事前自動檢查結果）
+
+以下結果已由 Python 在呼叫你之前自動完成，你**不需要**再自行執行 grep，直接引用此結果即可：
+
+<<SPEC_TRACE_RESULT>>
+
 ## 額外操作指示
 
 1. 確認 TASK 清單完整性：Read `<<CHANGE_LOCATION>>/tasks.md`，依其 checkbox 狀態
    （`- [x]` 已完成／`- [ ]` 未完成）逐項核對，列出未完成的 TASK 編號
 2. 依目標專案的 CLAUDE.md / AGENT.md 中列出的測試指令並實際用 Bash 執行測試
    （若說明檔未列出，探索 package.json / pyproject.toml 等設定檔判斷）；測試失敗計入 Standards 軸的問題
-3. **Spec ↔ 測試追溯檢查**：Read `<<CHANGE_LOCATION>>/specs/**/*.md`，列出所有
-   `#### Scenario:` 標題；對每個 Scenario 標題，用 Grep 搜尋目標專案原始碼中是否存在
-   名稱完全相同的 `describe(...)` 或 `test(...)`（或其語言對應語法，例如 `it(...)`、
-   `@Test`、`def test_...`）。**任何 Scenario 缺少對應測試，計入 Spec 軸的阻塞性問題，
-   結論必須為 Ready to merge? No。**
-   同時檢查本次修改新增或改動的測試是否與現有測試重複或情境可合併：
+3. **Spec ↔ 測試追溯（引用上方事前自動檢查結果）**：直接使用上方「Spec 測試追溯（事前自動檢查結果）」
+   區塊的資訊，將其納入 `## Spec` 軸報告。若上方結果顯示有 ❌ 項目（Scenario 缺少對應測試），
+   **必須**計入 Spec 軸的阻塞性問題，結論為 Ready to merge? No，此規則優先於所有其他判斷。
+   同時用你的判斷檢查本次修改新增或改動的測試是否與現有測試重複或情境可合併：
    - 若有重複或可覆蓋的情境，計入 Spec 軸建議事項，以 SUGGESTION 格式列出應合併或移除的測試
    - 若重複情境已導致某 Scenario 有超過一個幾乎相同的測試（覆蓋範圍高度重疊），視為冗餘，
      同樣以 SUGGESTION 列出；但**不得建議刪除到讓任何 Scenario 完全沒有對應測試**
@@ -72,10 +78,14 @@ fixed point 與 spec 來源見下方「依 code-review skill 執行時的具體�
 先依 code-review skill 輸出 `## Standards` 與 `## Spec` 兩軸報告，接著再附上以下總結（供工作流程解析，必須包含）：
    - 各 TASK 完成狀態（✅ 已完成 / ❌ 未完成）
    - 一行「Ready to merge? Yes」或「Ready to merge? No」結論
-     - **No** 僅限「嚴重影響功能」的問題：核心邏輯錯誤、功能無法正常運作、資料損毀或資安風險、
-       架構根本偏差、多個互相關聯的根本性問題、TASK 大量未完成
-     - 其餘問題（風格、可讀性、效能微調、小幅優化、非阻塞的小瑕疵等**不影響功能正確性**者）
-       即使有修改建議，仍回答 **Yes**，改用下方 SUGGESTION 標記逐條列出，交由人工決定要修哪幾條
+     - **No** 包含以下任一情況（任一成立即輸出 No）：
+       1. 「嚴重影響功能」的問題：核心邏輯錯誤、功能無法正常運作、資料損毀或資安風險、
+          架構根本偏差、多個互相關聯的根本性問題、TASK 大量未完成
+       2. **Spec 測試追溯發現任何 Scenario 缺少對應測試**（見上方「Spec 測試追溯（事前自動檢查結果）」；
+          此條件**優先於**「不影響功能正確性」的判斷，一律觸發 No，不得例外）
+     - 其餘問題（風格、可讀性、效能微調、小幅優化、非阻塞的小瑕疵等**不影響功能正確性**者），
+       且所有 Scenario 均有對應測試時，即使有修改建議，仍回答 **Yes**，
+       改用下方 SUGGESTION 標記逐條列出，交由人工決定要修哪幾條
    - 若結論為 No，下一行必須輸出審查等級：
      REVIEW_LEVEL: 重寫
      （條件：核心邏輯錯誤、架構根本偏差、多個互相關聯的根本性問題、TASK 大量未完成）
@@ -91,6 +101,72 @@ fixed point 與 spec 來源見下方「依 code-review skill 執行時的具體�
 
 請用繁體中文回答。
 """
+
+def _run_spec_trace_check(change_dir: str, project_abs: str) -> tuple[str, list[str]]:
+    """
+    事前自動化：抽出所有 Scenario 名稱並 grep 目標專案測試檔案。
+    回傳 (格式化報告文字, 缺少對應測試的 Scenario 名稱清單)。
+    清單非空代表有違反，呼叫端可直接短路返回。
+    """
+    spec_files = glob.glob(os.path.join(change_dir, "specs", "**", "*.md"), recursive=True)
+    if not spec_files:
+        return "（未在 specs/ 目錄下找到任何 .md 檔案，跳過此項檢查）", []
+
+    scenario_re = re.compile(r"^####\s+Scenario:\s*(.+)", re.MULTILINE)
+    scenarios: list[str] = []
+    for sf in sorted(spec_files):
+        try:
+            content = open(sf, encoding="utf-8").read()
+            for m in scenario_re.finditer(content):
+                name = m.group(1).strip()
+                if name not in scenarios:
+                    scenarios.append(name)
+        except Exception:
+            pass
+
+    if not scenarios:
+        return "（specs/ 下的檔案中未找到任何 `#### Scenario:` 標題，跳過此項檢查）", []
+
+    extensions = [
+        "--include=*.ts", "--include=*.tsx",
+        "--include=*.js", "--include=*.jsx",
+        "--include=*.py", "--include=*.java", "--include=*.kt",
+        "--include=*.rb", "--include=*.go",
+    ]
+    exclude_dirs = [
+        "--exclude-dir=node_modules", "--exclude-dir=.git",
+        "--exclude-dir=dist", "--exclude-dir=build", "--exclude-dir=.next",
+    ]
+
+    results: list[tuple[str, bool]] = []
+    for name in scenarios:
+        try:
+            r = subprocess.run(
+                ["grep", "-r", "-l", *extensions, *exclude_dirs, name, project_abs],
+                capture_output=True, text=True, timeout=15,
+            )
+            found = r.returncode == 0 and bool(r.stdout.strip())
+        except Exception:
+            found = False
+        results.append((name, found))
+
+    missing = [n for n, f in results if not f]
+    lines: list[str] = []
+    for name, found in results:
+        mark = "✅" if found else "❌"
+        suffix = "" if found else "（缺少對應測試）"
+        lines.append(f"- {mark} `{name}`{suffix}")
+
+    if missing:
+        lines += [
+            "",
+            f"⚠️ 共 {len(missing)} 個 Scenario 缺少對應測試。",
+        ]
+    else:
+        lines.append("\n✅ 所有 Scenario 均有對應測試。")
+
+    return "\n".join(lines), missing
+
 
 _BANNER = "\033[1;33m"
 _YELLOW = "\033[1;33m"
@@ -198,6 +274,19 @@ def review_node(state: AgentState) -> dict:
         return {"review_result": "SKIPPED", "review_level": "", "review_blocking": False}
 
     change_location = f"{project_dir}/openspec/changes/{change_name}"
+    project_abs = os.path.join(REPO_ROOT, project_dir)
+    spec_trace_result, missing_scenarios = _run_spec_trace_check(change_dir, project_abs)
+    print(f"{_YELLOW}  [Review Agent] Spec 測試追溯（事前）：\n{spec_trace_result}{_RESET}\n", flush=True)
+
+    if missing_scenarios:
+        missing_list = "\n".join(f"  - {n}" for n in missing_scenarios)
+        review_result = (
+            f"## Spec\n\n**Spec ↔ 測試追溯失敗（事前自動檢查）**\n\n"
+            f"以下 Scenario 缺少對應測試，計入 Spec 軸阻塞性問題：\n\n{missing_list}\n\n"
+            f"Ready to merge? No\nREVIEW_LEVEL: 修補"
+        )
+        print(f"{_RED}  [Review Agent] Spec 測試追溯失敗，直接返回修補{_RESET}\n", flush=True)
+        return {"review_result": review_result, "review_level": "修補", "review_blocking": True}
 
     start = time.monotonic()
 
@@ -211,6 +300,7 @@ def review_node(state: AgentState) -> dict:
             .replace("<<CHANGE_NAME_VALUE>>", change_name)
             .replace("<<BRANCH_NAME_VALUE>>", branch_name)
             .replace("<<PROJECT_CONTEXT>>", build_project_doc_hint_for(project_dir))
+            .replace("<<SPEC_TRACE_RESULT>>", spec_trace_result)
         )
         attempt = 0
         session_id = None
