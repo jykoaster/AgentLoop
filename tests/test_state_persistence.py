@@ -1,9 +1,10 @@
 """
-純邏輯單元測試：state 存讀、_route_after_review、_list_and_select_change、
+純邏輯單元測試：CLI 參數、state 存讀、_route_after_review、_list_and_select_change、
 domain 選擇相關函式。不依賴 Claude CLI，可在容器內直接 pytest 執行。
 """
 import json
 import os
+import sys
 import pytest
 from pathlib import Path
 from unittest.mock import patch
@@ -152,18 +153,18 @@ class TestListAndSelectChange:
         payload = state_data or {"task": "x", "change_name": change_name}
         (d / "state.json").write_text(json.dumps(payload))
 
-    def _call(self, node_name, workspace, target_project, user_input="1"):
+    def _call(self, workspace, target_project, user_input="1"):
         from AgentLoop.main import _list_and_select_change
         with patch("AgentLoop.main.REPO_ROOT", str(workspace)), \
              patch.dict(os.environ, {"TARGET_PROJECT": target_project}), \
              patch("builtins.input", return_value=user_input):
-            return _list_and_select_change(node_name)
+            return _list_and_select_change()
 
     def test_lists_changes_and_injects_project_dir(self, tmp_project):
         workspace, _ = tmp_project
         self._make_change(workspace, "my-project", "feat-login")
 
-        result = self._call("execute", workspace, "my-project")
+        result = self._call(workspace, "my-project")
 
         assert result["change_name"] == "feat-login"
         assert result["project_dir"] == "my-project"
@@ -173,26 +174,16 @@ class TestListAndSelectChange:
         self._make_change(workspace, "my-project", "aaa-change")
         self._make_change(workspace, "my-project", "zzz-change")
 
-        result = self._call("execute", workspace, "my-project", user_input="2")
+        result = self._call(workspace, "my-project", user_input="2")
         assert result["change_name"] == "zzz-change"
 
-    def test_analyze_plan_returns_empty_when_no_changes(self, tmp_project):
-        workspace, _ = tmp_project
-
-        result = self._call("analyze_plan", workspace, "my-project")
-        assert result == {}
-
-    def test_execute_exits_when_no_changes(self, tmp_project):
+    def test_exits_when_no_changes(self, tmp_project):
+        """--node 不收任務描述，沒有既有 state 就無事可做——包含 analyze_plan：
+        原本「找不到 change 就全新開始」的路徑已移除，全新任務走完整工作流。"""
         workspace, _ = tmp_project
 
         with pytest.raises(SystemExit):
-            self._call("execute", workspace, "my-project")
-
-    def test_review_exits_when_no_changes(self, tmp_project):
-        workspace, _ = tmp_project
-
-        with pytest.raises(SystemExit):
-            self._call("review", workspace, "my-project")
+            self._call(workspace, "my-project")
 
     def test_exits_when_target_project_not_set(self, tmp_project):
         workspace, _ = tmp_project
@@ -201,7 +192,7 @@ class TestListAndSelectChange:
              patch.dict(os.environ, {}, clear=True):
             from AgentLoop.main import _list_and_select_change
             with pytest.raises(SystemExit):
-                _list_and_select_change("execute")
+                _list_and_select_change()
 
     def test_skips_dirs_without_state_json(self, tmp_project):
         workspace, _ = tmp_project
@@ -209,8 +200,39 @@ class TestListAndSelectChange:
         empty_dir.mkdir(parents=True)
         self._make_change(workspace, "my-project", "has-state")
 
-        result = self._call("execute", workspace, "my-project")
+        result = self._call(workspace, "my-project")
         assert result["change_name"] == "has-state"
+
+
+# ── CLI 參數 ──────────────────────────────────────────────────────────────────
+
+class TestCliArgs:
+    def _main(self, argv):
+        from AgentLoop.main import main
+        with patch.object(sys, "argv", ["AgentLoop.main", *argv]):
+            main()
+
+    def test_node_rejects_task_description(self):
+        """--node 的任務描述會無條件覆蓋 state 裡的原值並被寫回 state.json，
+        所以直接拒絕而不是默默忽略——曾有 change 的 task 因此被佔位字串蓋掉。"""
+        with pytest.raises(SystemExit) as exc:
+            self._main(["--node", "execute", "任務描述"])
+        assert exc.value.code == 2
+
+    def test_node_without_task_runs(self):
+        with patch("AgentLoop.main.run_node") as mock_run_node:
+            self._main(["--node", "execute"])
+        mock_run_node.assert_called_once_with("execute")
+
+    def test_full_workflow_requires_task_description(self):
+        with pytest.raises(SystemExit) as exc:
+            self._main([])
+        assert exc.value.code == 2
+
+    def test_full_workflow_runs_with_task_description(self):
+        with patch("AgentLoop.main.run") as mock_run:
+            self._main(["加一個端點"])
+        mock_run.assert_called_once_with("加一個端點")
 
 
 # ── _list_existing_domains ────────────────────────────────────────────────────

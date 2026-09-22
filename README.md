@@ -93,13 +93,15 @@ docker exec -it agent_loop claude login
 python -m AgentLoop.main "幫我在後端新增一個 GET /tables/featured 端點"
 
 # 只單獨執行某一個 node，方便除錯（human_confirm 不支援單獨執行）
-python -m AgentLoop.main --node analyze_plan "任務描述"
-python -m AgentLoop.main --node execute --state-file /tmp/state.json "任務描述"
-python -m AgentLoop.main --node review "任務描述"
-
-# archive：參數即 OpenSpec change 名稱，會掃描工作區 */openspec/changes/<name>/ 定位後封存
-python -m AgentLoop.main --node archive 54-feat-ai-ad-content-extend-to-1024-chars
+# 會列出目標專案 .agentloop/changes/ 底下已有的 change 供選擇，跑完繼續後面的流程
+# 不帶任務描述：任務描述與其餘欄位一律沿用選定 change 的 state.json
+python -m AgentLoop.main --node analyze_plan
+python -m AgentLoop.main --node execute
+python -m AgentLoop.main --node review
+python -m AgentLoop.main --node archive
 ```
+
+`--node` 模式刻意不接受任務描述（傳了會直接報錯）：state 裡已經有當初的任務，再傳一份只會覆蓋掉原值並寫回 `state.json`。也因此 `--node` 一定要選到一個既有的 change，找不到任何 `state.json` 時會中止——全新任務請用上面完整工作流的形式。
 
 完整工作流跑到 `human_confirm` 時會暫停，在終端機顯示規劃摘要與 TASK 清單，輸入 `y` 才會繼續往下執行。
 

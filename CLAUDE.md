@@ -35,12 +35,13 @@ Inside the container, working directory is `${HOST_WORKSPACE_ROOT}` (the parent 
 python -m AgentLoop.main "task description"
 
 # run from a specific node; lists available changes in TARGET_PROJECT/.agentloop/changes/ for selection,
-# then continues the rest of the workflow (human_confirm cannot be run standalone)
-# execute/review require an existing state written by analyze_plan; analyze_plan allows a fresh start
-python -m AgentLoop.main --node analyze_plan "task description"
-python -m AgentLoop.main --node execute "task description"
-python -m AgentLoop.main --node review "task description"
-python -m AgentLoop.main --node archive <change_name>
+# then continues the rest of the workflow (human_confirm cannot be run standalone).
+# Takes NO task description — it comes from the selected change's state.json, and passing one is an
+# error because it would overwrite the real task. So --node always needs an existing change state.
+python -m AgentLoop.main --node analyze_plan
+python -m AgentLoop.main --node execute
+python -m AgentLoop.main --node review
+python -m AgentLoop.main --node archive
 
 # semantic search over TARGET_PROJECT's openspec (see search.py)
 python -m AgentLoop.search "query"

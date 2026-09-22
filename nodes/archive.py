@@ -86,12 +86,13 @@ def archive_node(state: AgentState) -> dict:
     不讓整個工作流程失敗——程式碼已經審查通過，archive 只是收尾動作，略過或失敗頂多之後
     手動補跑。
 
-    單獨執行時沒有 change_name 的話，用 task 當 change 名稱；沒有 project_dir 的話，
-    直接採用環境變數 TARGET_PROJECT 定位目標專案。
+    change_name 一律取自 state：完整工作流由 analyze_plan 寫入，`--node archive` 則來自
+    使用者選定的 change 的 state.json。沒有 project_dir 的話，直接採用環境變數
+    TARGET_PROJECT 定位目標專案。
     """
     print(f"\n{_BANNER}{'═'*50}\n  [Archive] 開始\n{'═'*50}{_RESET}\n", flush=True)
 
-    change_name = (state.get("change_name") or "").strip() or (state.get("task") or "").strip()
+    change_name = (state.get("change_name") or "").strip()
     project_dir = (state.get("project_dir") or "").strip()
     branch_name = (state.get("branch_name") or "").strip()
 

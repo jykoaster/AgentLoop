@@ -2,17 +2,15 @@
 CLI 入口點：執行 LangGraph 四 Agent 工作流，或單獨呼叫任一 node。
 
 用法：
-  # 完整工作流
+  # 完整工作流（任務描述必填）
   python -m AgentLoop.main "幫我在後端新增一個 GET /tables/featured 端點，同時在前端首頁顯示精選桌遊"
 
-  # 單獨呼叫 node（列出目標專案的 changes 供選擇，跑完後繼續後面的流程）
-  # execute / review 需先有 analyze_plan 產出的 state；analyze_plan 無 state 時允許全新開始
-  python -m AgentLoop.main --node review "任務描述"
-  python -m AgentLoop.main --node execute "任務描述"
-  python -m AgentLoop.main --node analyze_plan "任務描述"
-
-  # archive：參數即 OpenSpec change 名稱，掃描工作區定位後封存
-  python -m AgentLoop.main --node archive 54-feat-ai-ad-content-extend-to-1024-chars
+  # 單獨呼叫 node：不帶任務描述。列出目標專案已有 state.json 的 changes 供選擇，
+  # 任務描述與其餘欄位一律沿用該 change 的 state，跑完後繼續後面的流程。
+  python -m AgentLoop.main --node analyze_plan
+  python -m AgentLoop.main --node execute
+  python -m AgentLoop.main --node review
+  python -m AgentLoop.main --node archive
 """
 import sys
 import os
@@ -53,9 +51,12 @@ def _save_state(state: dict) -> None:
         print(f"\033[1;31m  [state] 儲存失敗：{e}\033[0m", flush=True)
 
 
-def _list_and_select_change(node_name: str) -> dict:
+def _list_and_select_change() -> dict:
     """列出目標專案內已有 state.json 的 changes，讓使用者選擇後回傳載入的 state。
-    若找不到任何 change 且是 analyze_plan，回傳空 dict（讓呼叫端自行決定是否允許新建）。"""
+
+    找不到任何 change 就中止：`--node` 不收任務描述，任務只能來自既有 state，
+    所以沒有 state 可載入時無事可做——全新任務請用完整工作流的形式。
+    """
     target = os.environ.get("TARGET_PROJECT", "").strip()
     if not target:
         print("\033[1;31m  錯誤：TARGET_PROJECT 環境變數未設定\033[0m")
@@ -70,9 +71,10 @@ def _list_and_select_change(node_name: str) -> dict:
         )
 
     if not changes:
-        if node_name == "analyze_plan":
-            return {}  # 允許全新開始
-        print(f"\033[1;31m  找不到任何已存在的 change state（{changes_root}）\033[0m")
+        print(
+            f"\033[1;31m  找不到任何已存在的 change state（{changes_root}）\033[0m\n"
+            f"  全新任務請用完整工作流：python -m AgentLoop.main \"<任務描述>\""
+        )
         sys.exit(1)
 
     print(f"\n{_BOLD}  可用的 changes：{_RESET}")
@@ -179,7 +181,7 @@ def _route_after_review(state: dict) -> str | None:
     return "increment"
 
 
-def run_node(node_name: str, task: str) -> None:
+def run_node(node_name: str) -> None:
     from .nodes import analyze_plan_node, execute_node, review_node, archive_node
 
     node_fn = {
@@ -189,18 +191,14 @@ def run_node(node_name: str, task: str) -> None:
         "archive": archive_node,
     }[node_name]
 
-    # 從 .agentloop/changes/ 列出 changes 供選擇；analyze_plan 無 state 時允許全新開始
-    loaded = _list_and_select_change(node_name)
-    if loaded:
-        state = _empty_state(task)
-        state.update(loaded)
-        state["task"] = task
-    else:
-        state = _empty_state(task)  # analyze_plan 全新開始
+    # 任務描述與其餘欄位全部來自選定 change 的 state；_empty_state 只負責補上
+    # 舊版 state.json 可能缺少的欄位預設值（例如後來才加的 session 插槽）。
+    state = _empty_state("")
+    state.update(_list_and_select_change())
 
     print(f"\n{_BOLD}{'═'*60}")
     print(f"  單獨執行 node：{node_name}")
-    print(f"  任務：{task}")
+    print(f"  任務：{state['task']}")
     print(f"{'═'*60}{_RESET}\n")
 
     result = node_fn(state)
@@ -251,7 +249,11 @@ def main() -> None:
         prog="python -m AgentLoop.main",
         description="執行 LangGraph 工作流或單獨呼叫 node",
     )
-    parser.add_argument("task", help="任務描述")
+    parser.add_argument(
+        "task",
+        nargs="?",
+        help="任務描述（完整工作流必填；--node 模式不接受，任務描述取自選定 change 的 state）",
+    )
     parser.add_argument(
         "--node",
         choices=_NODES,
@@ -261,8 +263,15 @@ def main() -> None:
     args = parser.parse_args()
 
     if args.node:
-        run_node(args.node, args.task)
+        if args.task:
+            parser.error(
+                "--node 模式不接受任務描述：任務描述取自選定 change 的 state.json。"
+                "傳入佔位字串會覆蓋掉原本的任務並寫回 state"
+            )
+        run_node(args.node)
     else:
+        if not args.task:
+            parser.error("缺少任務描述")
         run(args.task)
 
 

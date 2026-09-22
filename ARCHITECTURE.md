@@ -481,7 +481,7 @@ SUGGESTION 2: [建議內容與理由]
 
 **執行內容：** 透過 `openspec_runner.archive_change(project_dir_abs, change_name)`（`openspec_runner.py`，跟 `claude_runner.py` 是「唯一跟 claude CLI 對話的地方」同樣的角色，這裡是唯一跟 `openspec` CLI 對話的地方）執行 `openspec archive <change_name> --yes --json`，把 change 的 spec delta 合併進 `openspec/specs/`、change 資料夾搬到 `openspec/changes/archive/YYYY-MM-DD-<name>/`。
 
-**單獨執行：** `python -m AgentLoop.main --node archive <change_name>`。`change_name` 取 `AgentState["change_name"]`，沒有則用 CLI 的 `task` 參數。`project_dir` 已在 state 裡就直接用；否則直接採用環境變數 `TARGET_PROJECT`（workspace 只支援單一目標專案），再依 `change_name` 的原值／kebab-case 兩種形式比對哪個資料夾實際存在。`branch_name` 仍可選，有填才 checkout。
+**單獨執行：** `python -m AgentLoop.main --node archive`（不帶參數，從列出的 changes 選一個）。`change_name` 一律取 `AgentState["change_name"]`。`project_dir` 已在 state 裡就直接用；否則直接採用環境變數 `TARGET_PROJECT`（workspace 只支援單一目標專案），再依 `change_name` 的原值／kebab-case 兩種形式比對哪個資料夾實際存在。`branch_name` 仍可選，有填才 checkout。
 
 **失敗處理：** 容錯解析 stdout 的 JSON 診斷（OpenSpec agent-contract 的 `status: StoreDiagnostic[]` 慣例），失敗（`openspec` 指令不存在、validate 沒過、change 不存在等）只印警告訊息並附上手動補跑指令，**不**讓整個 workflow 失敗——程式碼已經審查通過，archive 只是收尾，失敗頂多之後手動執行 `openspec archive <name> --yes`。
 
@@ -727,15 +727,18 @@ python -m AgentLoop.main "幫我在後端新增一個 GET /tables/featured 端�
 
 ```bash
 # 列出目標專案的 changes 供選擇，跑完後繼續後面的完整流程
-python -m AgentLoop.main --node analyze_plan "任務描述"
-python -m AgentLoop.main --node execute "任務描述"   # 需先有 analyze_plan 產出的 state
-python -m AgentLoop.main --node review "任務描述"    # 需先有 analyze_plan 產出的 state
+# 都不帶任務描述——任務描述取自選定 change 的 state
+python -m AgentLoop.main --node analyze_plan
+python -m AgentLoop.main --node execute
+python -m AgentLoop.main --node review
 
 # archive 是終點，跑完即止
-python -m AgentLoop.main --node archive 54-feat-ai-ad-content-extend-to-1024-chars
+python -m AgentLoop.main --node archive
 ```
 
-`--node X` 的語意是「從 X 開始跑剩下的完整工作流程」：指定 node 跑完並存 state 後，透過 `_stream_and_save()` 以 `config={"configurable": {"start_from": <next_node>}}` 繼續執行剩餘 node（`workflow.py` 的 `_route_start` 讀取此 config 決定 entry point）。`review` 的 next_node 由 `_route_after_review()` 決定（通過 → `archive_change`；可重試 → `increment`；error/超限 → 直接結束），`analyze_plan` → `human_confirm`，`execute` → `review`。State 一律從 `<project_dir>/.agentloop/changes/<change_name>/state.json` 載入（列出已有 state.json 的 changes 供選擇），`project_dir` 由 `TARGET_PROJECT` 環境變數補回；`execute`、`review` 若找不到任何 change 則拒絕執行，`analyze_plan` 找不到時允許全新開始。`human_confirm` 不在 `--node` 可選清單中，只能作為完整工作流程的一部分執行。`--state-file` 已移除，state 只能來自 `.agentloop/`。
+`--node X` 的語意是「從 X 開始跑剩下的完整工作流程」：指定 node 跑完並存 state 後，透過 `_stream_and_save()` 以 `config={"configurable": {"start_from": <next_node>}}` 繼續執行剩餘 node（`workflow.py` 的 `_route_start` 讀取此 config 決定 entry point）。`review` 的 next_node 由 `_route_after_review()` 決定（通過 → `archive_change`；可重試 → `increment`；error/超限 → 直接結束），`analyze_plan` → `human_confirm`，`execute` → `review`。State 一律從 `<project_dir>/.agentloop/changes/<change_name>/state.json` 載入（列出已有 state.json 的 changes 供選擇），`project_dir` 由 `TARGET_PROJECT` 環境變數補回。`human_confirm` 不在 `--node` 可選清單中，只能作為完整工作流程的一部分執行。`--state-file` 已移除，state 只能來自 `.agentloop/`。
+
+**`--node` 模式不接受任務描述**（傳了 `parser.error` 直接拒絕）：`task` 已經在選定 change 的 state 裡，CLI 再傳一份只會無條件覆蓋原值並被 `_save_state()` 寫回，實際造成過 state.json 裡的 `task` 被佔位字串或後續的單句指示取代。四個節點因此都**必須**選到一個既有的 change——原本 `analyze_plan` 找不到 change 時允許全新開始的路徑已移除，因為那時根本沒有任務描述可用；全新任務走完整工作流程模式。`archive` 原本「以 CLI 參數當 change 名稱、不需要 state」的用法也一併取消（`_list_and_select_change()` 對所有節點一視同仁，該參數早已無法傳達到 `archive_node`）。
 
 ---
 
