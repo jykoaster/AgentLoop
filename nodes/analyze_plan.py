@@ -16,6 +16,7 @@ _SKILLS = [
     "grilling",
     "domain-modeling",
     "tdd",
+    "openspec-authoring",
 ]
 
 # 重新規劃（review 觸發）：只針對 review 結果 grill，不重跑 domain-modeling 文件同步，
@@ -23,6 +24,7 @@ _SKILLS = [
 _SKILLS_REPLAN = [
     "grilling",
     "tdd",
+    "openspec-authoring",
 ]
 
 # 使用的模型（"haiku" | "sonnet" | "opus" | "fable"，見 claude_runner.MODEL_IDS）
@@ -38,37 +40,6 @@ QUESTION: <你的問題>
 
 - 使用者可能回覆選項編號（例如「1」）或自訂文字，兩者都視為有效答案並據以判斷後續動作
 - 輸出後立即結束本輪回應，等待使用者回覆後再繼續"""
-
-_SPECINE_ALIGNMENT = """## Specine 規格對齊（grill 結果與規格正文）
-
-規格必須讓後續實作 LLM 對齊使用者目的，而不是只複述任務原句。內容涵蓋 Specine 的十項對齊要素；其中下列三項為**強制、規格裡一定要有具體內容**（即使任務只有一句話，也必須寫出可執行的細節），其餘七項依任務適用才納入、不適用不必硬湊。
-
-### 強制三項（缺一不可）
-
-1. **規範目的（Specification Purpose）**：強調本改動的詳細目標或核心任務，讓實作始終專注預期目標、降低偏離所需功能。
-   - 寫在 `proposal.md` 的 `## Intent`。新建 domain 時，`specs/<domain>/spec.md` 的 `## Purpose` 與 Intent 對齊、不要另寫一套目標。
-2. **輸出要求（Output Requirements）**：強調可觀察輸出的資料類型、格式與約束（例如必顯欄位、精確度、分隔符號、排序規則、狀態列舉）。
-   - 寫進對應 Requirement 的 SHALL/MUST，以及每個主路徑 Scenario 的 THEN。
-3. **範例及解釋（Examples with Explanations）**：提供測試案例的逐步分析，詳細闡述從輸入到輸出的邏輯，讓實作 LLM 看懂程式設計邏輯。
-   - 寫進 Scenario：不得只重述 Requirement。至少一個主路徑 Scenario 要逐步寫清「誰做了什麼 → 系統如何處理 → 使用者看到什麼」。
-   - 若有 `design.md`，測試案例矩陣須與這些逐步範例對齊。
-
-任務只有「幫我實作一個購物車功能」時，規格仍必須具體寫出例如：
-- 範例及解釋：購物車透過點擊商品頁「加入購物車」加入；畫面顯示目前已加入的商品；重新登入後仍看得到購物車。
-- 規範目的：讓使用者一目瞭然看到所有商品價格、數量，並前往結帳頁面。
-- 輸出要求：必須顯示物品名稱、數量、結帳按鈕。
-
-### 其餘七項（適用才寫，不適用可省略）
-
-4. **規範背景（Specification Background）**：問題脈絡、動機、領域知識 → 補在 Intent（目的之後）或 Approach
-5. **關鍵概念（Key Concepts）**：關鍵詞彙定義 → 依 domain-modeling 記錄；Scenario 用詞必須與之一致
-6. **輸入要求（Input Requirements）**：輸入的型別、格式、範圍、前置條件 → Scenario 的 GIVEN/WHEN
-7. **邊界／極端案例（Edge/Corner Cases）**：異常或邊界 → 額外 Scenario，不可只靠主路徑
-8. **APIs**：相關外部 API／函式庫名稱與用途 → Approach 或 `design.md` 的 Technical Approach
-9. **錯誤處理（Error Handling Requirements）**：無效輸入時的預期行為（預設值、例外、特殊機制）→ 獨立 Requirement 或錯誤 Scenario
-10. **提示或建議（Hints or Tips）**：建議演算法、資料結構、既有模組 → Approach / `design.md`；不可用來取代強制三項
-
-純重構／文件／設定且 `skip_specs: true` 時：Intent 仍須寫規範目的；輸出要求與範例及解釋可註明「無外部可觀察行為變化」。"""
 
 _QUESTION_PROTOCOL = f"""## 提問規則（grilling 互動式釐清）
 
@@ -88,146 +59,6 @@ _REVIEW_QUESTION_PROTOCOL = f"""## 提問規則（針對 review 結果 grill）
 
 {_QUESTION_FORMAT}
 - 當 review 標記的每個問題點都已確認完畢，才可以繼續進行後續流程與最終輸出（此後不得再輸出 QUESTION）"""
-
-_OPENSPEC_ARTIFACT_RULES = f"""## OpenSpec 產出規則（規格文件的實際格式）
-
-規格文件不寫成單一 Markdown 檔案，而是遵照 OpenSpec 的 change 資料夾格式，寫在目標專案的
-`openspec/changes/<change-name>/` 底下。章節結構維持 OpenSpec，**不要另開「Specine」專章**；
-把對齊要素寫進既有欄位（對照見下方「Specine 規格對齊」）。
-
-{_SPECINE_ALIGNMENT}
-
-自檢：強制三項是否已落在對應欄位且非任務原句複述；其餘七項適用者是否已納入，缺一項就補寫。
-
-### proposal.md
-`## Intent`（規範目的，適用時補規範背景）/ `## Scope`（In scope / Out of scope）/
-`## Approach`（適用時寫相關 APIs、建議演算法／資料結構／既有模組）
-
-### design.md（小改動可略過，採 OpenSpec 預設）
-符合以下情況可整份略過、不要建立空的 design.md：改動範圍小、沒有新的架構決策、沒有新的測試 seam 需要說明、也沒有要記錄的技術債。有架構取捨、新模組／接縫、或需要留下技術債時才寫。一旦撰寫，`## Technical Approach` / `## Architecture Decisions` / `## Testing Strategy`（含「Seam（測試接縫）」「測試案例矩陣（Test Matrix）」固定小節，矩陣須涵蓋主路徑逐步範例）/ `## Technical Debt & Follow-up Notes` 四個小節都要保留標題，沒有內容也要填「無」，不可留白或整段刪除。
-
-### specs/<domain>/spec.md（delta，可能有多個 domain，各自建一個檔案）
-只描述本次「改了什麼」，不是整份系統規格：`## ADDED Requirements` / `## MODIFIED Requirements` /
-`## REMOVED Requirements` 三種分節，每個 `### Requirement:`（SHALL/MUST/SHOULD）底下至少一個
-`#### Scenario:`（逐步邏輯 + GIVEN/WHEN/THEN）。規則：
-- 先用 Read/Grep 讀 `<project_dir>/openspec/specs/<domain>/spec.md`（已合併進主規格的既有內容，不是這次 change 自己的 delta 檔案），逐一分析既有 Requirement 的規範範圍——不是只比對標題或關鍵字：本次要規範的行為若與某個既有 Requirement 完全相同、或屬於同一件事可以合併進去（而不是另開一個涵蓋範圍重疊的新 Requirement），就用 `MODIFIED Requirements` 改寫該 Requirement（須含合併後完整的新版本內容，直接改寫規格本身，**不要在規格內附加「改了什麼」說明或括號註釋**）；找不到可合併或重複的既有 Requirement，才用 `ADDED Requirements` 視為新規則。domain 首次建立時該檔案還不存在，一律視為 ADDED
-- Requirement 與 Scenario 標題（`### Requirement:` / `#### Scenario:`）用抽象、涵蓋規則本身的措辭命名，不要寫死具體數量或列舉值：寫死的標題（連帶內文）在功能擴充時（例如權限或分頁數量增加）會對不上新情況，被迫另開一個 Requirement/Scenario，而不是原本的規則自然涵蓋。
-  錯誤：`Scenario: user 端兩個權限皆為 true 時兩個子分頁都顯示`；正確：`Scenario: 登入者具備全部受管功能時顯示對應開關`
-- 每個 Requirement 只講一件事、一個 SHALL/MUST/SHOULD；不要把好幾個「而且」塞進同一個 Requirement
-- 每個 Requirement 至少要有一個 Scenario；Scenario 要測到具體情境（含邊界/錯誤情況），不是重述 Requirement
-- 涉及使用者可觀察行為的 change：主路徑 Scenario 須含「逐步邏輯」、THEN 須含輸出要求（見上方 Specine 對齊強制三項），不可只寫「購物車可用」這類空泛結果
-- Requirement 與 Scenario（含逐步邏輯）都只能用自然語言描述規範（系統對外呈現的行為與約束），
-  不寫實作細節——不限特定技術棧，泛指任何屬於「怎麼做到」而非「對外呈現什麼」的內容：不寫具體程式碼
-  片段或條件式（例如 `a.b === true`）、不點名元件／模組／類別／函式／變數名稱、不使用框架特定的
-  生命週期或渲染機制用語（掛載、mount、render、re-render 等）、不寫 DOM 屬性／CSS selector／
-  資料庫欄位型別／SQL／特定框架 API。判斷依據一律換成使用者或系統看得到的業務語言（例如「具備某項
-  權限」而不是引用實際的欄位與比較式）；實作方式（用什麼元件、屬性、條件判斷式達成）留給 design.md
-  的 Technical Approach。
-  錯誤：`THEN 該 a-textarea 的 DOM maxlength 屬性為 1024`；正確：`THEN 字元計數以 1024 為上限` + `AND 使用者無法讓該欄位保留超過 1024 字`
-  錯誤：`逐步邏輯：系統依 selfInformation.allowOriginAuth === true 判定...使用者點擊後 OriginAuthModule 才會被掛載並發出請求`；
-  正確：`逐步邏輯：系統依登入者是否具備回源鑒權權限判定...使用者點擊該分頁後，右側才顯示回源鑒權模組的列表內容`
-- 適用時另寫邊界／錯誤 Scenario（Edge/Corner Cases、Error Handling），不可只靠主路徑
-- **規格只描述系統「做什麼」，永遠不描述「不做什麼」**。具體規則：
-  - 先讀既有 `openspec/specs/<domain>/spec.md`，只對「既有 spec 中提及、且本次任務要移除或縮減」的功能動筆（MODIFIED 或 REMOVED）；
-    原本 spec 從未提及的功能，**不需要也不可以**在 delta 裡加任何條文——包括 REMOVED、也包括以「看不到 X」「不顯示 X」為主旨的 Scenario
-  - MODIFIED Requirements 的作法是：**改寫 Requirement 正文，使其只描述縮減後仍存在的行為**；
-    例如移除某一開關，應把那一列從對照表刪掉，Scenarios 改成描述僅剩開關的正向行為；
-    不要在 Requirement 或 Scenario 裡補一句「X MUST NOT 出現」或另開一個「看不到 X」的 Scenario
-  - 以 MUST NOT 描述「某 UI 元件不存在」的 Scenario 等同負向寫法，同樣禁止；
-    唯一允許的 MUST NOT 出現在 Scenario THEN 中，是為了完整描述正向 Scenario 的副作用
-    （例：正向 Scenario 是「顯示有授權的子分頁」，副作用 AND 子句 MUST NOT 發出無授權子分頁的請求）
-- 每個 Scenario 都必須有至少一個與其 Scenario Title 名稱相同的 `describe` 或 `test`（驗收測試名稱須與 Scenario 標題一致，確保規格與測試可追溯）
-- 依下方「目標專案與 Domain」已確認的歸屬：沿用既有 domain 不需要加 `## Purpose`；domain 首次建立才在 delta 檔案最上面加一段 `## Purpose`（一兩句話，與 proposal Intent 的規範目的對齊）
-- 不需要獨立的「User Stories」章節——Scenario 已經是驗收條件的正式化版本
-- 若本次任務純粹是重構/文件/設定調整、完全沒有外部可觀察行為變化，可以在該 change 的 `.openspec.yaml` 加 `skip_specs: true` 並略過 specs delta；若 REMOVED 移除了某個 domain 的最後一個 Requirement，需在 `.openspec.yaml` 加 `retire_capabilities: true` 才能讓 archive 一併刪除該 domain 的 spec 檔
-
-### tasks.md
-`## N. <群組名稱>` + `- [ ] N.M <具體任務>` checkbox，依實作順序階層編號（1.1、1.2...）。
-- 涉及新增或修改行為的任務，須額外安排一個對應的「撰寫／更新測試」任務（優先在既有測試 seam 上以 tdd skill 的紅-綠循環進行）；純文件、設定調整或不改變行為的重構可不需要
-- 是否需要「更新文件」任務，依該任務所屬專案的 CLAUDE.md / AGENT.md 判斷：若說明檔要求同步維護 docs/ 下的商業邏輯說明文件，安排對應任務（通常放在最後）；未提及此類慣例時不強制新增
-- 這份檔案會被執行 Agent 逐項勾選、被審查 Agent 讀取確認完成度，是任務清單的唯一事實來源；不要另外在聊天輸出一份分析／計畫摘要
-
-（完成後系統會自動執行 `openspec validate --strict`；只有 error 等級會擋下並把訊息傳回來給你修正，
-warning 可視情況保留、不必為了消除 warning 硬湊內容，你不需要自己執行 validate。）"""
-
-# 檔案骨架範本：只有從零建立新 change 時才需要（僅初始規劃注入）。replan／依人工意見調整都是
-# Edit 既有檔案，實際格式直接 Read 現有內容就看得到，注入範本只是白佔 token。
-_OPENSPEC_TEMPLATES = """## 新建檔案時的骨架範本（格式規則見上方「OpenSpec 產出規則」）
-
-### proposal.md
-```markdown
-# Proposal: <Feature/Fix Name>
-
-## Intent
-<規範目的（強制，見上方 Specine 對齊第 1 項）；適用時補規範背景>
-
-## Scope
-In scope:
-- <本次要做的事項>
-
-Out of scope:
-- <明確排除、避免範疇蔓延的事項；沒有則寫「無」>
-
-## Approach
-<高階解決方案概述；適用時寫入相關 APIs、建議演算法／資料結構／既有模組>
-```
-
-### design.md
-```markdown
-# Design: <Feature/Fix Name>
-
-## Technical Approach
-<技術實作方式>
-
-## Architecture Decisions
-### Decision: <決策名稱>
-<決策內容與理由；沒有值得記錄的架構決策則寫「無」>
-
-## Testing Strategy
-### Seam（測試接縫）
-- **首選接縫**：<測試對象與測試方法>
-- **次要接縫**：<次要驗證方式，沒有則寫「無」>
-
-### 測試案例矩陣（Test Matrix）
-| 輸入值 / 情境 | 預期結果 | 斷言 Target / Reject Key |
-| --- | --- | --- |
-| <案例；須涵蓋主路徑的逐步範例，適用時加邊界／錯誤> | ... | ... |
-
-## Technical Debt & Follow-up Notes
-<需追蹤的技術債；沒有則寫「無」>
-```
-
-### specs/<domain>/spec.md
-```markdown
-## ADDED Requirements
-
-### Requirement: <名稱>
-The system SHALL/MUST <一個明確、可觀察的行為；含輸出要求（資料類型、格式、約束）>。
-
-#### Scenario: <情境名稱>
-逐步邏輯：<從觸發（輸入）到可觀察結果（輸出）的處理步驟>
-- GIVEN <前提；適用時含輸入型別／格式／約束>
-- WHEN <觸發>
-- THEN <結果；必須寫清可觀察輸出的資料類型、格式、約束>
-
-## MODIFIED Requirements
-（既有 Requirement 縮減或調整時使用；直接改寫成縮減後的正向規格，不附加「改了什麼」說明，也不加「X MUST NOT 出現」條文；移除某功能時，把該功能從 Requirement 正文與 Scenarios 中刪掉，只保留仍存在的行為）
-
-## REMOVED Requirements
-（行為被移除時使用，須說明原因）
-```
-
-### tasks.md
-```markdown
-# Tasks
-
-## 1. <群組名稱>
-- [ ] 1.1 <具體任務>
-- [ ] 1.2 <具體任務>
-
-## 2. <群組名稱>
-- [ ] 2.1 <具體任務>
-```"""
 
 _DOMAIN_CONTEXT_EXISTING = """沿用以下既有 domain（specs/**/*.md 不加 `## Purpose`）：<<DOMAIN_LIST_VALUE>>
 若任務內容確實還涉及上述以外的 domain，可依語意自訂新 domain 名稱（視為「domain 首次建立」，該
@@ -290,10 +121,6 @@ _SYSTEM_INITIAL = f"""你是一位資深全端工程師，負責「分析與規�
 {_PROJECT_AND_DOMAIN_INFO}
 {_CHANGE_SETUP_INITIAL}
 
-{_OPENSPEC_ARTIFACT_RULES}
-
-{_OPENSPEC_TEMPLATES}
-
 {_ANALYZE_PROHIBITIONS}
 
 ## 最終輸出
@@ -331,8 +158,6 @@ _SYSTEM_REPLAN = f"""你是一位資深全端工程師，負責「重新分析�
 
 {_CHANGE_SETUP_EXISTING}
 
-{_OPENSPEC_ARTIFACT_RULES}
-
 {_ANALYZE_PROHIBITIONS}
 
 ## 最終輸出
@@ -364,8 +189,6 @@ _SYSTEM_HUMAN_REVISE = f"""你是一位資深全端工程師，負責「根據�
    強制三項若被意見改到就一併改寫，沒被改到也不可刪掉
 
 {_CHANGE_SETUP_EXISTING}
-
-{_OPENSPEC_ARTIFACT_RULES}
 
 {_ANALYZE_PROHIBITIONS}
 
