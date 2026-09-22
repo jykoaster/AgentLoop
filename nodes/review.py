@@ -7,7 +7,8 @@ import os
 from ..core import AgentState, take_session, store_session
 from ..lib import (
     call_claude, call_resuming, format_usage_stats, build_skills_block,
-    build_project_doc_hint_for, ensure_on_branch, is_usage_limit_error, REPO_ROOT,
+    build_project_doc_hint_for, ensure_on_branch, is_usage_limit_error,
+    LANGUAGE_POLICY, REPO_ROOT,
 )
 
 # 使用的模型（"haiku" | "sonnet" | "opus" | "fable"，見 claude_runner.MODEL_IDS；
@@ -17,7 +18,7 @@ _MODEL = "sonnet"
 # 中斷 session 插槽的 owner 名稱（見 core/session.py）
 _SESSION_KEY = "review"
 
-_SYSTEM = """你是一位資深程式碼審查者，負責「Code Review」階段。
+_SYSTEM = f"""你是一位資深程式碼審查者，負責「Code Review」階段。
 
 請依照下方 code-review skill 的流程進行審查（Standards 與 Spec 兩軸，各自透過平行 sub-agent 產出報告）。
 fixed point 與 spec 來源見下方「依 code-review skill 執行時的具體參數」，已由本節點固定，不需再自行判斷。
@@ -105,7 +106,7 @@ fixed point 與 spec 來源見下方「依 code-review skill 執行時的具體�
      ...
      （沒有任何建議時，不需要輸出這個小節）
 
-請用繁體中文回答。
+{LANGUAGE_POLICY}
 """
 
 def _run_spec_trace_check(change_dir: str, project_abs: str) -> tuple[str, list[str]]:

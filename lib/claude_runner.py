@@ -49,6 +49,25 @@ _RESET   = "\033[0m"
 QUESTION_MARKER = "QUESTION:"
 _QUESTION_LINE_RE = re.compile(r"(?:^|\n)\s*" + re.escape(QUESTION_MARKER))
 
+# 語言政策（三個 Claude 節點共用）：`_log_event()` 印出的過程敘述從不存入任何變數，換成英文可省下
+# 約一半的 output token（中文約 1 token/字；同樣語意的英文字數約兩倍，但約 4 字才 1 token），而
+# output 又比 input 貴。反過來，最終回應會被寫進 state.json、被 `extract_review_level()` 這類
+# regex 解析、並直接呈現給使用者，所以它與所有寫出的檔案一律維持繁體中文——省 token 不能省到
+# 改變交付物的語言。這也是為什麼政策必須明確切在「過程」與「最終回應」之間，而不是整體換語言。
+LANGUAGE_POLICY = """## Language
+
+Narrate your work in **English** — progress notes, reasoning, tool commentary. None of it is
+persisted anywhere, and English costs roughly half the tokens of Chinese.
+
+Write the following in **繁體中文（Traditional Chinese）** regardless of the above:
+
+- every file you create or edit: OpenSpec artifacts, code comments, docs, on-disk reports
+- anything addressed to the user, including every `QUESTION:` line
+- your final response for this turn, report text included, keeping any required markers
+  (such as `REVIEW_LEVEL:` values) exactly as this prompt specifies them
+
+In short: work in English, deliver in 繁體中文."""
+
 RESUME_AFTER_INTERRUPT_PROMPT = (
     "系統偵測到上一輪呼叫中斷（用量上限或程序結束），現在恢復執行。"
     "在繼續之前，請先重新確認目前的檔案內容與 tasks.md 的勾選狀態"

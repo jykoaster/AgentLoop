@@ -5,7 +5,7 @@ import time
 from ..core import AgentState, take_session, store_session
 from ..lib import (
     call_claude, call_resuming, format_usage_stats, QUESTION_MARKER,
-    is_usage_limit_error, build_skills_block,
+    is_usage_limit_error, LANGUAGE_POLICY, build_skills_block,
     build_project_doc_hint_for, REPO_ROOT,
     ensure_on_branch, rollback_except_openspec,
     ensure_initialized, ensure_change_created, validate_change,
@@ -130,7 +130,7 @@ _SYSTEM_INITIAL = f"""你是一位資深全端工程師，負責「分析與規�
 
 {_QUESTION_PROTOCOL}
 
-請用繁體中文回答。
+{LANGUAGE_POLICY}
 """
 
 _SYSTEM_REPLAN = f"""你是一位資深全端工程師，負責「重新分析與規劃」階段。
@@ -167,7 +167,7 @@ _SYSTEM_REPLAN = f"""你是一位資深全端工程師，負責「重新分析�
 
 {_REVIEW_QUESTION_PROTOCOL}
 
-請用繁體中文回答。
+{LANGUAGE_POLICY}
 """
 
 _SYSTEM_HUMAN_REVISE = f"""你是一位資深全端工程師，負責「根據人工意見調整規劃」階段。
@@ -199,7 +199,7 @@ _SYSTEM_HUMAN_REVISE = f"""你是一位資深全端工程師，負責「根據�
 
 {_QUESTION_PROTOCOL}
 
-請用繁體中文回答。
+{LANGUAGE_POLICY}
 """
 
 _BANNER = "\033[1;34m"

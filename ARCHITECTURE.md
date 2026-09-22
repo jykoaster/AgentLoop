@@ -657,6 +657,15 @@ Iteration 2:
 4. 解析最終 `result` 事件取得文字輸出與 token 用量
 5. 回傳 `ClaudeResult`（含文字、`session_id`、token 統計、快取統計）
 
+### 語言政策
+
+`LANGUAGE_POLICY` 是一段共用的提示區塊，注入 `analyze_plan`（三個 `_SYSTEM` 都有）、`execute`、`review` 的系統提示尾端，取代原本各自一行的「請用繁體中文回答。」。它把語言切成兩邊：
+
+- **過程敘述用英文**：Claude 邊做邊說的文字，也就是上方執行流程第 3 步以 dimmed 格式印出的灰字。這些內容 `_log_event()` 只 print 不存（連終端也只顯示每段的第一行、截斷至 120 字），但整段都算 output token，而 output 比 input 貴；同樣語意的英文約只需中文一半的 token。
+- **交付物維持繁體中文**：所有寫出的檔案（OpenSpec 文件、程式碼註解、`docs/nodes/review/` 報告）、對使用者說的話（含每個 `QUESTION:` 行），以及**最終回應**。
+
+這條界線不是風格偏好，而是功能需求：最終回應會寫進 `state.json`（`execution_result`／`review_result`）、直接呈現給使用者，並被 `review.py` 的 `extract_review_level()` 以 `REVIEW_LEVEL:\s*(重寫|修補)` 解析——中文字面值換成英文會讓它抓不到而一律 fallback 成 `修補`。所以要省 token 只能省過程敘述，不能整體換語言。
+
 ### 互動式提問（grilling）支援
 
 `ClaudeResult` 帶有 `session_id`；`_log_event()` 偵測到助理輸出以 `QUESTION_MARKER`（`"QUESTION:"`）開頭時，會用醒目格式即時印出提問內容。`call_claude()` 的 `resume` 參數可帶入先前呼叫回傳的 `session_id`，讓上層（目前僅 `analyze_plan._run_with_grilling()`）能以同一個 Claude session 延續多輪一問一答，不必每輪重新提供完整上下文。
@@ -792,7 +801,7 @@ python -m AgentLoop.main --node archive
 | 節點數量     | 5（規劃、人工確認、執行、審查、收尾 archive）                            |
 | 最大重試次數 | 3 次迭代後強制結束                                                       |
 | 執行模型     | 序列執行 + 迭代精修（審查驅動，重新規劃時只針對 review 結果 grill）      |
-| 語言         | Python 協調層 + 繁體中文提示                                             |
+| 語言         | Python 協調層 + 繁體中文提示（Claude 過程敘述為英文，見「語言政策」）    |
 | 目標架構     | 動態偵測，不假設固定技術棧（目前範例：Vue + Ant Design Vue）             |
 | 驅動方式     | Claude Code CLI（本地認證，非 API Key）+ OpenSpec CLI（規格文件格式與 archive） |
 | 狀態傳遞     | 不可變 TypedDict 流經整個工作流程                                        |

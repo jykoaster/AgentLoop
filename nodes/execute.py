@@ -3,7 +3,8 @@ import time
 from ..core import AgentState, take_session, store_session
 from ..lib import (
     call_claude, call_resuming, format_usage_stats, build_skills_block,
-    build_project_doc_hint_for, ensure_on_branch, is_usage_limit_error, REPO_ROOT,
+    build_project_doc_hint_for, ensure_on_branch, is_usage_limit_error,
+    LANGUAGE_POLICY, REPO_ROOT,
 )
 
 _SKILLS = [
@@ -19,9 +20,7 @@ _TIMEOUT = 900
 # 中斷 session 插槽的 owner 名稱（見 core/session.py）
 _SESSION_KEY = "execute"
 
-_SYSTEM = """你是一位資深全端工程師，負責「執行」階段。
-
-請用繁體中文回答。
+_SYSTEM = f"""你是一位資深全端工程師，負責「執行」階段。
 
 ## 執行前準備（必須完成）
 
@@ -89,6 +88,8 @@ _SYSTEM = """你是一位資深全端工程師，負責「執行」階段。
 1. 所有已修改的程式碼檔案清單
 2. 所有已新增/修改的說明文件清單
 3. 每個 TASK 的完成狀態（✅ 已完成 / ❌ 未完成 + 原因）
+
+{LANGUAGE_POLICY}
 """
 
 _BANNER = "\033[1;32m"
