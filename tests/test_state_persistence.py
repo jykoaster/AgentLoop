@@ -1,6 +1,6 @@
 """
-純邏輯單元測試：state 存讀、_route_after_review、_list_and_select_change。
-不依賴 Claude CLI，可在容器內直接 pytest 執行。
+純邏輯單元測試：state 存讀、_route_after_review、_list_and_select_change、
+domain 選擇相關函式。不依賴 Claude CLI，可在容器內直接 pytest 執行。
 """
 import json
 import os
@@ -211,3 +211,124 @@ class TestListAndSelectChange:
 
         result = self._call("execute", workspace, "my-project")
         assert result["change_name"] == "has-state"
+
+
+# ── _list_existing_domains ────────────────────────────────────────────────────
+
+class TestListExistingDomains:
+    def _call(self, project_dir, workspace_root):
+        from AgentLoop.nodes.analyze_plan import _list_existing_domains
+        with patch("AgentLoop.nodes.analyze_plan.REPO_ROOT", str(workspace_root)):
+            return _list_existing_domains(project_dir)
+
+    def test_no_specs_dir(self, tmp_project):
+        workspace, _ = tmp_project
+        assert self._call("my-project", workspace) == []
+
+    def test_empty_specs_dir(self, tmp_project):
+        workspace, project = tmp_project
+        (project / "openspec" / "specs").mkdir(parents=True)
+        assert self._call("my-project", workspace) == []
+
+    def test_returns_sorted_domain_dirs(self, tmp_project):
+        workspace, project = tmp_project
+        specs = project / "openspec" / "specs"
+        specs.mkdir(parents=True)
+        (specs / "users").mkdir()
+        (specs / "articles").mkdir()
+        assert self._call("my-project", workspace) == ["articles", "users"]
+
+    def test_ignores_files_and_hidden_dirs(self, tmp_project):
+        workspace, project = tmp_project
+        specs = project / "openspec" / "specs"
+        specs.mkdir(parents=True)
+        (specs / "articles").mkdir()
+        (specs / ".hidden").mkdir()
+        (specs / "spec.md").write_text("")
+        assert self._call("my-project", workspace) == ["articles"]
+
+
+# ── _ask_domain_selection ─────────────────────────────────────────────────────
+
+class TestAskDomainSelection:
+    """使用 _list_existing_domains mock 隔離檔案系統；builtins.input mock 模擬終端輸入。"""
+
+    def _call(self, domains, inputs):
+        from AgentLoop.nodes.analyze_plan import _ask_domain_selection
+        with patch("AgentLoop.nodes.analyze_plan._list_existing_domains", return_value=domains), \
+             patch("sys.stdin.isatty", return_value=True), \
+             patch("builtins.input", side_effect=inputs):
+            return _ask_domain_selection("my-project")
+
+    def test_no_existing_domains_returns_empty(self):
+        from AgentLoop.nodes.analyze_plan import _ask_domain_selection
+        with patch("AgentLoop.nodes.analyze_plan._list_existing_domains", return_value=[]):
+            assert _ask_domain_selection("my-project") == ([], "")
+
+    def test_non_interactive_returns_empty(self):
+        from AgentLoop.nodes.analyze_plan import _ask_domain_selection
+        with patch("AgentLoop.nodes.analyze_plan._list_existing_domains", return_value=["articles"]), \
+             patch("sys.stdin.isatty", return_value=False):
+            assert _ask_domain_selection("my-project") == ([], "")
+
+    def test_select_existing_domain_by_index(self):
+        result = self._call(["articles", "users"], ["1"])
+        assert result == (["articles"], "")
+
+    def test_select_multiple_existing_domains(self):
+        result = self._call(["articles", "users", "auth"], ["1,3"])
+        assert result == (["articles", "auth"], "")
+
+    def test_select_new_domain_with_name(self):
+        # domains=["articles","users"] → new_idx=3; user enters "3" then domain name
+        result = self._call(["articles", "users"], ["3", "order-management"])
+        assert result == ([], "order-management")
+
+    def test_select_new_domain_empty_name(self):
+        # user presses Enter on domain name → Claude decides the name
+        result = self._call(["articles"], ["2", ""])
+        assert result == ([], "")
+
+    def test_invalid_index_retries_then_valid(self):
+        result = self._call(["articles", "users"], ["99", "1"])
+        assert result == (["articles"], "")
+
+    def test_mix_new_and_existing_retries(self):
+        # "1,2" where 2 is new_idx (1 existing domain) → error, retry → pick new with name
+        result = self._call(["articles"], ["1,2", "2", "payments"])
+        assert result == ([], "payments")
+
+    def test_eof_returns_empty(self):
+        from AgentLoop.nodes.analyze_plan import _ask_domain_selection
+        with patch("AgentLoop.nodes.analyze_plan._list_existing_domains", return_value=["articles"]), \
+             patch("sys.stdin.isatty", return_value=True), \
+             patch("builtins.input", side_effect=EOFError):
+            assert _ask_domain_selection("my-project") == ([], "")
+
+
+# ── _build_new_domain_context ─────────────────────────────────────────────────
+
+class TestBuildNewDomainContext:
+    def _call(self, name, purpose):
+        from AgentLoop.nodes.analyze_plan import _build_new_domain_context
+        return _build_new_domain_context(name, purpose)
+
+    def test_no_name_no_purpose_returns_default(self):
+        from AgentLoop.nodes.analyze_plan import _DOMAIN_CONTEXT_NEW
+        assert self._call("", "") == _DOMAIN_CONTEXT_NEW
+
+    def test_purpose_only_injects_text(self):
+        result = self._call("", "管理使用者帳號的功能集合")
+        assert "管理使用者帳號的功能集合" in result
+        assert "<<DOMAIN_PURPOSE_VALUE>>" not in result
+
+    def test_name_only_injects_name_in_path(self):
+        result = self._call("user-management", "")
+        assert "user-management" in result
+        assert "specs/user-management/spec.md" in result
+
+    def test_name_and_purpose_injects_both(self):
+        result = self._call("user-management", "管理使用者帳號")
+        assert "user-management" in result
+        assert "管理使用者帳號" in result
+        assert "specs/user-management/spec.md" in result

@@ -142,7 +142,7 @@ class TestAnalyzePlanGuards:
              patch("AgentLoop.nodes.analyze_plan.ensure_on_branch", return_value=(True, "ok")), \
              patch("AgentLoop.nodes.analyze_plan.ensure_initialized", return_value=ok_result), \
              patch("AgentLoop.nodes.analyze_plan.ensure_change_created", return_value=ok_result), \
-             patch("AgentLoop.nodes.analyze_plan._ask_domain_selection", return_value=[]), \
+             patch("AgentLoop.nodes.analyze_plan._ask_domain_selection", return_value=([], "")), \
              patch("AgentLoop.nodes.analyze_plan._ask_domain_purpose", return_value=""), \
              patch("AgentLoop.nodes.analyze_plan._run_with_validate", return_value=None), \
              patch("AgentLoop.nodes.analyze_plan._read_change_artifacts", return_value=("analysis", ["- [x] t1"])):

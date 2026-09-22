@@ -371,15 +371,34 @@ def _list_existing_domains(project_dir: str) -> list[str]:
     )
 
 
-def _ask_domain_selection(project_dir: str) -> list[str]:
+def _ask_new_domain_name() -> str:
+    """選擇「以上皆非，建立新 domain」後詢問 domain 名稱（選填；留白由 Claude 依任務語意自行命名）。
+    呼叫方已確認為互動式環境，不需再做 isatty 檢查。
+    """
+    print(
+        f"\n{_YELLOW}  [分析+規劃 Agent] 新 domain 名稱為何？"
+        f"（選填，建議英文 kebab-case；直接 Enter 由 Agent 依任務語意自行命名）：{_RESET}",
+        flush=True,
+    )
+    try:
+        return input(f"{_YELLOW}  > {_RESET}").strip()
+    except (EOFError, KeyboardInterrupt):
+        print(f"\n{_YELLOW}  已中止，由 Agent 依任務語意自行命名{_RESET}\n", flush=True)
+        return ""
+
+
+def _ask_domain_selection(project_dir: str) -> tuple[list[str], str]:
     """初始規劃時（僅一次）列出既有 domain，讓使用者選擇本次歸屬哪個（可複選、逗號分隔），
-    或選「建立新 domain」。回傳選定的既有 domain 名稱清單；空清單表示本次視為建立新
-    domain（沒有任何既有 domain、或非互動式環境時也回傳空清單，不中止流程，交由 Claude
-    依任務語意自訂新名稱）。
+    或選「以上皆非，建立新 domain」。
+
+    回傳 (selected_existing_domains, new_domain_name)：
+    - 使用者選擇既有 domain：([domain, ...], "")
+    - 使用者選擇「以上皆非」：([], domain_name_or_"")
+    - 沒有既有 domain 或非互動式環境：([], "")
     """
     domains = _list_existing_domains(project_dir)
     if not domains:
-        return []
+        return [], ""
 
     new_idx = len(domains) + 1
     print(f"\n{_YELLOW}  [分析+規劃 Agent] 本次需求歸屬於哪一個既有 domain？{_RESET}", flush=True)
@@ -390,24 +409,26 @@ def _ask_domain_selection(project_dir: str) -> list[str]:
 
     if not sys.stdin.isatty():
         print(f"{_YELLOW}  非互動式環境，預設建立新 domain{_RESET}\n", flush=True)
-        return []
+        return [], ""
 
     while True:
         try:
             answer = input(f"{_YELLOW}  > {_RESET}").strip()
         except (EOFError, KeyboardInterrupt):
             print(f"\n{_YELLOW}  已中止，預設建立新 domain{_RESET}\n", flush=True)
-            return []
+            return [], ""
         if not answer:
             continue
 
         parts = [p.strip() for p in answer.split(",") if p.strip()]
         selected: list[str] = []
+        wants_new = False
         valid = True
         for p in parts:
             if p.isdigit():
                 idx = int(p)
                 if idx == new_idx:
+                    wants_new = True
                     continue
                 if 1 <= idx <= len(domains):
                     selected.append(domains[idx - 1])
@@ -421,27 +442,91 @@ def _ask_domain_selection(project_dir: str) -> list[str]:
                 valid = False
                 break
 
-        if valid:
-            return selected
-        print(f"{_YELLOW}  請輸入清單中的編號{_RESET}", flush=True)
+        if not valid:
+            print(f"{_YELLOW}  請輸入清單中的編號{_RESET}", flush=True)
+            continue
+
+        if wants_new and selected:
+            print(f"{_YELLOW}  「以上皆非」與既有 domain 不可同時選擇{_RESET}", flush=True)
+            continue
+
+        if wants_new:
+            new_name = _ask_new_domain_name()
+            return [], new_name
+
+        return selected, ""
+
+
+def _drain_stdin() -> None:
+    """清除 stdin buffer 中剩餘的輸入，防止使用者貼上多行文字時，
+    未被消耗的行混入後續的 input() 呼叫。"""
+    try:
+        import termios
+        termios.tcflush(sys.stdin, termios.TCIFLUSH)
+    except Exception:
+        pass
 
 
 def _ask_domain_purpose() -> str:
     """本次確定會建立新 domain 時（僅初始規劃）詢問使用者這個 domain 的 Purpose，選填——
     留白（含非互動式環境、使用者中止）就交由 Claude 依當次任務語意自行撰寫，不視為錯誤。
+
+    支援多行貼上：連續兩個空行（Enter Enter）或 Ctrl+D 結束輸入。
+    使用「雙空行」而非「單空行」為終止符，允許 Purpose 本文內含有 markdown 段落分隔（單空行）。
+    結束後一律 drain stdin，防止剩餘 buffer 行污染後續 grilling 的 input()。
     """
     print(
         f"\n{_YELLOW}  [分析+規劃 Agent] 這是新建立的 domain，若要指定它的 Purpose 請輸入"
-        f"（選填，直接 Enter 留白則由 Agent 依本次任務自行撰寫）：{_RESET}",
+        f"（選填；支援多行，貼上後連按兩次 Enter 結束；直接 Enter 由 Agent 依本次任務自行撰寫）：{_RESET}",
         flush=True,
     )
     if not sys.stdin.isatty():
         return ""
+    lines: list[str] = []
+    consecutive_empty = 0
     try:
-        return input(f"{_YELLOW}  > {_RESET}").strip()
+        while True:
+            line = input(f"{_YELLOW}  > {_RESET}")
+            if not line:
+                if not lines:
+                    # 第一行就是空行 → 使用者選擇略過
+                    break
+                consecutive_empty += 1
+                if consecutive_empty >= 2:
+                    break
+                lines.append(line)  # 保留單一空行（markdown 段落分隔）
+            else:
+                consecutive_empty = 0
+                lines.append(line)
     except (EOFError, KeyboardInterrupt):
-        print(f"\n{_YELLOW}  已略過，由 Agent 自行撰寫 Purpose{_RESET}\n", flush=True)
-        return ""
+        if not lines:
+            print(f"\n{_YELLOW}  已略過，由 Agent 自行撰寫 Purpose{_RESET}\n", flush=True)
+    finally:
+        _drain_stdin()
+    # 去除結尾空行
+    while lines and not lines[-1]:
+        lines.pop()
+    return "\n".join(lines).strip()
+
+
+def _build_new_domain_context(name: str, purpose: str) -> str:
+    """依使用者提供的 domain 名稱與 Purpose 組合出適當的提示文字（四種組合）。"""
+    if name and purpose:
+        return (
+            f"使用者已確認本次為建立新 domain，domain 名稱為 `{name}`，"
+            f"並指定了它的 Purpose：{purpose}\n\n"
+            f"specs/{name}/spec.md 最上面的 `## Purpose` 直接採用使用者這段文字"
+            f"（不要自己另外改寫或簡化），並確認 proposal.md 的 `## Intent` 與其對齊。"
+        )
+    if name:
+        return (
+            f"使用者已確認本次為建立新 domain，domain 名稱為 `{name}`，視為"
+            f"「domain 首次建立」，specs/{name}/spec.md 最上面需加 `## Purpose`"
+            f"（與 proposal Intent 對齊）。"
+        )
+    if purpose:
+        return _DOMAIN_CONTEXT_NEW_WITH_PURPOSE.replace("<<DOMAIN_PURPOSE_VALUE>>", purpose)
+    return _DOMAIN_CONTEXT_NEW
 
 
 def _resolve_project_dir() -> str:
@@ -580,17 +665,14 @@ def analyze_plan_node(state: AgentState) -> dict:
             print(f"{_RED}  [分析+規劃 Agent] openspec init 失敗：{init_result.error_text}{_RESET}\n", flush=True)
             return _fail(f"openspec init 失敗：{init_result.error_text}")
 
-        domains = _ask_domain_selection(project_dir)
+        domains, new_domain_name = _ask_domain_selection(project_dir)
         if domains:
             domain_context_value = _DOMAIN_CONTEXT_EXISTING.replace(
                 "<<DOMAIN_LIST_VALUE>>", "、".join(domains)
             )
         else:
             domain_purpose = _ask_domain_purpose()
-            domain_context_value = (
-                _DOMAIN_CONTEXT_NEW_WITH_PURPOSE.replace("<<DOMAIN_PURPOSE_VALUE>>", domain_purpose)
-                if domain_purpose else _DOMAIN_CONTEXT_NEW
-            )
+            domain_context_value = _build_new_domain_context(new_domain_name, domain_purpose)
 
         change_result = ensure_change_created(project_dir_abs, change_name)
         if not change_result.ok:
