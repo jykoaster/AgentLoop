@@ -14,6 +14,7 @@ AgentLoop/
 ├── search.py             # 獨立搜尋工具（`python -m AgentLoop.search "query"`，不屬於 workflow）
 ├── core/                    # 系統的核心骨架：狀態契約與 LangGraph 圖組裝
 │   ├── state.py               # AgentState 型別定義
+│   ├── session.py             # 中斷 session 插槽的唯一讀寫處（見下方「跨程序接回：session 插槽」）
 │   └── workflow.py            # LangGraph 工作流程定義（`from ..nodes import ...` 組圖）
 ├── lib/                     # 節點共用的工具層（見下方各節點對這些模組的說明）
 │   ├── claude_runner.py       # Claude Code CLI 封裝層
@@ -26,6 +27,9 @@ AgentLoop/
 ├── docker-compose.yml
 ├── .claude/
 │   └── skills/               # 專案內建 Skill（見下方「Skill 系統作為知識注入」）
+├── pytest.ini               # 註冊 `eval` marker，並預設排除（`addopts = -m "not eval"`）
+├── tests/                   # 單元測試（不需要 Claude CLI）
+│   └── evals/                 # prompt eval：真的呼叫 Claude CLI，標記 `eval`、預設不執行
 ├── nodes/
 │   ├── analyze_plan.py     # 規劃 / 重新規劃 Agent 節點
 │   ├── human_confirm.py    # 人工確認中斷點
@@ -285,17 +289,25 @@ validate 的錯誤修正也接到同一套「有問題就等使用者、否則�
 - 涉及新增或修改行為的 TASK，須額外排入對應的「撰寫／更新測試」TASK，讓 `execute` 有明確依據依 tdd skill 執行紅-綠循環；純文件、設定調整或不改變行為的重構可不需要
 - 是否需要新增「更新文件」TASK，依該任務所屬專案的 `CLAUDE.md` / `AGENT.md` 判斷：說明檔要求同步維護 `docs/` 商業邏輯說明文件才排入，未提及此類慣例則不強制新增
 
-**注入的 Skills（完整內容）：** 初始規劃／依人工意見調整用 `_SKILLS`（`grilling`、`domain-modeling`、`tdd`）；
-重新規劃（review 觸發）改用 `_SKILLS_REPLAN`（`grilling`、`tdd`），**不含** `domain-modeling`——
-`_SYSTEM_REPLAN` 本來就明講「不需重新進行完整的 grilling 釐清或文件同步」，注入它的完整內容（三個
-skill 裡最大的一塊）純屬浪費 token。`tdd` 三種模式都注入完整內容（見下方「Skill 系統作為知識注入」
-關於為什麼不能只列名稱）。規格格式由 `_OPENSPEC_ARTIFACT_RULES` 寫死。
+**注入的 Skills（完整內容）：** 初始規劃／依人工意見調整用 `_SKILLS`（`grilling`、`domain-modeling`、
+`tdd`、`openspec-authoring`）；重新規劃（review 觸發）改用 `_SKILLS_REPLAN`（`grilling`、`tdd`、
+`openspec-authoring`），**不含** `domain-modeling`——`_SYSTEM_REPLAN` 本來就明講「不需重新進行完整
+的 grilling 釐清或文件同步」，注入它的完整內容（這幾個 skill 裡最大的一塊）純屬浪費 token。`tdd`
+三種模式都注入完整內容（見下方「Skill 系統作為知識注入」關於為什麼不能只列名稱）。
 
-**檔案骨架範本（`_OPENSPEC_TEMPLATES`）只注入初始規劃：** replan／依人工意見調整都是 Edit 既有
-change 資料夾裡已存在的檔案，Claude 直接 Read 就看得到實際格式，不需要再看一次
-proposal.md/design.md/specs delta/tasks.md 的空白骨架——這部分只留在 `_SYSTEM_INITIAL`，
-`_OPENSPEC_ARTIFACT_RULES` 本身瘦身成只保留規則文字（Specine 對齊、自檢、各檔案的規則清單），
-不含骨架範本。
+**規格格式來自 `openspec-authoring` skill，不再寫在節點程式碼裡。** 產出規則、Specine 對齊、檔案
+骨架範本原本是 `analyze_plan.py` 的三個模組常數（`_OPENSPEC_ARTIFACT_RULES` /
+`_SPECINE_ALIGNMENT` / `_OPENSPEC_TEMPLATES`），以字串內插進三份 `_SYSTEM`；現在整份移到
+`AgentLoop/.claude/skills/openspec-authoring/SKILL.md`，改走既有的 skill 注入機制。這份 skill 檔案
+是規格格式的**唯一事實來源**——下面的條列只是導覽，細則以 SKILL.md 為準。移出去的好處是改規格格式
+不必動節點程式碼，而且這些規則可以被單獨當成 system prompt 餵給 Claude 做 prompt eval
+（`AgentLoop/tests/evals/`，預設不隨 `pytest` 執行，見 `pytest.ini` 的 `eval` marker）。
+
+**已知副作用：骨架範本現在三種模式都會注入。** 範本原本刻意只放在 `_SYSTEM_INITIAL`——replan／
+依人工意見調整都是 Edit 既有 change 資料夾裡已存在的檔案，Claude 直接 Read 就看得到實際格式，
+再送一次空白骨架是白花 token。移進 skill 之後它與產出規則同在一個檔案，而 `openspec-authoring`
+同時列在 `_SKILLS` 與 `_SKILLS_REPLAN`，所以 replan 也會收到那段範本，這個 token 最佳化已經失效。
+要恢復的話得把範本另外拆成一個只列在 `_SKILLS` 的 skill。
 
 **OpenSpec Change 建立與規格文件範本：** 規格文件不再是 AgentLoop 自訂的單一 Markdown 檔案，而是遵照 [OpenSpec](https://github.com/Fission-AI/OpenSpec) 的 change 資料夾格式，寫在目標專案的 `<project_dir>/openspec/changes/<change_name>/` 底下：
 
@@ -306,11 +318,17 @@ proposal.md/design.md/specs delta/tasks.md 的空白骨架——這部分只留�
   沿用 `AgentState` 已存的值，不重新 `init`/`new change`，直接 Edit/Write 同一個 change 資料夾；
   「重寫」等級的 replan 在 Claude 完成撰寫、`openspec validate` 通過後，由 `_reset_task_checkboxes()`
   把 `tasks.md` 所有 checkbox 重設回 `- [ ]`（純字串處理，不需要 Claude 再做一次）
-- **產出規則**（`_OPENSPEC_ARTIFACT_RULES`，三種模式共用）：章節結構維持 OpenSpec，不另開 Specine 專章；`_SPECINE_ALIGNMENT` 把十項對齊要素對應進既有欄位。強制三項缺一不可（純重構且 `skip_specs: true` 時 Intent 仍須寫目的，輸出／範例可註明無外部可觀察行為）：規範目的 → `proposal.md` 的 `## Intent`（新建 domain 的 `## Purpose` 與其對齊）；輸出要求 → Requirement 的 SHALL/MUST 與主路徑 Scenario 的 THEN（資料類型、格式、約束）；範例及解釋 → 至少一個主路徑 Scenario 的「逐步邏輯」（從輸入到輸出）。其餘七項適用才寫：背景 → Intent／Approach；關鍵概念 → domain-modeling；輸入要求 → GIVEN/WHEN；邊界／錯誤處理 → 額外 Scenario；APIs／提示 → Approach 或 `design.md`
+- **產出規則**（`openspec-authoring` skill，三種模式共用）：章節結構維持 OpenSpec，不另開 Specine 專章；skill 裡的「Specine 規格對齊」一節把十項對齊要素對應進既有欄位。強制三項缺一不可（純重構且 `skip_specs: true` 時 Intent 仍須寫目的，輸出／範例可註明無外部可觀察行為）：規範目的 → `proposal.md` 的 `## Intent`（新建 domain 的 `## Purpose` 與其對齊）；輸出要求 → Requirement 的 SHALL/MUST 與主路徑 Scenario 的 THEN（資料類型、格式、約束）；範例及解釋 → 至少一個主路徑 Scenario 的「逐步邏輯」（從輸入到輸出）。其餘七項適用才寫：背景 → Intent／Approach；關鍵概念 → domain-modeling；輸入要求 → GIVEN/WHEN；邊界／錯誤處理 → 額外 Scenario；APIs／提示 → Approach 或 `design.md`
   - `proposal.md`：`## Intent`（規範目的，適用時補背景）/ `## Scope`（In scope / Out of scope）/ `## Approach`（適用時寫 APIs、建議演算法／資料結構）
   - `design.md`（採 OpenSpec 預設：小改動可略過、不要建立空檔；有架構取捨、新模組／接縫、或需要留下技術債時才寫）：`## Technical Approach` / `## Architecture Decisions` / `## Testing Strategy`（含「Seam（測試接縫）」「測試案例矩陣（Test Matrix）」固定小節，矩陣須涵蓋主路徑逐步範例）/ `## Technical Debt & Follow-up Notes`；一旦撰寫，沒有內容也要保留標題填「無」，不可留白或整段刪除
   - `specs/<domain>/spec.md`（delta，可能有多個 domain）：只用 `## ADDED Requirements` / `## MODIFIED Requirements` / `## REMOVED Requirements` 三種分節，`### Requirement:`（SHALL/MUST/SHOULD，一個 Requirement 只講一件事，含輸出要求）+ `#### Scenario:`（逐步邏輯 + GIVEN/WHEN/THEN，至少一個主路徑須含從輸入到輸出的逐步解釋，THEN 須含輸出格式／約束）；新建 domain 才加 `## Purpose`（與 Intent 對齊，或直接採用使用者透過 `_ask_domain_purpose()` 指定的文字，見上方「Domain 歸屬確認」）；純重構/文件/設定變更可在 `.openspec.yaml` 設 `skip_specs: true` 略過；REMOVED 移除某 domain 最後一個 Requirement 時需設 `retire_capabilities: true` 才會被 archive 一併刪除該 domain 的 spec。寫之前須先 Read/Grep 目標專案已合併的 `openspec/specs/<domain>/spec.md`（不是這次 change 的 delta），逐一比對既有 Requirement 的規範範圍：能合併或完全重複就用 MODIFIED 改寫，找不到才用 ADDED，避免同一件事拆成多個重疊的 Requirement；Requirement／Scenario 標題用抽象措辭涵蓋規則本身，不寫死具體數量或列舉值（例如「兩個權限皆為 true」），否則功能擴充時舊標題對不上新情況，被迫另開一個而非既有規則自然涵蓋；Requirement 與 Scenario（含逐步邏輯）都只能用自然語言描述規範（系統對外呈現的行為與約束），不寫實作細節（不限技術棧：前端 DOM/CSS/元件庫、後端 DB 欄位型別/SQL/框架 API/內部函式類別變數名稱之外，也包括具體程式碼片段或條件式如 `a.b === true`、框架特定的生命週期或渲染機制用語如掛載/mount/render——判斷依據一律換成業務語言），實作方式留給 `design.md` 的 Technical Approach
+    - **spec 是正向契約，不是實作差異紀錄**：只描述「系統保證具備哪些行為」。讀者不知道歷史版本，不提某個行為就等同不保證它存在，所以不需要也不可以另外宣告它不在——禁止 `MUST NOT 顯示某元件`、帶負向語意的 Scenario 標題（`Scenario: 不顯示統計文字`）、以「不存在的行為」為主要斷言的 Scenario。`MUST NOT` 唯一合法用途是描述正向 Scenario 的副作用約束（例：正向 Scenario 是「滑到底載入下一批」，副作用 AND 子句 `MUST NOT` 在 `hasMore=false` 後繼續發出請求）
+    - **以 `openspec/specs` 為唯一基準，不從 proposal 翻譯**：既有 spec 提及的行為本次修改 → MODIFIED、完全移除 → REMOVED、未提及而本次新增 → ADDED；**既有 spec 未提及、本次只是從程式碼移除 → 不寫任何條文**（從未 specced 的東西，移除不需要 spec 紀錄，否則產出的是憑空冒出來的「幽靈功能」規格）。`proposal.md` 的 Scope／Approach 講的是工程任務（HOW）不是規格項目（WHAT），禁止把「移除 X 元件」「刪掉 Y API call」翻譯成 Requirement 或 Scenario
+    - **消費者視角自檢**：只寫最外層消費者能從邊界外觀察並驗證的事，以「若完全重寫內部實作，這條規格還成立嗎？」自問——成立才是驗收標準，不成立就該移到 `design.md`
+    - **Scenario 對應行為分支，不列舉資料變體**：每個 Scenario 必須對應一個不同的行為結果、政策或約束；同一條規則套不同輸入資料不另開 Scenario，合進範例或 GIVEN 前提
+    - **API 欄位名稱分前後端**：前端消費端禁止把 endpoint path、request/response 欄位名稱寫進 spec（改用業務描述，欄位名稱留給 `design.md`）；但當本次交付物本身就是 API 合約（`backend-api` 類型專案，或任務明確指出要定義 endpoint／改 response schema）時，這些就是對外承諾、屬於可觀察輸出，可直接寫進 SHALL/MUST 與 Scenario 的 THEN
   - `tasks.md`：`## N. <群組>` + `- [ ] N.M <任務>` checkbox、階層編號——這份檔案本身就是任務清單；`execute` 與 `review` 都自行 Read 完整 change 資料夾（不從 `state["plan"]` 注入扁平清單），`execute` 逐項勾選、`review` 核對完成度
+    - **測試刪除任務必須明確列出**：`MODIFIED` 後某些 Scenario 標題不再出現於新版本，要排「移除 `<消失的 Scenario 標題>` 測試」；`REMOVED` 整條 Requirement，要排 Requirement 層級的「移除相關測試」，**並**為其下每個 Scenario 各排一個「移除 `<Scenario 標題>` 測試」。因為 Scenario 標題就是測試函式名稱，`execute` 完全依賴 tasks.md 定位該刪哪些測試；沒列出來的測試會殘留，而殘留的舊測試會讓 `review` 的 Spec 追溯誤判
   - Claude 完成撰寫、`_run_with_grilling()` 的問答迴圈結束後，`_run_with_validate()` 呼叫
     `openspec_runner.validate_change()` 執行 `openspec validate <change-name> --json --strict`：
     只有 `ERROR` 等級的 issue 會擋下（`WARNING` 不阻擋），有的話把訊息組進一則新 prompt、用
@@ -384,6 +402,29 @@ proposal.md/design.md/specs delta/tasks.md 的空白骨架——這部分只留�
 （`Task` 是必要的：`code-review` skill 需要平行呼叫 Standards / Spec 兩個 sub-agent）
 **Timeout：** 600 秒（每次嘗試）
 
+**Spec ↔ 測試追溯：由 Python 在呼叫 Claude 之前跑完（`_run_spec_trace_check()`）。** 抽出該 change
+`specs/**/*.md` 裡所有 `#### Scenario:` 標題，逐一 `grep -r` 目標專案原始碼找有無名稱完全相同的
+`describe`／`test`（限常見測試語言的副檔名，排除 `node_modules`／`dist`／`build`／`.next`）。這件事
+原本是 `_SYSTEM` 的一條指示，要 Claude 自己列標題、自己 grep、自己把缺漏當成阻塞性問題——身為自然
+語言指示，它完全依賴 Claude 真的照做，實測出現過「有 Scenario 根本沒有對應測試，卻仍回報
+`Ready to merge? Yes`」的情況。搬到 Python 之後，結果是算出來的而不是請求來的。
+
+結果分兩條路：
+
+- **有 Scenario 缺測試**：**直接短路，這一輪完全不呼叫 Claude**，回傳 `review_blocking: True` +
+  `review_level: "修補"`，`review_result` 裡列出缺哪幾個 Scenario，直接進下一輪 replan。這是
+  `review_node` 唯一一條**不呼叫 Claude 就做出阻塞判定**的路徑（另外兩條不呼叫 Claude 的路徑
+  ——找不到 `code-review` skill、找不到 change 目錄——分別是 SKIPPED 與 error，不是判定），
+  也讓「`execute` 漏寫測試」的代價從「一份可能放水的報告」變成「一輪確定會補上的 replan」。
+  注意這條路徑的 `review_result` 只有 `## Spec` 一段、沒有 Standards 軸，那是短路的正常產物，
+  不是報告被截斷
+- **全部都有對應測試**：把逐項的 ✅／❌ 清單以 `<<SPEC_TRACE_RESULT>>` 注入 prompt 供報告引用，
+  `_SYSTEM` 的第 3 條指示因此改成「直接引用上方事前檢查結果，不要自己再 grep」
+
+`_SYSTEM` 的 `Ready to merge?` 判準裡仍保留一條「Spec 追溯有缺漏一律 No，且優先於不影響功能正確性
+的判斷」。實務上這條幾乎不會被觸發——真有缺漏時上面那條短路已經先回去了，注入的清單必定全為 ✅；
+它留著是防 grep 比對到同名但其實不是測試的字串時，Claude 仍有依據判 No。
+
 **完整性檢查與重試（`_is_well_formed_review()`）：** `claude -p` 是一次性、非互動呼叫，沒有「之後
 再回來補完」這回事——但實測過（含一次真實失敗案例的 log 分析）發現 Claude 有機率把 Task sub-agent
 或 Bash 測試指令視為可以延後處理，寫下「等測試結果回來後整合最終報告」之類的話就提前結束這輪回應，
@@ -423,8 +464,9 @@ skill 全文、兩輪 sub-agent 往返、額外驗證步驟之後的深層決策
 
 1. 確認 TASK 清單完整性：Read `tasks.md`，依其 checkbox 狀態（`- [x]` 已完成／`- [ ]` 未完成）逐項核對，列出未完成的 TASK 編號
 2. 依偵測到的專案讀取其說明檔中列出的測試指令並實際用 Bash 執行測試（找不到則探索 `package.json` / `pyproject.toml`）；測試失敗計入 Standards 軸的問題
+3. Spec ↔ 測試追溯：**直接引用** `<<SPEC_TRACE_RESULT>>` 的事前檢查結果納入 Spec 軸報告，不要自己再 grep（見上方「Spec ↔ 測試追溯」）。另外用自己的判斷檢查本次新增或改動的測試有無重複、情境可否合併，重複或高度重疊的以 `SUGGESTION` 列出——但**不得建議刪到讓任何 Scenario 完全沒有對應測試**
 
-（原本這裡還有第 3 步「確認 docs/ 商業邏輯說明文件是否同步更新」，已從 `_SYSTEM` 移除——`execute`
+（原本還有一步「確認 docs/ 商業邏輯說明文件是否同步更新」，已從 `_SYSTEM` 移除——`execute`
 自己已經有「文件同步要求」，review 端再重複檢查一次不是必要步驟，且步驟越多，Claude 在深層
 agentic 流程中提前結束回應的風險越高，見上方「完整性檢查與重試」的說明。）
 
@@ -456,7 +498,7 @@ SUGGESTION 2: [建議內容與理由]
 
 **嚴重程度分流（`review_node` 的核心邏輯，`nodes/review.py`）：**
 
-`Ready to merge? No` 只保留給**嚴重影響功能**的問題（核心邏輯錯誤、功能無法正常運作、資料損毀或資安風險、架構根本偏差、TASK 大量未完成）——這類問題一律自動判定為需要重新規劃，不詢問人工：
+`Ready to merge? No` 保留給兩類情況：**嚴重影響功能**的問題（核心邏輯錯誤、功能無法正常運作、資料損毀或資安風險、架構根本偏差、TASK 大量未完成），以及**Spec 追溯發現任何 Scenario 缺少對應測試**（這一類通常在上方的事前檢查就已經短路返回「修補」，不會走到這裡）。兩者都一律自動判定為需要重新規劃，不詢問人工：
 
 | 等級     | 觸發條件                                                              |
 | -------- | --------------------------------------------------------------------- |
@@ -564,11 +606,11 @@ embedding 模型輸出 L2 正規化後的 384 維向量，存為 `float[384]` bl
 
 ### 5. Skill 系統作為知識注入
 
-`skill_loader.py` 讀取 Claude Code Skill 文件，以完整內容或僅列名稱的方式注入系統提示。查找順序為專案內建的 `AgentLoop/.claude/skills/<name>/` 優先，找不到才 fallback 到使用者本機的 `~/.claude/skills/<name>/`。目前 `_FULL_CONTENT_SKILLS` 白名單完整注入的是 `grilling`、`domain-modeling`、`code-review`、`tdd`。
+`skill_loader.py` 讀取 Claude Code Skill 文件，以完整內容或僅列名稱的方式注入系統提示。查找順序為專案內建的 `AgentLoop/.claude/skills/<name>/` 優先，找不到才 fallback 到使用者本機的 `~/.claude/skills/<name>/`。目前 `_FULL_CONTENT_SKILLS` 白名單完整注入的是 `grilling`、`domain-modeling`、`code-review`、`tdd`、`openspec-authoring`。
 
-**為什麼 `tdd` 也一定要完整注入，不能只列名稱：** 實測過 `claude -p`（`claude_runner.py` 唯一呼叫 `claude` CLI 的地方）發現，Claude Code **原生**的 skill 探索機制（在系統提示的 `available skills` 清單、`Skill` 工具背後）只認執行者的 `$HOME/.claude/skills/`，跟 `claude_runner.py:165` 呼叫 subprocess 時設的 `cwd=REPO_ROOT` 完全無關——不管 cwd 指到哪裡，找到的永遠是同一份 `$HOME/.claude/skills/` 清單（曾用一個完全空的 cwd 目錄重複驗證過）。這代表 `AgentLoop/.claude/skills/` 底下隨版控帶著走的內建副本，原生機制**永遠不會發現**；只列名稱的 skill 能不能被 Claude 用到，完全取決於執行者自己的 `~/.claude/skills/` 剛好有沒有同名 skill——換一台機器、換一個沒有這些 skill 的使用者，就會失效，違反本檔案開頭「讓專案自帶所需 skill、不依賴使用者本機設定」的設計目標。白名單機制（Python 直接讀檔、逐字塞進 prompt）不經過原生探索，因此不受這個限制，是唯一能保證跨機器一致運作的方式。
+**為什麼 `tdd` 也一定要完整注入，不能只列名稱：** 實測過 `claude -p`（`claude_runner.py` 唯一呼叫 `claude` CLI 的地方）發現，Claude Code **原生**的 skill 探索機制（在系統提示的 `available skills` 清單、`Skill` 工具背後）只認執行者的 `$HOME/.claude/skills/`，跟 `claude_runner.py:165` 呼叫 subprocess 時設的 `cwd=REPO_ROOT` 完全無關——不管 cwd 指到哪裡，找到的永遠是同一份 `$HOME/.claude/skills/` 清單（曾用一個完全空的 cwd 目錄重複驗證過）。這代表 `AgentLoop/.claude/skills/` 底下隨版控帶著走的內建副本，原生機制**永遠不會發現**；只列名稱的 skill 能不能被 Claude 用到，完全取決於執行者自己的 `~/.claude/skills/` 剛好有沒有同名 skill——換一台機器、換一個沒有這些 skill 的使用者，就會失效，違反本檔案開頭「讓專案自帶所需 skill、不依賴使用者本機設定」的設計目標。白名單機制（Python 直接讀檔、逐字塞進 prompt）不經過原生探索，因此不受這個限制，是唯一能保證跨機器一致運作的方式。`openspec-authoring` 的情況更極端：它只存在於 `AgentLoop/.claude/skills/`，任何人的 `~/.claude/skills/` 都沒有同名 skill，只列名稱的話永遠解析不到，等於規格格式整段消失。
 
-規格格式由 `analyze_plan` 的 `_OPENSPEC_ARTIFACT_RULES` 寫死，執行流程寫在 `execute` 的 `_SYSTEM`。fallback 路徑（`~/.claude/skills/<name>/`）仍保留給其餘依技術棧動態選用、專案未內建的 skill（例如 `vue-best-practices`、`nuxt-vitest-msw`）——這些完全交給 Claude Code 自己原生的 skill 探索機制處理，不經過 `skill_loader.py`，所以確實受「執行者本機有沒有這個 skill」影響；這是刻意的設計取捨，因為 AgentLoop 不可能預先知道每個目標專案會用到哪些技術棧專屬的 skill。
+規格格式由 `openspec-authoring` skill 提供（原本寫死在 `analyze_plan` 的 `_OPENSPEC_ARTIFACT_RULES`，見上方「規劃 Agent」），執行流程寫在 `execute` 的 `_SYSTEM`。fallback 路徑（`~/.claude/skills/<name>/`）仍保留給其餘依技術棧動態選用、專案未內建的 skill（例如 `vue-best-practices`、`nuxt-vitest-msw`）——這些完全交給 Claude Code 自己原生的 skill 探索機制處理，不經過 `skill_loader.py`，所以確實受「執行者本機有沒有這個 skill」影響；這是刻意的設計取捨，因為 AgentLoop 不可能預先知道每個目標專案會用到哪些技術棧專屬的 skill。
 
 **`AgentLoop/.claude/skills/code-review/SKILL.md` 是刻意跟個人版本分岔的專案內建副本，不是單純 vendor 進來的原文複製。** 原版 skill 的「Pin the fixed point」「Identify the spec source」兩步（問使用者要比對哪個 fixed point、去 issue tracker／`docs/`／`.scratch/` 找規格）在 `review` 這裡完全不會被執行到——`review_node()` 把這兩個參數釘死成固定值（fixed point 永遠是 `HEAD`、spec 來源永遠是 OpenSpec change 資料夾，見 `_SYSTEM` 的「依 code-review skill 執行時的具體參數」），原本得靠 `_SYSTEM` 開頭額外寫一段話覆蓋這兩步。這份專案內建副本直接把這兩步從 skill 文字裡拿掉（`## Process` 從「Identify the standards sources」開始算第 1 步），改成一句話聲明「fixed point 與 spec 來源由呼叫端提供，不要詢問使用者或自找」，讓 `_SYSTEM` 那段覆蓋文字也跟著簡化——省下約 1035 字元、且不再讓 Claude 同時看到「skill 說要問使用者」跟「`_SYSTEM` 說不要問」兩份互相矛盾的指示。之後若要同步升級這個 skill（例如 smell baseline 或 sub-agent brief 有更新），要手動比對 `~/.claude/skills/code-review/SKILL.md` 合併，不會自動同步。
 
