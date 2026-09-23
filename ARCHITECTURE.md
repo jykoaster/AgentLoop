@@ -62,7 +62,7 @@ change/spec-delta 規則；review 通過後由 `archive` 節點呼叫 `openspec 
 
 ```python
 class AgentState(TypedDict):
-    task: str              # 使用者輸入的任務描述
+    task: str              # 使用者輸入的任務描述（analyze_plan／review 注入；execute 不讀、不注入）
     analysis: str          # proposal.md 全文，供 human_confirm 顯示
     plan: list[str]        # tasks.md checkbox 清單，供 human_confirm 顯示（execute／review 自行讀檔，不注入）
     execution_result: str  # 執行節點的文字摘要（除錯／state-file；review 不注入，改讀 git diff 與 OpenSpec）
@@ -364,19 +364,20 @@ validate 的錯誤修正也接到同一套「有問題就等使用者、否則�
 **執行前準備（必須完成）：**
 
 1. Python 先用 `git_ops.ensure_on_branch()` 把目標專案切到 `state["branch_name"]`（已存在則 checkout，不存在則建立）；失敗則 `status: "error"`，不呼叫 Claude
-2. Read `openspec/changes/<change_name>/` 下的 proposal.md、specs/**/*.md、tasks.md（若有 design.md 一併讀取）。規格、驗收條件與任務清單以這些檔案為準，**不**把 `state["plan"]` 扁平清單貼進 prompt
+2. Read `openspec/changes/<change_name>/` 下的 proposal.md、specs/**/*.md、tasks.md（若有 design.md 一併讀取）。規格、驗收條件與任務清單以這些檔案為準，**不**把 `state["plan"]` 扁平清單貼進 prompt，也 **不**注入 `state["task"]`（原始使用者描述只給規劃用；execute 的工作範圍就是 change 資料夾，再貼一次會讓它重新診斷原始問題、略過 tasks.md 已收斂的剩餘項）
 3. 依 `project_context.build_project_doc_hint_for(project_dir)` 指名的目標專案，Read 讀取其 `CLAUDE.md` / `AGENT.md`，了解架構、指令（測試、lint、build 等）、目錄慣例、程式碼規範與技術棧；找不到說明檔則自行 Read/Glob/Grep 探索並比對現有風格
 4. 依偵測到的技術棧，**自行**從可用的 skills 中挑選並使用適合的其他 skill（例如 Vue 專案適用 `vue-best-practices`、Nuxt + Vitest 專案適用 `nuxt-vitest-msw`）——不寫死任何特定技術棧的 skill 清單。這些完全不經過 `skill_loader.py`，靠 Claude Code 自己原生的 skill 探索機制（只認執行者 `$HOME/.claude/skills/`，見下方「Skill 系統作為知識注入」）；`tdd` 已固定完整注入（見下方「注入的 Skills」），不需要另外挑選
 5. 若該專案 `docs/` 目錄存在，讀取其下所有現有文件，了解商業邏輯說明；`docs/` 目錄不存在時不需自行建立
 
-**執行方式：** 依 change 資料夾內 `tasks.md` 的順序嚴格依序完成：
+**執行方式：** 依 change 資料夾內 `tasks.md` 的順序嚴格依序處理（不重排）：
 
+- `- [ ]` 必須執行；`- [x]` **預設略過**，略過前先 Read/Grep 核對該項聲稱完成的檔案是否真的在磁碟上、內容是否對得上規格——對得上才略過，對不上才重做該項。這條寫在 `_SYSTEM` 裡，所以即使 session 失效、冷啟動重送完整 prompt，也不會把已完成的實作重做一遍（`RESUME_AFTER_INTERRUPT_PROMPT` 另外保住「做到一半」的脈絡）
 - **不** commit——是否提交由使用者事後決定
 - **不**自行呼叫 `/code-review`——後續有獨立的 Review Agent 依專案規格審查本次修改
 - tasks.md 中若有「撰寫／更新測試」的 TASK，**必須**依 `tdd` skill 的紅-綠循環執行：先寫會失敗的測試，再寫最小可行實作讓測試通過，最後重構；不可先完成其他 TASK 的實作、事後才回頭補測試
 - 過程中定期執行型別檢查與單一測試檔案，全部 TASK 完成後執行完整測試
 
-嚴格依序完成 `tasks.md` 中的每一項；先 Read 再 Write/Edit，避免覆蓋不相關程式碼；風格、命名、目錄結構、i18n／型別／auto-generated 檔案等規則，一律依該專案 `CLAUDE.md` / `AGENT.md` 的說明判斷，不硬編碼在 prompt 裡。每完成一個 TASK，立即用 Edit 把該任務對應的 OpenSpec change（`<project_dir>/openspec/changes/<change_name>/tasks.md`，路徑由 `AgentState["project_dir"]`/`["change_name"]` 組成）裡對應的 checkbox 從 `- [ ]` 改成 `- [x]`，讓這份檔案即時反映實際完成進度，供 `review` 節點核對。
+未完成項嚴格依序做完；先 Read 再 Write/Edit，避免覆蓋不相關程式碼；風格、命名、目錄結構、i18n／型別／auto-generated 檔案等規則，一律依該專案 `CLAUDE.md` / `AGENT.md` 的說明判斷，不硬編碼在 prompt 裡。每完成一個 TASK，立即用 Edit 把該任務對應的 OpenSpec change（`<project_dir>/openspec/changes/<change_name>/tasks.md`，路徑由 `AgentState["project_dir"]`/`["change_name"]` 組成）裡對應的 checkbox 從 `- [ ]` 改成 `- [x]`，讓這份檔案即時反映實際完成進度，供 `review` 節點核對。
 
 **文件同步要求：** 是否需要同步更新文件，依該任務所屬專案的 `CLAUDE.md` / `AGENT.md` 判斷——說明檔要求同步維護 `docs/` 商業邏輯說明文件才需處理（依 `tasks.md` 中對應的文件更新 TASK 執行，或在說明檔明確要求但 `tasks.md` 未包含時主動補上）；說明檔未提及此類慣例時不需要主動撰寫或更新文件。
 
@@ -705,7 +706,7 @@ You've hit your Opus limit · resets 3:45pm
 
 - 中斷時存下 `ClaudeResult.session_id`；該次連 id 都沒拿到（上限發生在最開頭）則保留插槽原本的值，不覆蓋成空。`analyze_plan` 的 guard／前置步驟（切分支、`openspec init`）失敗時也保留，因為那時根本還沒呼叫 Claude
 - 產出結論時**清掉**——之後再接回只會帶進過期脈絡（例如下一輪 `execute` 面對的規格可能已被 replan 改寫）
-- 重跑（`--node <節點>` 選同一個 change）時用 `--resume` 接回，並只送 `RESUME_AFTER_INTERRUPT_PROMPT` 這段續作指示，**不重送完整 prompt**——否則沒有記憶的新 session 會依 `_SYSTEM` 的「逐一執行每個 TASK、不跳過」把已完成的實作重做一遍（`_SYSTEM` 本身沒有「已打勾的跳過」這條規則，這個保護只存在於續作指示裡）
+- 重跑（`--node <節點>` 選同一個 change）時用 `--resume` 接回，並只送 `RESUME_AFTER_INTERRUPT_PROMPT` 這段續作指示，**不重送完整 prompt**——沒有記憶的新 session 會重新探索、把做到一半的最後一項從頭來。execute 的 `_SYSTEM` 已要求略過核對過的 `- [x]`，冷啟動不再重做已完成項；接回仍能保住做到一半的脈絡，也避免再付一次完整探索
 - session 已失效（換機器、`agent_home` volume 重建、Claude 端過期）時退回完整 prompt 重跑；但**接回後又撞上限不算失效**，維持回報以便再存一次 id，避免退回完整 prompt 而重做已完成的工作
 
 `call_resuming()` 接收呼叫端提供的 `run(prompt, resume)`，因為各節點對 Claude 的呼叫包著不同的自有迴圈：`analyze_plan` 是 grilling 問答加 `openspec validate` 修正迴圈（後者自己也會撞上限，所以 `_run_with_validate()` 一併回傳最後的 session id），`review` 是「報告提前結束就要求補完」的重試迴圈（接回失敗而退回完整 prompt 時，補完次數的額度會重新計算）。`analyze_plan` 接回時還會**略過 domain 歸屬提問**——那個答案只用來組完整 prompt，接回時不會送出。

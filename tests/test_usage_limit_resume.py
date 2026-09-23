@@ -205,7 +205,11 @@ class TestExecuteSessionResume:
         _, mock_call = self._run(state, [_claude_result("實作完成")], tmp_path)
 
         assert mock_call.call_args[1]["resume"] is None
-        assert "執行前準備" in mock_call.call_args[0][0]
+        prompt = mock_call.call_args[0][0]
+        assert "執行前準備" in prompt
+        # 冷啟動也必須略過已核對的 [x]，不能只靠續作指示
+        assert "預設略過" in prompt
+        assert "test task" not in prompt
 
     def test_no_resume_when_no_prior_session(self, tmp_path):
         _make_change_dir(tmp_path)
@@ -216,6 +220,8 @@ class TestExecuteSessionResume:
         args, kwargs = mock_call.call_args
         assert kwargs["resume"] is None
         assert "執行前準備" in args[0]
+        # 原始使用者描述不進 execute prompt，否則會被當成待修 bug 而重跑診斷
+        assert "test task" not in args[0]
 
     def test_stale_session_falls_back_to_full_prompt(self, tmp_path):
         """session 已失效（非上限錯誤）→ 退回完整 prompt 重跑，而不是直接失敗。"""

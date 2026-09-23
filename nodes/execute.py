@@ -27,7 +27,6 @@ _SYSTEM = f"""你是一位資深全端工程師，負責「執行」階段。
 在開始任何修改前，必須先：
 1. 用 Read 讀取 `<<CHANGE_LOCATION>>` 下的 proposal.md、specs/**/*.md、tasks.md
    （若有 design.md 一併讀取；小改動可能沒有此檔，不視為缺漏）。
-   規格、驗收條件與任務清單以這些檔案為準，不要依賴本 prompt 是否貼上 TASK 正文。
 2. 依下方「目標專案」讀取其 CLAUDE.md / AGENT.md，了解該專案的架構、指令（測試、lint、build 等）、
    目錄慣例、程式碼規範，以及**技術棧**；找不到說明檔則自行用 Read/Glob/Grep 探索程式碼並比對現有風格
 3. 依偵測到的技術棧，自行從你可用的 skills 中挑選並使用適合的其他 skill
@@ -39,8 +38,9 @@ _SYSTEM = f"""你是一位資深全端工程師，負責「執行」階段。
 
 ## 執行方式
 
-依 `<<CHANGE_LOCATION>>/tasks.md` 的順序**嚴格依序**完成所有修改：
-- 逐一執行每個 TASK，不跳過、不重排順序
+依 `<<CHANGE_LOCATION>>/tasks.md` 的順序**嚴格依序**處理（不重排）：
+- `- [ ]` 的 TASK 必須執行，不得跳過
+- `- [x]` 的 TASK **預設略過，不要重做**。略過前先用 Read/Grep 核對該 TASK 聲稱完成的檔案是否真的在磁碟上、內容是否對得上規格；對得上就略過，對不上（checkbox 已勾但實作缺漏或不完整）才重做該項並維持勾選。這個規則在全新 session 與接回中斷 session 都適用——不要因為 prompt 說「完成所有修改」就把已完成的項目重做一遍
 - 用 Read 工具讀取現有內容，再用 Write/Edit 工具寫入修改
 - 用 Bash 執行必要指令
 - 程式碼風格、命名慣例、目錄結構、i18n／型別／auto-generated 檔案等規則，一律依照該專案
@@ -55,8 +55,7 @@ _SYSTEM = f"""你是一位資深全端工程師，負責「執行」階段。
     不可讓原本有測試的 Scenario 在修改後變成沒有任何測試
 - **Scenario ↔ 測試名稱對應**：`<<CHANGE_LOCATION>>/specs/**/*.md` 裡每一個 `#### Scenario:` 標題，
   都必須有一個名稱**完全相同**的 `describe(...)` / `test(...)` / `it(...)`（或對應語言的測試語法）。
-  所有 TASK 完成後，用 Grep 逐一確認；若有 Scenario 缺少對應測試，**必須補寫後才能輸出最終摘要**
-- 過程中定期執行型別檢查與單一測試檔案；全部 TASK 完成後再跑完整測試（見下方）
+- 全部 TASK 完成後再跑完整測試（見下方）
 - **不要** commit——修改是否提交由使用者事後決定
 - **不要**自行呼叫 /code-review——後續有獨立的 Review Agent 依專案規格審查本次修改，此處只需完成實作與測試
 
@@ -134,7 +133,11 @@ def execute_node(state: AgentState) -> dict:
             .replace("<<CHANGE_LOCATION>>", change_location)
             .replace("<<BRANCH_NAME_VALUE>>", branch_name)
         )
-        prompt = f"{system}\n\n{skills_block}\n\n任務：{state['task']}"
+        prompt = (
+            f"{system}\n\n{skills_block}\n\n"
+            f"請依 `{change_location}` 的 OpenSpec change 執行："
+            "讀取該目錄後，依 tasks.md 處理未完成項。"
+        )
         result = call_resuming(
             lambda p, resume: call_claude(p, tools="full", timeout=_TIMEOUT, model=_MODEL, resume=resume),
             prompt, prior_session, "執行 Agent",

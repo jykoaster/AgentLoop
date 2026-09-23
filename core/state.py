@@ -2,7 +2,7 @@ from typing import TypedDict
 
 
 class AgentState(TypedDict):
-    task: str
+    task: str              # 使用者輸入的任務描述（analyze_plan／review 注入；execute 不讀）
     analysis: str          # proposal.md 全文，供 human_confirm 顯示
     plan: list[str]        # tasks.md checkbox 清單，供 human_confirm 顯示（execute／review 自行讀檔）
     execution_result: str  # 執行節點的文字摘要（除錯／state-file；review 不注入）

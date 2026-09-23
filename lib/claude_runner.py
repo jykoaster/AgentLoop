@@ -121,9 +121,9 @@ def call_resuming(
     """上次因用量上限中斷、且 session id 已存進 state 時，接回同一個 Claude session。
 
     接回時只送 `RESUME_AFTER_INTERRUPT_PROMPT` 這段續作指示，**不重送完整 prompt**：
-    節點的 `_SYSTEM` 是「從頭把整份工作做完」的語氣（execute 甚至明寫「逐一執行每個
-    TASK、不跳過」），沒有記憶的新 session 照著做會把已完成的部分重做一遍；「先確認實際
-    進度再續作」這個保護只存在於續作指示裡。
+    沒有記憶的新 session 會重新探索、把做到一半的最後一項從頭來；execute 的 `_SYSTEM`
+    已要求略過核對過的 `- [x]`，所以冷啟動不再重做已完成項，但接回仍能保住「做到一半」
+    的脈絡，也避免再付一次完整探索。
 
     `run(prompt, resume)` 由呼叫端提供，因為各節點對 Claude 的呼叫包著不同的自有迴圈
     （analyze_plan 的 grilling 問答、review 的報告補完重試），不是單純一次 `call_claude`。
