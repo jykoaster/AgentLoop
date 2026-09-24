@@ -126,9 +126,14 @@ def archive_node(state: AgentState) -> dict:
 
     if result.ok:
         archived = result.data.get("archive", {})
+        vacated_as = result.data.get("vacated_as")
+        vacated_note = (
+            f"\n  既有 archive 已改名為 {vacated_as}，避免覆寫" if vacated_as else ""
+        )
         print(
             f"{_BANNER}  [Archive] 完成，已合併進 "
-            f"{project_dir}/openspec/specs/（{archived.get('archivedAs', change_name)}）{_RESET}\n",
+            f"{project_dir}/openspec/specs/（{archived.get('archivedAs', change_name)}）"
+            f"{vacated_note}{_RESET}\n",
             flush=True,
         )
     else:
