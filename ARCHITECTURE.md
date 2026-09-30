@@ -74,6 +74,7 @@ class AgentState(TypedDict):
     human_feedback: str    # 使用者在 human_confirm 拒絕計畫時填寫的修改意見
     change_name: str       # OpenSpec change 名稱（由 branch_name 轉 kebab-case）；任務開始時問一次，全程沿用
     branch_name: str       # 使用者指定的 git 分支（必填）；規劃／執行／審查／archive 都切到此分支
+    domains: list[str]     # 本次 change 歸屬的 OpenSpec domain；初始規劃問一次後寫入 state.json，同一 change 再規劃時沿用
     session_node: str      # 中斷中的 Claude session 屬於哪個 node（""＝沒有）；每個 change 同時
                            # 只會有一個，analyze_plan／execute／review 共用這一個插槽
     session_id: str        # 該 session 的 id，撞到用量上限後可 --resume 接回；只透過
@@ -226,24 +227,33 @@ OpenSpec change 位置，不需要各自重新判斷；`archive_node` 單獨執�
 
 1. `openspec_runner.ensure_initialized()`：`<目標專案>/openspec/` 不存在才執行一次性
    `openspec init --tools claude --force`，已存在則直接略過
-2. `_ask_domain_selection()`：用 `_list_existing_domains()` 列出 `<目標專案>/openspec/specs/`
-   底下既有的 domain（資料夾名稱）；沒有既有 domain 時不提問，直接視為新建 domain。有既有
-   domain 時在終端機列出清單 + 一個「以上皆非，建立新 domain」選項，讓使用者輸入編號選擇本次
-   規格 delta 歸屬哪個（可用逗號輸入多個編號，對應「同一任務涉及多個既有 domain」的情況）；
-   非互動式環境預設視為新建 domain。選定的既有 domain 名稱清單會組進 system prompt 的
-   `_DOMAIN_CONTEXT_EXISTING` 區塊（沿用名稱、不加 `## Purpose`）。回傳空清單（確定是純粹新建
-   domain：沒有既有 domain，或使用者選了「建立新 domain」）時，額外呼叫 `_ask_domain_purpose()`
-   讓使用者選填這個新 domain 的 Purpose 文字；有填就用 `_DOMAIN_CONTEXT_NEW_WITH_PURPOSE`（Claude
-   直接採用這段文字寫入 `## Purpose`，不自己改寫），留白（含非互動式環境、使用者中止）則用
-   `_DOMAIN_CONTEXT_NEW`（Claude 依任務語意自行命名 domain 並撰寫 `## Purpose`）。若使用者選擇同時
-   涉及既有 domain 又可能需要新 domain（回傳清單非空），是否額外建立新 domain 完全交給 Claude 判斷，
-   不會觸發這個 Purpose 提問——Python 只在「確定會建立新 domain」時才問
+2. Domain 歸屬：先 `_recover_domains()`——依序看當前 `AgentState["domains"]`、同 change 的
+   `.agentloop/changes/<change_name>/state.json`、`openspec/changes/<change_name>/specs/`、
+   以及（change 已被 archive 時）`openspec/changes/archive/<YYYY-MM-DD-name>/specs/`。
+   還原得到名稱就印「沿用上次的 domain」、注入 `_DOMAIN_CONTEXT_EXISTING`，
+   **不再提問**（review 通過後驗收又開一輪完整工作流、或 `--node analyze_plan` 進同一個 change
+   時，不該再選一次）。還原不出才 `_ask_domain_selection()`：用 `_list_existing_domains()` 列出
+   `<目標專案>/openspec/specs/` 底下既有的 domain（資料夾名稱）；沒有既有 domain 時不提問，直接
+   視為新建 domain。有既有 domain 時在終端機列出清單 + 一個「以上皆非，建立新 domain」選項，讓
+   使用者輸入編號選擇本次規格 delta 歸屬哪個（可用逗號輸入多個編號，對應「同一任務涉及多個既有
+   domain」的情況）；非互動式環境預設視為新建 domain。選定的既有 domain 名稱清單會組進 system
+   prompt 的 `_DOMAIN_CONTEXT_EXISTING` 區塊（沿用名稱、不加 `## Purpose`）。回傳空清單（確定是
+   純粹新建 domain：沒有既有 domain，或使用者選了「建立新 domain」）時，額外呼叫
+   `_ask_domain_purpose()` 讓使用者選填這個新 domain 的 Purpose 文字；有填就用
+   `_DOMAIN_CONTEXT_NEW_WITH_PURPOSE`（Claude 直接採用這段文字寫入 `## Purpose`，不自己改寫），
+   留白（含非互動式環境、使用者中止）則用 `_DOMAIN_CONTEXT_NEW`（Claude 依任務語意自行命名
+   domain 並撰寫 `## Purpose`）。若使用者選擇同時涉及既有 domain 又可能需要新 domain（回傳清單
+   非空），是否額外建立新 domain 完全交給 Claude 判斷，不會觸發這個 Purpose 提問——Python 只在
+   「確定會建立新 domain」時才問。規劃成功後把名稱寫進 `AgentState["domains"]`；若當次是「新
+   domain 且名稱由 Claude 自訂」，改從 change 資料夾的 `specs/` 回填
 3. `openspec_runner.ensure_change_created()`：change 資料夾不存在才執行 `openspec new change
    <name>`，已存在則直接略過
 
 這三步都不再透過 Claude 的 Bash 呼叫執行，Claude 收到的 system prompt 直接是已確定的結果
-（「目標專案與 Domain」區塊），不需要再探索或提問。此機制只在初始規劃跑，沿用階段
-（`_CHANGE_SETUP_EXISTING`）沿用同一個 change，不重新走這一步。
+（「目標專案與 Domain」區塊），不需要再探索或提問。domain 提問只在初始規劃且還原不出上次歸屬
+時跑；同一 change 再進初始規劃（驗收後開新一輪、或 change 已被 archive 後重建）會沿用
+`state.json` 裡的 `domains`。沿用階段（`_CHANGE_SETUP_EXISTING` 的 replan／human-revise）本來
+就不走這一步。
 
 **「重寫」等級的 rollback（已搬到 Python，呼叫 Claude 之前完成）：** 重新規劃若 `review_level`
 為「重寫」，在 `ensure_on_branch()` 之後、組 prompt 之前，呼叫 `git_ops.rollback_except_openspec()`：
@@ -579,7 +589,7 @@ embedding 模型輸出 L2 正規化後的 384 維向量，存為 `float[384]` bl
 
 每個節點讀取前一個節點填入的欄位，再將自己的輸出寫入對應欄位，例如：
 
-- `analyze_plan` → 填入 `analysis`、`plan`、`change_name`、`branch_name`、`project_dir`
+- `analyze_plan` → 填入 `analysis`、`plan`、`change_name`、`branch_name`、`project_dir`、`domains`
 - `human_confirm` → 填入 `status`（`"confirmed"` / `"needs_revision"` + `human_feedback` / `"aborted"`）
 - `execute` → 填入 `execution_result`、`status`
 - `review` → 填入 `review_result`、`review_level`、`review_blocking`、`status`

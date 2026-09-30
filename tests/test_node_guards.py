@@ -150,6 +150,34 @@ class TestAnalyzePlanGuards:
 
         assert "初始規劃" not in result.get("analysis", "")
 
+    def test_reuses_saved_domains_without_asking(self):
+        """同一 change 已有 domains → 初始規劃不再問 domain 歸屬"""
+        from AgentLoop.nodes.analyze_plan import analyze_plan_node
+
+        state = _base_state(
+            analysis="",
+            review_result="",
+            human_feedback="",
+            domains=["access-log"],
+        )
+        ok_result = MagicMock()
+        ok_result.ok = True
+        ok_result.error_text = ""
+        with patch("AgentLoop.nodes.analyze_plan.call_claude", return_value=_mock_claude_result("規劃完成")), \
+             patch("AgentLoop.nodes.analyze_plan.ensure_on_branch", return_value=(True, "ok")), \
+             patch("AgentLoop.nodes.analyze_plan.ensure_initialized", return_value=ok_result), \
+             patch("AgentLoop.nodes.analyze_plan.ensure_change_created", return_value=ok_result), \
+             patch("AgentLoop.nodes.analyze_plan._ask_domain_selection") as mock_ask, \
+             patch("AgentLoop.nodes.analyze_plan._ask_domain_purpose") as mock_purpose, \
+             patch("AgentLoop.nodes.analyze_plan._run_with_validate", return_value=("", "")), \
+             patch("AgentLoop.nodes.analyze_plan._read_change_artifacts", return_value=("analysis", ["- [x] t1"])):
+            result = analyze_plan_node(state)
+
+        mock_ask.assert_not_called()
+        mock_purpose.assert_not_called()
+        assert result.get("status") != "error"
+        assert result["domains"] == ["access-log"]
+
 
 # ── execute_node guards ───────────────────────────────────────────────────────
 

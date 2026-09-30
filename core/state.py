@@ -15,6 +15,7 @@ class AgentState(TypedDict):
     change_name: str     # OpenSpec change 名稱（由 branch_name 轉 kebab-case）；任務開始時問一次，全程沿用
     branch_name: str     # 使用者指定的 git 分支（必填）；規劃／執行／審查都在此分支上進行
     project_dir: str     # target project directory (relative to workspace root) this task's OpenSpec change lives in; resolved by analyze_plan before its initial-plan call, unchanged across replan/human-revise
+    domains: list[str]   # 本次 change 歸屬的 OpenSpec domain；初始規劃問一次後寫入，同一 change 再規劃時沿用、不再提問
     session_node: str    # 中斷中的 Claude session 屬於哪個 node（""＝沒有）；每個 change 同時只有一個，見 core/session.py
     session_id: str      # 該 session 的 id，撞到用量上限後可 --resume 接回；只透過 core/session.py 讀寫
     start_from: str      # transient routing hint: which node to enter first (read by _route_start in workflow.py); not persisted to state.json

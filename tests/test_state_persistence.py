@@ -328,6 +328,74 @@ class TestAskDomainSelection:
             assert _ask_domain_selection("my-project") == ([], "")
 
 
+# ── _recover_domains ──────────────────────────────────────────────────────────
+
+class TestRecoverDomains:
+    def test_prefers_state_over_files(self, tmp_project):
+        from AgentLoop.nodes.analyze_plan import _recover_domains
+        workspace, project = tmp_project
+        specs = project / "openspec" / "changes" / "feat-test" / "specs" / "from-folder"
+        specs.mkdir(parents=True)
+        state_dir = project / ".agentloop" / "changes" / "feat-test"
+        state_dir.mkdir(parents=True)
+        (state_dir / "state.json").write_text(
+            json.dumps({"domains": ["from-json"]}), encoding="utf-8"
+        )
+        with patch("AgentLoop.nodes.analyze_plan.REPO_ROOT", str(workspace)):
+            assert _recover_domains(
+                {"domains": ["from-state"]}, "my-project", "feat-test"
+            ) == ["from-state"]
+
+    def test_falls_back_to_state_json(self, tmp_project):
+        from AgentLoop.nodes.analyze_plan import _recover_domains
+        workspace, project = tmp_project
+        state_dir = project / ".agentloop" / "changes" / "feat-test"
+        state_dir.mkdir(parents=True)
+        (state_dir / "state.json").write_text(
+            json.dumps({"domains": ["access-log", "auth"]}), encoding="utf-8"
+        )
+        with patch("AgentLoop.nodes.analyze_plan.REPO_ROOT", str(workspace)):
+            assert _recover_domains({"domains": []}, "my-project", "feat-test") == [
+                "access-log",
+                "auth",
+            ]
+
+    def test_falls_back_to_change_specs(self, tmp_project):
+        from AgentLoop.nodes.analyze_plan import _recover_domains
+        workspace, project = tmp_project
+        specs = project / "openspec" / "changes" / "feat-test" / "specs"
+        (specs / "users").mkdir(parents=True)
+        (specs / "articles").mkdir()
+        with patch("AgentLoop.nodes.analyze_plan.REPO_ROOT", str(workspace)):
+            assert _recover_domains({}, "my-project", "feat-test") == ["articles", "users"]
+
+    def test_falls_back_to_archived_change_specs(self, tmp_project):
+        from AgentLoop.nodes.analyze_plan import _recover_domains
+        workspace, project = tmp_project
+        archived = (
+            project / "openspec" / "changes" / "archive"
+            / "2026-09-23-70-feat-access-log-ui-and-api" / "specs" / "access-log"
+        )
+        archived.mkdir(parents=True)
+        with patch("AgentLoop.nodes.analyze_plan.REPO_ROOT", str(workspace)):
+            assert _recover_domains(
+                {}, "my-project", "2026-09-23-70-feat-access-log-ui-and-api"
+            ) == ["access-log"]
+
+    def test_empty_when_nothing_saved(self, tmp_project):
+        from AgentLoop.nodes.analyze_plan import _recover_domains
+        workspace, _ = tmp_project
+        with patch("AgentLoop.nodes.analyze_plan.REPO_ROOT", str(workspace)):
+            assert _recover_domains({}, "my-project", "feat-test") == []
+
+    def test_rejects_unsafe_change_name(self, tmp_project):
+        from AgentLoop.nodes.analyze_plan import _load_saved_domains, _list_change_domains
+        workspace, _ = tmp_project
+        with patch("AgentLoop.nodes.analyze_plan.REPO_ROOT", str(workspace)):
+            assert _load_saved_domains("my-project", "../escape") == []
+            assert _list_change_domains("my-project", "../escape") == []
+
+
 # ── _build_new_domain_context ─────────────────────────────────────────────────
 
 class TestBuildNewDomainContext:

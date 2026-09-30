@@ -1,3 +1,4 @@
+import json
 import os
 import re
 import sys
@@ -380,6 +381,91 @@ def _list_existing_domains(project_dir: str) -> list[str]:
     )
 
 
+def _normalize_domains(raw) -> list[str]:
+    """過濾空字串、路徑片段與重複，保留原順序。"""
+    if not isinstance(raw, list):
+        return []
+    out: list[str] = []
+    for item in raw:
+        if not isinstance(item, str):
+            continue
+        name = item.strip()
+        if name and name not in (".", "..") and os.sep not in name and name not in out:
+            out.append(name)
+    return out
+
+
+def _domain_dirs_in(specs_dir: str) -> list[str]:
+    if not os.path.isdir(specs_dir):
+        return []
+    return sorted(
+        d for d in os.listdir(specs_dir)
+        if not d.startswith(".") and os.path.isdir(os.path.join(specs_dir, d))
+    )
+
+
+def _list_change_domains(project_dir: str, change_name: str) -> list[str]:
+    """從這個 change 資料夾的 specs/ 讀出已寫入的 domain。archive 後資料夾不在就回空。"""
+    if not project_dir or not change_name:
+        return []
+    if change_name in (".", "..") or os.sep in change_name:
+        return []
+    return _domain_dirs_in(
+        os.path.join(REPO_ROOT, project_dir, "openspec", "changes", change_name, "specs")
+    )
+
+
+def _list_archived_change_domains(project_dir: str, change_name: str) -> list[str]:
+    """change 已被 archive、state.json 也還沒有 domains 時，從 archive 快照還原。"""
+    if not project_dir or not change_name:
+        return []
+    if change_name in (".", "..") or os.sep in change_name:
+        return []
+    from ..lib.openspec_runner import archive_destination_name
+    archive_root = os.path.join(REPO_ROOT, project_dir, "openspec", "changes", "archive")
+    dest = archive_destination_name(change_name)
+    for name in (dest, change_name):
+        found = _domain_dirs_in(os.path.join(archive_root, name, "specs"))
+        if found:
+            return found
+    return []
+
+
+def _load_saved_domains(project_dir: str, change_name: str) -> list[str]:
+    """從同 change 的 state.json 讀上次寫入的 domains（新工作流不會載入整份 state）。"""
+    if not project_dir or not change_name:
+        return []
+    if change_name in (".", "..") or os.sep in change_name:
+        return []
+    path = os.path.join(
+        REPO_ROOT, project_dir, ".agentloop", "changes", change_name, "state.json"
+    )
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return []
+    return _normalize_domains(data.get("domains"))
+
+
+def _recover_domains(state: AgentState, project_dir: str, change_name: str) -> list[str]:
+    """還原這個 change 上次的 domain 歸屬：當前 state → state.json → change 資料夾 specs/。"""
+    from_state = _normalize_domains(state.get("domains"))
+    if from_state:
+        return from_state
+    saved = _load_saved_domains(project_dir, change_name)
+    if saved:
+        return saved
+    from_change = _list_change_domains(project_dir, change_name)
+    if from_change:
+        return from_change
+    return _list_archived_change_domains(project_dir, change_name)
+
+
+def _existing_domain_context(domains: list[str]) -> str:
+    return _DOMAIN_CONTEXT_EXISTING.replace("<<DOMAIN_LIST_VALUE>>", "、".join(domains))
+
+
 def _ask_new_domain_name() -> str:
     """選擇「以上皆非，建立新 domain」後詢問 domain 名稱（選填；留白由 Claude 依任務語意自行命名）。
     呼叫方已確認為互動式環境，不需再做 isatty 檢查。
@@ -397,8 +483,8 @@ def _ask_new_domain_name() -> str:
 
 
 def _ask_domain_selection(project_dir: str) -> tuple[list[str], str]:
-    """初始規劃時（僅一次）列出既有 domain，讓使用者選擇本次歸屬哪個（可複選、逗號分隔），
-    或選「以上皆非，建立新 domain」。
+    """初始規劃、且 `_recover_domains()` 還原不出上次歸屬時，列出既有 domain 讓使用者選
+    （可複選、逗號分隔），或選「以上皆非，建立新 domain」。
 
     回傳 (selected_existing_domains, new_domain_name)：
     - 使用者選擇既有 domain：([domain, ...], "")
@@ -595,6 +681,7 @@ def analyze_plan_node(state: AgentState) -> dict:
     change_name = state.get("change_name", "")
     branch_name = state.get("branch_name", "")
     project_dir = state.get("project_dir", "")
+    domains = _normalize_domains(state.get("domains"))
 
     prior_session = take_session(state, _SESSION_KEY)
 
@@ -608,6 +695,7 @@ def analyze_plan_node(state: AgentState) -> dict:
             "change_name": change_name,
             "branch_name": branch_name,
             "project_dir": project_dir,
+            "domains": domains,
             **store_session(_SESSION_KEY, prior_session if session_id is None else session_id),
         }
 
@@ -685,15 +773,30 @@ def analyze_plan_node(state: AgentState) -> dict:
                 f"{_YELLOW}  [分析+規劃 Agent] 接續中斷的 session，略過 domain 歸屬提問{_RESET}",
                 flush=True,
             )
+            recovered = _recover_domains(state, project_dir, change_name)
+            if recovered:
+                domains = recovered
+                domain_context_value = _existing_domain_context(domains)
         else:
-            domains, new_domain_name = _ask_domain_selection(project_dir)
-            if domains:
-                domain_context_value = _DOMAIN_CONTEXT_EXISTING.replace(
-                    "<<DOMAIN_LIST_VALUE>>", "、".join(domains)
+            recovered = _recover_domains(state, project_dir, change_name)
+            if recovered:
+                domains = recovered
+                print(
+                    f"{_YELLOW}  [分析+規劃 Agent] 沿用上次的 domain："
+                    f"{'、'.join(domains)}，略過歸屬提問{_RESET}",
+                    flush=True,
                 )
+                domain_context_value = _existing_domain_context(domains)
             else:
-                domain_purpose = _ask_domain_purpose()
-                domain_context_value = _build_new_domain_context(new_domain_name, domain_purpose)
+                selected, new_domain_name = _ask_domain_selection(project_dir)
+                if selected:
+                    domains = selected
+                    domain_context_value = _existing_domain_context(domains)
+                else:
+                    domain_purpose = _ask_domain_purpose()
+                    domain_context_value = _build_new_domain_context(new_domain_name, domain_purpose)
+                    if new_domain_name:
+                        domains = [new_domain_name]
 
         change_result = ensure_change_created(project_dir_abs, change_name)
         if not change_result.ok:
@@ -792,6 +895,9 @@ def analyze_plan_node(state: AgentState) -> dict:
         )
         return _fail("讀不到 proposal.md 或 tasks.md")
 
+    if not domains:
+        domains = _list_change_domains(project_dir, change_name)
+
     return {
         "analysis": analysis,
         "plan": plan,
@@ -803,5 +909,6 @@ def analyze_plan_node(state: AgentState) -> dict:
         "change_name": change_name,
         "branch_name": branch_name,
         "project_dir": project_dir,
+        "domains": domains,
         **store_session(_SESSION_KEY, ""),
     }
