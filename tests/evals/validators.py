@@ -123,6 +123,43 @@ def check_tasks_delete_removed_scenarios(
     return True, None
 
 
+def check_no_split_same_trigger_scenarios(
+    spec_text: str,
+) -> tuple[bool, Optional[str]]:
+    """Two Scenarios in the same Requirement with the same first GIVEN+WHEN
+    are one behavior branch and must be merged."""
+    parts = re.split(r"^### Requirement:", spec_text, flags=re.MULTILINE)
+    for part in parts[1:]:
+        scenarios = re.split(r"^#### Scenario:", part, flags=re.MULTILINE)
+        seen: dict[tuple[str, str], str] = {}
+        for sc in scenarios[1:]:
+            title = sc.splitlines()[0].strip() if sc.strip() else ""
+            given, when = _first_given_when(sc)
+            if not when:
+                continue
+            key = (given, when)
+            if key in seen:
+                return False, (
+                    f"同一 Requirement 底下兩條 Scenario 觸發相同，應合併："
+                    f"「{seen[key]}」與「{title}」（{when}）"
+                )
+            seen[key] = title
+    return True, None
+
+
+def _first_given_when(scenario_body: str) -> tuple[str, str]:
+    given = ""
+    when = ""
+    for line in scenario_body.splitlines():
+        stripped = line.strip()
+        if not given and stripped.startswith("- GIVEN"):
+            given = stripped
+        elif not when and stripped.startswith("- WHEN"):
+            when = stripped
+            break
+    return given, when
+
+
 def check_has_intent(proposal_text: str) -> tuple[bool, Optional[str]]:
     """proposal.md must have a non-empty ## Intent section."""
     if "## Intent" not in proposal_text:

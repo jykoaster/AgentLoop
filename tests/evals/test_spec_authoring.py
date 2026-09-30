@@ -21,6 +21,7 @@ from .validators import (
     check_no_diff_language,
     check_no_implementation_details_frontend,
     check_no_negative_scenarios,
+    check_no_split_same_trigger_scenarios,
     check_tasks_delete_removed_scenarios,
     has_added,
     has_modified,
@@ -57,6 +58,11 @@ def api_existing_spec() -> str:
 @pytest.fixture(scope="module")
 def ui_existing_spec() -> str:
     return (FIXTURES_DIR / "ui_existing_spec.md").read_text(encoding="utf-8")
+
+
+@pytest.fixture(scope="module")
+def ui_tab_existing_spec() -> str:
+    return (FIXTURES_DIR / "ui_tab_existing_spec.md").read_text(encoding="utf-8")
 
 
 # ---------------------------------------------------------------------------
@@ -318,6 +324,44 @@ def test_ui_spec_modified(skill_content, ui_existing_spec):
     # 切換頁碼 Scenario 從 MODIFIED requirement 消失，tasks 必須安排刪除測試任務
     tasks = files.get("tasks.md", "")
     ok, msg = check_tasks_delete_removed_scenarios(tasks, ["切換頁碼"])
+    assert ok, msg
+
+
+def test_ui_spec_sibling_tab_merges_init_scenario(skill_content, ui_tab_existing_spec):
+    """同頁加 tab：改寫既有初始化 Scenario，不可並列「單一 tab」與「同時包含」。"""
+    task = (
+        "在「日誌分析（new）」頁面的 tab 列新增「OWASP 日誌」tab，"
+        "與既有「訪問日誌」tab 並列；頁面載入時預設仍選中「訪問日誌」。"
+        "使用者可點擊切換兩個 tab。"
+        "不變更訪問日誌 tab 本身的查詢、續拉或欄位行為。"
+    )
+    files = generate_spec(
+        skill_content,
+        task,
+        project_type="frontend",
+        existing_spec=ui_tab_existing_spec,
+        test_name="ui_sibling_tab",
+    )
+    spec = spec_file(files)
+
+    assert has_modified(spec), "tab 列從一個變成兩個，應 MODIFIED 既有 tab 標籤列 Requirement"
+
+    ok, msg = check_no_split_same_trigger_scenarios(spec)
+    assert ok, f"同一觸發的初始化 Scenario 應合併成一條：{msg}"
+
+    assert "單一 tab" not in spec, (
+        "舊標題寫死「單一 tab」，MODIFIED 必須改寫該 Scenario 標題，"
+        "不可留下舊條再並列一條「同時包含 OWASP」"
+    )
+
+    assert "訪問日誌" in spec and "OWASP" in spec, (
+        "合併後的初始化 Scenario 應同時涵蓋訪問日誌與 OWASP 日誌"
+    )
+
+    tasks = files.get("tasks.md", "")
+    ok, msg = check_tasks_delete_removed_scenarios(
+        tasks, ["頁面顯示訪問日誌單一 tab 標籤"]
+    )
     assert ok, msg
 
 
