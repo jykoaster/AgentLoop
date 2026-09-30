@@ -1,10 +1,11 @@
 # Python 3.11 slim 為基底，再加裝 Node.js 給 claude CLI 使用
 FROM python:3.11-slim
 
-# 安裝 Node.js 20 + 必要系統工具
+# 安裝 Node.js 22 + 必要系統工具。
+# Claude Code >= 2.1.280（claude-opus-5-5 等新模型的最低 CLI）宣告 engines.node >= 22。
 RUN apt-get update && \
     apt-get install -y curl build-essential git sudo && \
-    curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
+    curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && \
     apt-get install -y nodejs && \
     rm -rf /var/lib/apt/lists/*
 
@@ -19,8 +20,8 @@ RUN install -m 0755 -d /etc/apt/keyrings && \
     apt-get install -y docker-ce-cli docker-compose-plugin && \
     rm -rf /var/lib/apt/lists/*
 
-# 安裝 Claude Code CLI
-RUN npm install -g @anthropic-ai/claude-code
+# 安裝 Claude Code CLI。2.1.197 不接受 claude-opus-5-5（API 400，要求 >= 2.1.280）。
+RUN npm install -g @anthropic-ai/claude-code@2.1.285
 
 # 安裝 OpenSpec CLI（analyze_plan 產出的規格文件遵照其 change/spec delta 規則，
 # review 通過後由 archive 節點呼叫 `openspec archive` 合併進目標專案的 openspec/specs/）

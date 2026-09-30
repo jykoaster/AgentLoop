@@ -192,7 +192,7 @@ python -m AgentLoop.search --reindex "query"   # 強制重建索引後再搜尋
 視情況而定，不是所有目標專案都一定要有 Docker：
 
 - **規劃／審查中的讀取類操作**（讀 `CLAUDE.md`、產出計畫、`git diff HEAD` 比對）不需要目標專案有 Docker，任何技術棧都能處理。
-- 但 `execute` 與 `review` 節點**強制要執行目標專案的測試指令**，而 AgentLoop 容器本身只原生安裝了 **Python 3.11** 與 **Node.js 20**（見 `Dockerfile`）。因此：
+- 但 `execute` 與 `review` 節點**強制要執行目標專案的測試指令**，而 AgentLoop 容器本身只原生安裝了 **Python 3.11** 與 **Node.js 22**（見 `Dockerfile`）。因此：
   - 若目標專案是 Python／Node 專案，且測試不依賴額外服務（資料庫、cache 等），可以在 AgentLoop 容器內直接跑測試，**不需要**目標專案有 Docker。
   - 若目標專案使用其他語言、或測試需要額外服務，則**需要**目標專案本身能透過 `docker compose up` / `exec` 之類的指令啟動與跑測試——AgentLoop 容器內建 Docker CLI 並掛載 host 的 `docker.sock`（DooD，見上方「首次使用」前的 Docker outside of Docker 說明），正是為了讓 Agent 能在容器內對目標專案下這類指令；容器本身沒有其他語言 runtime，也不會另外起一顆 Docker daemon。
   - 這件事應該寫進目標專案的 `CLAUDE.md`／`AGENT.md`：測試指令若需要透過 `docker compose exec ...` 執行，直接寫清楚，Agent 才會照著跑，而不是誤用容器內不存在的原生指令。
