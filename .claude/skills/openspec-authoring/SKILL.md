@@ -15,7 +15,7 @@
 ### 強制三項（缺一不可）
 
 1. **規範目的（Specification Purpose）**：強調本改動的詳細目標或核心任務，讓實作始終專注預期目標、降低偏離所需功能。
-   - 寫在 `proposal.md` 的 `## Intent`。新建 domain 時，`specs/<domain>/spec.md` 的 `## Purpose` 與 Intent 對齊、不要另寫一套目標。
+   - 寫在 `proposal.md` 的 `## Intent`。新建 domain 的 `## Purpose` 見下方 spec 寫法。
 2. **輸出要求（Output Requirements）**：強調可觀察輸出的資料類型、格式與約束（例如必顯欄位、精確度、分隔符號、排序規則、狀態列舉）。
    - 寫進對應 Requirement 的 SHALL/MUST，以及每個主路徑 Scenario 的 THEN。
 3. **範例及解釋（Examples with Explanations）**：提供測試案例的逐步分析，詳細闡述從輸入到輸出的邏輯，讓實作 LLM 看懂程式設計邏輯。
@@ -40,12 +40,9 @@
 
 純重構／文件／設定且 `skip_specs: true` 時：Intent 仍須寫規範目的；輸出要求與範例及解釋可註明「無外部可觀察行為變化」。
 
-自檢：強制三項是否已落在對應欄位且非任務原句複述；其餘七項適用者是否已納入，缺一項就補寫。
-
 ### proposal.md
 
-`## Intent`（規範目的，適用時補規範背景）/ `## Scope`（In scope / Out of scope）/
-`## Approach`（適用時寫相關 APIs、建議演算法／資料結構／既有模組）
+`## Scope`（In scope / Out of scope）。`## Intent`、`## Approach` 的落點見上方對齊。
 
 ### design.md（小改動可略過，採 OpenSpec 預設）
 
@@ -69,7 +66,7 @@ spec 只描述「系統保證具備哪些行為」。讀者不知道歷史版本
 MUST NOT 唯一合法用途：描述正向 Scenario 的副作用約束（例：正向 Scenario 是「滑到底載入下一批」，副作用 AND 子句 MUST NOT 在 hasMore=false 後繼續發出請求）。
 
 **【規格來源：以 openspec/specs 為唯一基準，不從 proposal 的 Scope/Approach 翻譯】**
-寫 spec 前先用 Read 讀 `<project_dir>/openspec/specs/<domain>/spec.md`（已合併的主規格），對應規則：
+寫 spec 前先用 Read 讀 `<project_dir>/openspec/specs/<domain>/spec.md`（已合併的主規格），逐一比對規範範圍（不只比對標題）。與既有 Requirement 相同或可合併就用 MODIFIED，找不到重疊才用 ADDED：
 
 - 既有 spec 提及的行為，本次要修改 → `MODIFIED Requirements`（改寫成新版正向內容，不附「改了什麼」說明）
 - 既有 spec 提及的行為，本次要完全移除 → `REMOVED Requirements`
@@ -79,12 +76,11 @@ MUST NOT 唯一合法用途：描述正向 Scenario 的副作用約束（例：�
 `proposal.md` 的 Scope 與 Approach 段描述的是工程任務（HOW），不是規格項目（WHAT）；
 禁止把 Scope 的「移除 X 元件」「刪除 Y API call」翻譯成任何 Requirement 或 Scenario。
 
-新建 domain（openspec/specs/<domain>/spec.md 尚不存在）：一律全 ADDED；
-程式碼裡原有但從未 specced 的元件，即使被移除，也不在 spec 任何位置提及。
+新建 domain（openspec/specs/<domain>/spec.md 尚不存在）：一律全 ADDED。
 
 **【MODIFIED 的正確做法】**
-直接改寫 Requirement 正文，只保留縮減後仍存在的行為（例：移除某開關就從對照表刪那一列，Scenario 改成描述僅剩開關的正向行為）；不補 `MUST NOT 出現`，不另開「看不到 X」的 Scenario。
-集合變大（頁面加一個 tab／欄／按鈕）時：改寫那一條「初始化組成」Scenario，讓 THEN 涵蓋完整新集合，並改掉寫死舊數量的標題；禁止留下舊的「單一 X／僅含一個」Scenario 再並列一條「同時包含 Y」。舊標題不再出現於 delta，tasks.md 為它安排移除測試任務。
+直接改寫 Requirement 正文，只保留縮減後仍存在的行為（例：移除某開關就從對照表刪那一列，Scenario 改成描述僅剩開關的正向行為）。
+集合變大（頁面加一個 tab／欄／按鈕）時：改寫那一條「初始化組成」Scenario，讓 THEN 涵蓋完整新集合。舊標題不再出現於 delta，tasks.md 為它安排移除測試任務。
 
 **【Requirement 與 Scenario 的寫法規則】**
 
@@ -94,13 +90,10 @@ MUST NOT 唯一合法用途：描述正向 Scenario 的副作用約束（例：�
   錯誤（同是「頁面完成初始化」，拆成兩條）：`Scenario: 頁面顯示訪問日誌單一 tab 標籤` + `Scenario: 頁面 tab 列同時包含 OWASP 日誌 tab`
   正確（一條寫完組成與預設選中）：`Scenario: 頁面載入後 tab 列顯示本頁提供的日誌類型且預設選中訪問日誌`
   真正不同分支才另開：例如 `WHEN 使用者點擊另一個 tab`（切換）、`WHEN 使用者切換語系`（標籤文字更新）。
-- **決定 ADDED / MODIFIED**：讀既有 spec 後逐一比對規範範圍（不只比對標題）；本次行為與既有 Requirement 相同或可合併，用 MODIFIED；找不到重疊才用 ADDED
 - **標題抽象化**：用涵蓋規則本身的措辭，不寫死具體數量或列舉值（寫死會使功能擴充時標題失效，被迫另開一條而非改寫舊的）
   錯誤：`Scenario: user 端兩個權限皆為 true 時兩個子分頁都顯示`；正確：`Scenario: 登入者具備全部受管功能時顯示對應開關`
   既有標題已寫死「單一／僅含一個／兩個」時，MODIFIED 必須改寫該 Scenario（含標題），禁止另開並列條目。
-- **每個 Requirement 只講一件事**；至少一個 Scenario；Scenario 測具體情境，不重述 Requirement
-- **主路徑 Scenario** 須含「逐步邏輯」，THEN 須含可觀察的輸出要求（資料型別、格式、約束）
-- **邊界與錯誤 Scenario** 適用時必須補寫，不可只靠主路徑
+- **每個 Requirement 只講一件事**；至少一個 Scenario
 - **業務語言，不寫實作細節**。凡屬「怎麼做到」而非「對外呈現什麼」的內容，移至 design.md：
   - 禁止：程式碼片段／條件式（`a.b === true`）、元件／模組／類別／函式名稱、框架生命週期用語（mount、re-render 等）、DOM 屬性、CSS selector、特定框架 API
   - **API 欄位名稱（request body、response 欄位、endpoint path）前端消費端禁止寫入 spec**；用業務描述代替，欄位名稱移至 design.md Technical Approach
@@ -112,6 +105,7 @@ MUST NOT 唯一合法用途：描述正向 Scenario 的副作用約束（例：�
 - 沿用既有 domain 不加 `## Purpose`；domain 首次建立才在 delta 最上面加一段 `## Purpose`（一兩句話，與 proposal Intent 對齊）
 - 不需要獨立的「User Stories」章節
 - 純重構/文件/設定調整、無外部可觀察行為變化：在 `.openspec.yaml` 加 `skip_specs: true` 並略過 specs delta；REMOVED 移除了某 domain 最後一個 Requirement 時加 `retire_capabilities: true`
+- prompt 若有一行 `skip_specs: true` 或 `skip_specs: false`，那是使用者已確認的決定，照辦、不要自行改判。`true` 依上一條略過 specs；`false` 要寫 specs delta，不要設定 `skip_specs: true`。沒有這一行時，才依上一條自行判斷
 
 ### tasks.md
 
@@ -207,7 +201,7 @@ The system SHALL/MUST <一個明確、可觀察的行為；含輸出要求（資
 
 ## MODIFIED Requirements
 
-（既有 Requirement 縮減或調整時使用；直接改寫成縮減後的正向規格，不附加「改了什麼」說明，也不加「X MUST NOT 出現」條文；移除某功能時，把該功能從 Requirement 正文與 Scenarios 中刪掉，只保留仍存在的行為）
+（見上方「MODIFIED 的正確做法」）
 
 ## REMOVED Requirements
 

@@ -107,6 +107,8 @@ python -m AgentLoop.main --node archive
 
 執行過程中，`analyze_plan` 第一次進行初始規劃時會先在終端機詢問**本次任務要使用的 git 分支名稱（必填）**：已存在則切過去，不存在則從目前 HEAD 新建。OpenSpec change 名稱由此分支轉成 kebab-case（例如 `feature/add-login` → `feature-add-login`），之後規劃、實作、審查、archive 都在這個分支上進行。此值會沿用到同一個任務後續的重新規劃／依人工意見調整，不會重複問。
 
+接著會問**本次是否需要撰寫 spec**（`y` 寫 `specs/<domain>/spec.md`；`n` 表示純重構／文件／設定，不寫 spec）。答案記在 state 的 `skip_specs`（`n` 為 `true`），同一個 change 之後再規劃、或驗收後再開一輪，都會沿用、不再問。選 `n` 時不會再問 domain 歸屬。
+
 ### 撞到 Claude 用量上限時
 
 任一節點跑到一半撞上用量上限（`You've hit your session limit · resets 3:45pm` 這類訊息，訂閱制另有 weekly 與 Opus 各自的上限）時，工作流程會**暫停**並在終端機等待：

@@ -75,6 +75,8 @@ class AgentState(TypedDict):
     change_name: str       # OpenSpec change 名稱（由 branch_name 轉 kebab-case）；任務開始時問一次，全程沿用
     branch_name: str       # 使用者指定的 git 分支（必填）；規劃／執行／審查／archive 都切到此分支
     domains: list[str]     # 本次 change 歸屬的 OpenSpec domain；初始規劃問一次後寫入 state.json，同一 change 再規劃時沿用
+    skip_specs: bool | None  # 本次是否略過 specs delta（對應 .openspec.yaml 的 skip_specs）；None＝尚未決定。
+                           # 初始規劃問一次後寫入 state.json，同一 change 再規劃時沿用、不再提問
     session_node: str      # 中斷中的 Claude session 屬於哪個 node（""＝沒有）；每個 change 同時
                            # 只會有一個，analyze_plan／execute／review 共用這一個插槽
     session_id: str        # 該 session 的 id，撞到用量上限後可 --resume 接回；只透過
@@ -237,12 +239,12 @@ OpenSpec change 位置，不需要各自重新判斷；`archive_node` 單獨執�
    視為新建 domain。有既有 domain 時在終端機列出清單 + 一個「以上皆非，建立新 domain」選項，讓
    使用者輸入編號選擇本次規格 delta 歸屬哪個（可用逗號輸入多個編號，對應「同一任務涉及多個既有
    domain」的情況）；非互動式環境預設視為新建 domain。選定的既有 domain 名稱清單會組進 system
-   prompt 的 `_DOMAIN_CONTEXT_EXISTING` 區塊（沿用名稱、不加 `## Purpose`）。回傳空清單（確定是
+   prompt 的 `_DOMAIN_CONTEXT_EXISTING` 區塊（只給名稱；`## Purpose` 的寫法在 `openspec-authoring` skill）。回傳空清單（確定是
    純粹新建 domain：沒有既有 domain，或使用者選了「建立新 domain」）時，額外呼叫
    `_ask_domain_purpose()` 讓使用者選填這個新 domain 的 Purpose 文字；有填就用
-   `_DOMAIN_CONTEXT_NEW_WITH_PURPOSE`（Claude 直接採用這段文字寫入 `## Purpose`，不自己改寫），
-   留白（含非互動式環境、使用者中止）則用 `_DOMAIN_CONTEXT_NEW`（Claude 依任務語意自行命名
-   domain 並撰寫 `## Purpose`）。若使用者選擇同時涉及既有 domain 又可能需要新 domain（回傳清單
+   `_DOMAIN_CONTEXT_NEW_WITH_PURPOSE`（只傳使用者這段文字，並要求 `## Purpose` 原樣採用、不改寫；
+   與 Intent 對齊等格式規則在 skill），留白（含非互動式環境、使用者中止）則用 `_DOMAIN_CONTEXT_NEW`
+   （只告知這是新 domain、請依任務語意命名）。若使用者選擇同時涉及既有 domain 又可能需要新 domain（回傳清單
    非空），是否額外建立新 domain 完全交給 Claude 判斷，不會觸發這個 Purpose 提問——Python 只在
    「確定會建立新 domain」時才問。規劃成功後把名稱寫進 `AgentState["domains"]`；若當次是「新
    domain 且名稱由 Claude 自訂」，改從 change 資料夾的 `specs/` 回填
@@ -254,6 +256,18 @@ OpenSpec change 位置，不需要各自重新判斷；`archive_node` 單獨執�
 時跑；同一 change 再進初始規劃（驗收後開新一輪、或 change 已被 archive 後重建）會沿用
 `state.json` 裡的 `domains`。沿用階段（`_CHANGE_SETUP_EXISTING` 的 replan／human-revise）本來
 就不走這一步。
+
+**是否撰寫 spec（`skip_specs`，問在 domain 之前）：** 初始規劃在 `openspec init` 之後、domain
+歸屬之前，先 `_recover_skip_specs()`——依序看當前 `AgentState["skip_specs"]`（只有明確的布林算數，
+`None` 與舊 state 缺這欄都不算）、同 change 的 `state.json`、change 資料夾的 `.openspec.yaml`、
+以及 archive 快照裡的 `.openspec.yaml`。還原得到布林就印「沿用上次的決定」、**不再提問**。還原不出
+才 `_ask_skip_specs()`：終端機問 y（需要寫 spec）或 n（不需要）。n 寫入 `skip_specs: true`，由程式
+直接略過後面的 domain 提問（不寫進 prompt）。y 寫入 `skip_specs: false`，照舊走 domain。三份
+system prompt 只多一行 `skip_specs: true` 或 `skip_specs: false`；怎麼寫 `.openspec.yaml`、略過
+哪些檔，以 `openspec-authoring` skill 為準，不在 prompt 重述。非互動式環境預設 y；使用者中止則
+`status: "error"`。接回中斷的 session 時不重問（還原不到就視為要寫 spec）。重新規劃與依人工意見
+調整只讀這個欄位（舊 state 沒有就預設要寫 spec），注入同一行旗標，不再提問。決定隨
+`state.json` 持久化，所以驗收後對同一個 change 再開一輪會沿用。
 
 **「重寫」等級的 rollback（已搬到 Python，呼叫 Claude 之前完成）：** 重新規劃若 `review_level`
 為「重寫」，在 `ensure_on_branch()` 之後、組 prompt 之前，呼叫 `git_ops.rollback_except_openspec()`：
@@ -275,12 +289,12 @@ untracked 新檔），但保留 `openspec/`，失敗即視為錯誤（`status: "
 （而非全新對話）開始這個迴圈——`_run_with_validate()`（見下）就是靠這個參數，把 openspec
 validate 的錯誤修正也接到同一套「有問題就等使用者、否則繼續」的迴圈裡；跨程序接回上次撞到
 用量上限而中斷的 session（見下方「跨程序接回：session 插槽」）走的也是同一個參數。接回時會
-**略過 domain 歸屬提問**，因為那個答案只用來組完整 prompt，接回時不會送出。
+**略過是否撰寫 spec 與 domain 歸屬提問**，因為那些答案只用來組完整 prompt，接回時不會送出。
 
 **依模式而異的提問規則：**
 
-- **初始規劃 / 依人工意見調整計畫**：完整 grilling 流程——依 grilling 逐一提問，過程中依 domain-modeling 即時更新 `CONTEXT.md` / `docs/adr/`。初始規劃的 grill 結果必須能寫出 Specine 強制三項（規範目的、輸出要求、範例及解釋）的具體內容（不是任務原句複述），其餘七項依適用納入；依人工意見調整時只在意見影響這些項時才重問，不重跑完整 Specine 清單
-- **重新規劃（review 觸發）**：**只針對 review 結果 grill**——針對審查標記的每個問題點逐一提出質疑性問題（判斷是否成立、修正方向如何取捨），不要求重新走一遍完整的 grilling 釐清或 Specine 清單，也不強制 domain-modeling 文件同步；更新規格時仍須維持強制三項寫在對應 OpenSpec 欄位
+- **初始規劃 / 依人工意見調整計畫**：完整 grilling 流程——依 grilling 逐一提問，過程中依 domain-modeling 即時更新 `CONTEXT.md` / `docs/adr/`。初始規劃在強制三項還寫不出來時繼續問（三項的內容與「不是任務原句複述」以 skill 為準）；依人工意見調整時只在意見影響這些項時才重問，不重跑完整 Specine 清單
+- **重新規劃（review 觸發）**：**只針對 review 結果 grill**——針對審查標記的每個問題點逐一提出質疑性問題（判斷是否成立、修正方向如何取捨），不要求重新走一遍完整的 grilling 釐清或 Specine 清單，也不強制 domain-modeling 文件同步；更新規格時仍須維持強制三項（寫在哪個欄位以 skill 為準）
 
 **三種 Prompt 版本：**
 
@@ -332,7 +346,7 @@ validate 的錯誤修正也接到同一套「有問題就等使用者、否則�
 - **產出規則**（`openspec-authoring` skill，三種模式共用）：章節結構維持 OpenSpec，不另開 Specine 專章；skill 裡的「Specine 規格對齊」一節把十項對齊要素對應進既有欄位。強制三項缺一不可（純重構且 `skip_specs: true` 時 Intent 仍須寫目的，輸出／範例可註明無外部可觀察行為）：規範目的 → `proposal.md` 的 `## Intent`（新建 domain 的 `## Purpose` 與其對齊）；輸出要求 → Requirement 的 SHALL/MUST 與主路徑 Scenario 的 THEN（資料類型、格式、約束）；範例及解釋 → 至少一個主路徑 Scenario 的「逐步邏輯」（從輸入到輸出）。其餘七項適用才寫：背景 → Intent／Approach；關鍵概念 → domain-modeling；輸入要求 → GIVEN/WHEN；邊界／錯誤處理 → 額外 Scenario；APIs／提示 → Approach 或 `design.md`
   - `proposal.md`：`## Intent`（規範目的，適用時補背景）/ `## Scope`（In scope / Out of scope）/ `## Approach`（適用時寫 APIs、建議演算法／資料結構）
   - `design.md`（採 OpenSpec 預設：小改動可略過、不要建立空檔；有架構取捨、新模組／接縫、或需要留下技術債時才寫）：`## Technical Approach` / `## Architecture Decisions` / `## Testing Strategy`（含「Seam（測試接縫）」「測試案例矩陣（Test Matrix）」固定小節，矩陣須涵蓋主路徑逐步範例）/ `## Technical Debt & Follow-up Notes`；一旦撰寫，沒有內容也要保留標題填「無」，不可留白或整段刪除
-  - `specs/<domain>/spec.md`（delta，可能有多個 domain）：只用 `## ADDED Requirements` / `## MODIFIED Requirements` / `## REMOVED Requirements` 三種分節，`### Requirement:`（SHALL/MUST/SHOULD，一個 Requirement 只講一件事，含輸出要求）+ `#### Scenario:`（逐步邏輯 + GIVEN/WHEN/THEN，至少一個主路徑須含從輸入到輸出的逐步解釋，THEN 須含輸出格式／約束）；新建 domain 才加 `## Purpose`（與 Intent 對齊，或直接採用使用者透過 `_ask_domain_purpose()` 指定的文字，見上方「Domain 歸屬確認」）；純重構/文件/設定變更可在 `.openspec.yaml` 設 `skip_specs: true` 略過；REMOVED 移除某 domain 最後一個 Requirement 時需設 `retire_capabilities: true` 才會被 archive 一併刪除該 domain 的 spec。寫之前須先 Read/Grep 目標專案已合併的 `openspec/specs/<domain>/spec.md`（不是這次 change 的 delta），逐一比對既有 Requirement 的規範範圍：能合併或完全重複就用 MODIFIED 改寫，找不到才用 ADDED，避免同一件事拆成多個重疊的 Requirement；Requirement／Scenario 標題用抽象措辭涵蓋規則本身，不寫死具體數量或列舉值（例如「兩個權限皆為 true」），否則功能擴充時舊標題對不上新情況，被迫另開一個而非既有規則自然涵蓋；既有標題已寫死「單一／僅含一個」時，MODIFIED 必須改寫該 Scenario（含標題），禁止另開並列條目；Requirement 與 Scenario（含逐步邏輯）都只能用自然語言描述規範（系統對外呈現的行為與約束），不寫實作細節（不限技術棧：前端 DOM/CSS/元件庫、後端 DB 欄位型別/SQL/框架 API/內部函式類別變數名稱之外，也包括具體程式碼片段或條件式如 `a.b === true`、框架特定的生命週期或渲染機制用語如掛載/mount/render——判斷依據一律換成業務語言），實作方式留給 `design.md` 的 Technical Approach
+  - `specs/<domain>/spec.md`（delta，可能有多個 domain）：只用 `## ADDED Requirements` / `## MODIFIED Requirements` / `## REMOVED Requirements` 三種分節，`### Requirement:`（SHALL/MUST/SHOULD，一個 Requirement 只講一件事，含輸出要求）+ `#### Scenario:`（逐步邏輯 + GIVEN/WHEN/THEN，至少一個主路徑須含從輸入到輸出的逐步解釋，THEN 須含輸出格式／約束）；新建 domain 才加 `## Purpose`（與 Intent 對齊，或直接採用使用者透過 `_ask_domain_purpose()` 指定的文字，見上方「Domain 歸屬確認」）；純重構/文件/設定且使用者在初始規劃選擇不寫 spec 時，在 `.openspec.yaml` 設 `skip_specs: true` 略過（決定來自終端提問並寫入 `skip_specs`，見上方「是否撰寫 spec」；prompt 只帶 `skip_specs: true|false` 這一行，產出規則以 skill 為準）；REMOVED 移除某 domain 最後一個 Requirement 時需設 `retire_capabilities: true` 才會被 archive 一併刪除該 domain 的 spec。寫之前須先 Read/Grep 目標專案已合併的 `openspec/specs/<domain>/spec.md`（不是這次 change 的 delta），逐一比對既有 Requirement 的規範範圍：能合併或完全重複就用 MODIFIED 改寫，找不到才用 ADDED，避免同一件事拆成多個重疊的 Requirement；Requirement／Scenario 標題用抽象措辭涵蓋規則本身，不寫死具體數量或列舉值（例如「兩個權限皆為 true」），否則功能擴充時舊標題對不上新情況，被迫另開一個而非既有規則自然涵蓋；既有標題已寫死「單一／僅含一個」時，MODIFIED 必須改寫該 Scenario（含標題），禁止另開並列條目；Requirement 與 Scenario（含逐步邏輯）都只能用自然語言描述規範（系統對外呈現的行為與約束），不寫實作細節（不限技術棧：前端 DOM/CSS/元件庫、後端 DB 欄位型別/SQL/框架 API/內部函式類別變數名稱之外，也包括具體程式碼片段或條件式如 `a.b === true`、框架特定的生命週期或渲染機制用語如掛載/mount/render——判斷依據一律換成業務語言），實作方式留給 `design.md` 的 Technical Approach
     - **spec 是正向契約，不是實作差異紀錄**：只描述「系統保證具備哪些行為」。讀者不知道歷史版本，不提某個行為就等同不保證它存在，所以不需要也不可以另外宣告它不在——禁止 `MUST NOT 顯示某元件`、帶負向語意的 Scenario 標題（`Scenario: 不顯示統計文字`）、以「不存在的行為」為主要斷言的 Scenario。`MUST NOT` 唯一合法用途是描述正向 Scenario 的副作用約束（例：正向 Scenario 是「滑到底載入下一批」，副作用 AND 子句 `MUST NOT` 在 `hasMore=false` 後繼續發出請求）
     - **以 `openspec/specs` 為唯一基準，不從 proposal 翻譯**：既有 spec 提及的行為本次修改 → MODIFIED、完全移除 → REMOVED、未提及而本次新增 → ADDED；**既有 spec 未提及、本次只是從程式碼移除 → 不寫任何條文**（從未 specced 的東西，移除不需要 spec 紀錄，否則產出的是憑空冒出來的「幽靈功能」規格）。`proposal.md` 的 Scope／Approach 講的是工程任務（HOW）不是規格項目（WHAT），禁止把「移除 X 元件」「刪掉 Y API call」翻譯成 Requirement 或 Scenario
     - **消費者視角自檢**：只寫最外層消費者能從邊界外觀察並驗證的事，以「若完全重寫內部實作，這條規格還成立嗎？」自問——成立才是驗收標準，不成立就該移到 `design.md`
@@ -589,7 +603,7 @@ embedding 模型輸出 L2 正規化後的 384 維向量，存為 `float[384]` bl
 
 每個節點讀取前一個節點填入的欄位，再將自己的輸出寫入對應欄位，例如：
 
-- `analyze_plan` → 填入 `analysis`、`plan`、`change_name`、`branch_name`、`project_dir`、`domains`
+- `analyze_plan` → 填入 `analysis`、`plan`、`change_name`、`branch_name`、`project_dir`、`domains`、`skip_specs`
 - `human_confirm` → 填入 `status`（`"confirmed"` / `"needs_revision"` + `human_feedback` / `"aborted"`）
 - `execute` → 填入 `execution_result`、`status`
 - `review` → 填入 `review_result`、`review_level`、`review_blocking`、`status`

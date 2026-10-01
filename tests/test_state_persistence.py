@@ -396,6 +396,116 @@ class TestRecoverDomains:
             assert _list_change_domains("my-project", "../escape") == []
 
 
+# ── _ask_skip_specs / _recover_skip_specs ─────────────────────────────────────
+
+class TestAskSkipSpecs:
+    def test_yes_means_write_specs(self):
+        from AgentLoop.nodes.analyze_plan import _ask_skip_specs
+        with patch("sys.stdin.isatty", return_value=True), \
+             patch("builtins.input", return_value="y"):
+            assert _ask_skip_specs() is False
+
+    def test_no_means_skip_specs(self):
+        from AgentLoop.nodes.analyze_plan import _ask_skip_specs
+        with patch("sys.stdin.isatty", return_value=True), \
+             patch("builtins.input", return_value="n"):
+            assert _ask_skip_specs() is True
+
+    def test_non_interactive_defaults_to_writing_specs(self):
+        from AgentLoop.nodes.analyze_plan import _ask_skip_specs
+        with patch("sys.stdin.isatty", return_value=False):
+            assert _ask_skip_specs() is False
+
+    def test_eof_returns_none(self):
+        from AgentLoop.nodes.analyze_plan import _ask_skip_specs
+        with patch("sys.stdin.isatty", return_value=True), \
+             patch("builtins.input", side_effect=EOFError):
+            assert _ask_skip_specs() is None
+
+
+class TestRecoverSkipSpecs:
+    def test_prefers_state_over_files(self, tmp_project):
+        from AgentLoop.nodes.analyze_plan import _recover_skip_specs
+        workspace, project = tmp_project
+        change = project / "openspec" / "changes" / "feat-test"
+        change.mkdir(parents=True)
+        (change / ".openspec.yaml").write_text("skip_specs: false\n", encoding="utf-8")
+        state_dir = project / ".agentloop" / "changes" / "feat-test"
+        state_dir.mkdir(parents=True)
+        (state_dir / "state.json").write_text(
+            json.dumps({"skip_specs": False}), encoding="utf-8"
+        )
+        with patch("AgentLoop.nodes.analyze_plan.REPO_ROOT", str(workspace)):
+            assert _recover_skip_specs(
+                {"skip_specs": True}, "my-project", "feat-test"
+            ) is True
+
+    def test_falls_back_to_state_json(self, tmp_project):
+        from AgentLoop.nodes.analyze_plan import _recover_skip_specs
+        workspace, project = tmp_project
+        state_dir = project / ".agentloop" / "changes" / "feat-test"
+        state_dir.mkdir(parents=True)
+        (state_dir / "state.json").write_text(
+            json.dumps({"skip_specs": True}), encoding="utf-8"
+        )
+        with patch("AgentLoop.nodes.analyze_plan.REPO_ROOT", str(workspace)):
+            assert _recover_skip_specs({}, "my-project", "feat-test") is True
+
+    def test_missing_key_in_state_json_is_undecided(self, tmp_project):
+        from AgentLoop.nodes.analyze_plan import _recover_skip_specs
+        workspace, project = tmp_project
+        state_dir = project / ".agentloop" / "changes" / "feat-test"
+        state_dir.mkdir(parents=True)
+        (state_dir / "state.json").write_text(json.dumps({"domains": []}), encoding="utf-8")
+        with patch("AgentLoop.nodes.analyze_plan.REPO_ROOT", str(workspace)):
+            assert _recover_skip_specs({}, "my-project", "feat-test") is None
+
+    def test_falls_back_to_change_yaml(self, tmp_project):
+        from AgentLoop.nodes.analyze_plan import _recover_skip_specs
+        workspace, project = tmp_project
+        change = project / "openspec" / "changes" / "feat-test"
+        change.mkdir(parents=True)
+        (change / ".openspec.yaml").write_text("schema: spec-driven\nskip_specs: true\n", encoding="utf-8")
+        with patch("AgentLoop.nodes.analyze_plan.REPO_ROOT", str(workspace)):
+            assert _recover_skip_specs({}, "my-project", "feat-test") is True
+
+    def test_yaml_false_is_a_decision(self, tmp_project):
+        from AgentLoop.nodes.analyze_plan import _recover_skip_specs
+        workspace, project = tmp_project
+        change = project / "openspec" / "changes" / "feat-test"
+        change.mkdir(parents=True)
+        (change / ".openspec.yaml").write_text('skip_specs: "false"\n', encoding="utf-8")
+        with patch("AgentLoop.nodes.analyze_plan.REPO_ROOT", str(workspace)):
+            assert _recover_skip_specs({}, "my-project", "feat-test") is False
+
+    def test_falls_back_to_archived_yaml(self, tmp_project):
+        from AgentLoop.nodes.analyze_plan import _recover_skip_specs
+        workspace, project = tmp_project
+        archived = (
+            project / "openspec" / "changes" / "archive"
+            / "2026-09-23-70-feat-access-log-ui-and-api"
+        )
+        archived.mkdir(parents=True)
+        (archived / ".openspec.yaml").write_text("skip_specs: true\n", encoding="utf-8")
+        with patch("AgentLoop.nodes.analyze_plan.REPO_ROOT", str(workspace)):
+            assert _recover_skip_specs(
+                {}, "my-project", "2026-09-23-70-feat-access-log-ui-and-api"
+            ) is True
+
+    def test_none_when_nothing_saved(self, tmp_project):
+        from AgentLoop.nodes.analyze_plan import _recover_skip_specs
+        workspace, _ = tmp_project
+        with patch("AgentLoop.nodes.analyze_plan.REPO_ROOT", str(workspace)):
+            assert _recover_skip_specs({}, "my-project", "feat-test") is None
+
+    def test_rejects_unsafe_change_name(self, tmp_project):
+        from AgentLoop.nodes.analyze_plan import _load_saved_skip_specs, _load_change_yaml_skip_specs
+        workspace, _ = tmp_project
+        with patch("AgentLoop.nodes.analyze_plan.REPO_ROOT", str(workspace)):
+            assert _load_saved_skip_specs("my-project", "../escape") is None
+            assert _load_change_yaml_skip_specs("my-project", "../escape") is None
+
+
 # ── _build_new_domain_context ─────────────────────────────────────────────────
 
 class TestBuildNewDomainContext:
@@ -412,13 +522,12 @@ class TestBuildNewDomainContext:
         assert "管理使用者帳號的功能集合" in result
         assert "<<DOMAIN_PURPOSE_VALUE>>" not in result
 
-    def test_name_only_injects_name_in_path(self):
+    def test_name_only_injects_name(self):
         result = self._call("user-management", "")
         assert "user-management" in result
-        assert "specs/user-management/spec.md" in result
 
     def test_name_and_purpose_injects_both(self):
         result = self._call("user-management", "管理使用者帳號")
         assert "user-management" in result
         assert "管理使用者帳號" in result
-        assert "specs/user-management/spec.md" in result
+        assert "不要自己另外改寫" in result

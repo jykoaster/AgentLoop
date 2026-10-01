@@ -116,6 +116,7 @@ def _empty_state(task: str) -> AgentState:
         "branch_name": "",
         "project_dir": "",
         "domains": [],
+        "skip_specs": None,
         "session_node": "",
         "session_id": "",
         "start_from": "",

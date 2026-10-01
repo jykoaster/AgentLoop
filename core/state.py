@@ -16,6 +16,7 @@ class AgentState(TypedDict):
     branch_name: str     # 使用者指定的 git 分支（必填）；規劃／執行／審查都在此分支上進行
     project_dir: str     # target project directory (relative to workspace root) this task's OpenSpec change lives in; resolved by analyze_plan before its initial-plan call, unchanged across replan/human-revise
     domains: list[str]   # 本次 change 歸屬的 OpenSpec domain；初始規劃問一次後寫入，同一 change 再規劃時沿用、不再提問
+    skip_specs: bool | None  # 本次是否略過 specs delta（對應 .openspec.yaml 的 skip_specs）；None＝尚未決定。初始規劃問一次後寫入，同一 change 再規劃時沿用、不再提問
     session_node: str    # 中斷中的 Claude session 屬於哪個 node（""＝沒有）；每個 change 同時只有一個，見 core/session.py
     session_id: str      # 該 session 的 id，撞到用量上限後可 --resume 接回；只透過 core/session.py 讀寫
     start_from: str      # transient routing hint: which node to enter first (read by _route_start in workflow.py); not persisted to state.json
