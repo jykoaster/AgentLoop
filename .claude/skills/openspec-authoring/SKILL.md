@@ -112,6 +112,7 @@ MUST NOT 唯一合法用途：描述正向 Scenario 的副作用約束（例：�
 `## N. <群組名稱>` + `- [ ] N.M <具體任務>` checkbox，依實作順序階層編號（1.1、1.2...）。
 
 - 涉及新增或修改行為的任務，須額外安排一個對應的「撰寫／更新測試」任務（優先在既有測試 seam 上以 tdd skill 的紅-綠循環進行）；純文件、設定調整或不改變行為的重構可不需要
+- **測試改名任務**：spec 完成後 grep 既有測試，凡行為與某 Scenario 相符但名稱不同的測試，安排「將 `<既有測試名稱>` 改名為 `<Scenario 標題>`」任務，**不另開新測試**；既有測試完全不存在才安排撰寫新測試
 - **測試刪除任務（必須安排，不可遺漏）**：比對既有 spec.md，凡有測試需要移除的情況均需在 tasks.md 明確列出；兩種觸發情境，格式各別如下：
   - `MODIFIED Requirements`：Requirement 保留但某些 Scenario 標題不再出現於 delta 新版本 → 安排「移除 `<消失的 Scenario 標題>` 測試」任務，以 **Scenario 標題**為準
   - `REMOVED Requirements`：整個 Requirement 被移除 → 安排「移除 `<Requirement 標題>` 相關測試」任務（Requirement 層級），**並**為其下每個 Scenario 各別安排「移除 `<Scenario 標題>` 測試」任務（Scenario 標題即測試函式名稱）
