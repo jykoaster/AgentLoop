@@ -1,11 +1,12 @@
+import json
 import os
 import re
 import sys
 import time
-from ..core import AgentState
+from ..core import AgentState, take_session, store_session
 from ..lib import (
-    call_claude, format_usage_stats, QUESTION_MARKER,
-    build_skills_block,
+    call_claude, call_resuming, format_usage_stats, QUESTION_MARKER,
+    is_usage_limit_error, LANGUAGE_POLICY, build_skills_block,
     build_project_doc_hint_for, REPO_ROOT,
     ensure_on_branch, rollback_except_openspec,
     ensure_initialized, ensure_change_created, validate_change,
@@ -16,6 +17,7 @@ _SKILLS = [
     "grilling",
     "domain-modeling",
     "tdd",
+    "openspec-authoring",
 ]
 
 # 重新規劃（review 觸發）：只針對 review 結果 grill，不重跑 domain-modeling 文件同步，
@@ -23,6 +25,7 @@ _SKILLS = [
 _SKILLS_REPLAN = [
     "grilling",
     "tdd",
+    "openspec-authoring",
 ]
 
 # 使用的模型（"haiku" | "sonnet" | "opus" | "fable"，見 claude_runner.MODEL_IDS）
@@ -39,43 +42,12 @@ QUESTION: <你的問題>
 - 使用者可能回覆選項編號（例如「1」）或自訂文字，兩者都視為有效答案並據以判斷後續動作
 - 輸出後立即結束本輪回應，等待使用者回覆後再繼續"""
 
-_SPECINE_ALIGNMENT = """## Specine 規格對齊（grill 結果與規格正文）
-
-規格必須讓後續實作 LLM 對齊使用者目的，而不是只複述任務原句。內容涵蓋 Specine 的十項對齊要素；其中下列三項為**強制、規格裡一定要有具體內容**（即使任務只有一句話，也必須寫出可執行的細節），其餘七項依任務適用才納入、不適用不必硬湊。
-
-### 強制三項（缺一不可）
-
-1. **規範目的（Specification Purpose）**：強調本改動的詳細目標或核心任務，讓實作始終專注預期目標、降低偏離所需功能。
-   - 寫在 `proposal.md` 的 `## Intent`。新建 domain 時，`specs/<domain>/spec.md` 的 `## Purpose` 與 Intent 對齊、不要另寫一套目標。
-2. **輸出要求（Output Requirements）**：強調可觀察輸出的資料類型、格式與約束（例如必顯欄位、精確度、分隔符號、排序規則、狀態列舉）。
-   - 寫進對應 Requirement 的 SHALL/MUST，以及每個主路徑 Scenario 的 THEN。
-3. **範例及解釋（Examples with Explanations）**：提供測試案例的逐步分析，詳細闡述從輸入到輸出的邏輯，讓實作 LLM 看懂程式設計邏輯。
-   - 寫進 Scenario：不得只重述 Requirement。至少一個主路徑 Scenario 要逐步寫清「誰做了什麼 → 系統如何處理 → 使用者看到什麼」。
-   - 若有 `design.md`，測試案例矩陣須與這些逐步範例對齊。
-
-任務只有「幫我實作一個購物車功能」時，規格仍必須具體寫出例如：
-- 範例及解釋：購物車透過點擊商品頁「加入購物車」加入；畫面顯示目前已加入的商品；重新登入後仍看得到購物車。
-- 規範目的：讓使用者一目瞭然看到所有商品價格、數量，並前往結帳頁面。
-- 輸出要求：必須顯示物品名稱、數量、結帳按鈕。
-
-### 其餘七項（適用才寫，不適用可省略）
-
-4. **規範背景（Specification Background）**：問題脈絡、動機、領域知識 → 補在 Intent（目的之後）或 Approach
-5. **關鍵概念（Key Concepts）**：關鍵詞彙定義 → 依 domain-modeling 記錄；Scenario 用詞必須與之一致
-6. **輸入要求（Input Requirements）**：輸入的型別、格式、範圍、前置條件 → Scenario 的 GIVEN/WHEN
-7. **邊界／極端案例（Edge/Corner Cases）**：異常或邊界 → 額外 Scenario，不可只靠主路徑
-8. **APIs**：相關外部 API／函式庫名稱與用途 → Approach 或 `design.md` 的 Technical Approach
-9. **錯誤處理（Error Handling Requirements）**：無效輸入時的預期行為（預設值、例外、特殊機制）→ 獨立 Requirement 或錯誤 Scenario
-10. **提示或建議（Hints or Tips）**：建議演算法、資料結構、既有模組 → Approach / `design.md`；不可用來取代強制三項
-
-純重構／文件／設定且 `skip_specs: true` 時：Intent 仍須寫規範目的；輸出要求與範例及解釋可註明「無外部可觀察行為變化」。"""
-
 _QUESTION_PROTOCOL = f"""## 提問規則（grilling 互動式釐清）
 
 依照 grilling 對本任務逐一提問、以 domain-modeling 即時記錄詞彙與 ADR。
 
 {_QUESTION_FORMAT}
-- 初始規劃：強制三項（見「OpenSpec 產出規則」的 Specine 規格對齊）若無法從任務描述＋程式碼探索寫出具體內容（不是任務原句複述），必須繼續提問直到有共識；其餘七項只在需要使用者決策時提問
+- 初始規劃：強制三項（見「OpenSpec 產出規則」的 Specine 規格對齊）若還無法從任務描述與程式碼探索得出，必須繼續提問直到有共識；其餘七項只在需要使用者決策時提問
 - 依人工意見調整：只在修改意見影響強制三項或某項其餘要素時，針對受影響的項提問；不要重跑完整 Specine 清單
 - 當所有需要釐清的決策都已有共識，且強制三項已有可寫進規格的具體內容，才可以繼續進行規格撰寫與最終輸出（此後不得再輸出 QUESTION）"""
 
@@ -84,168 +56,35 @@ _REVIEW_QUESTION_PROTOCOL = f"""## 提問規則（針對 review 結果 grill）
 依照 grilling：針對審查結果（Review Result）中每一個被標記的問題點逐一提出質疑性問題，確認：
 - 該問題點的判斷是否成立、影響範圍是否如審查所述
 - 若修正方向有多種可能取捨，請使用者拍板
-不重跑完整 Specine grilling；更新規格時仍須維持強制三項寫在對應檔案位置（見「OpenSpec 產出規則」）。
+不重跑完整 Specine grilling；更新規格時仍須維持強制三項（見「OpenSpec 產出規則」）。
 
 {_QUESTION_FORMAT}
 - 當 review 標記的每個問題點都已確認完畢，才可以繼續進行後續流程與最終輸出（此後不得再輸出 QUESTION）"""
 
-_OPENSPEC_ARTIFACT_RULES = f"""## OpenSpec 產出規則（規格文件的實際格式）
+_DOMAIN_CONTEXT_EXISTING = """沿用以下既有 domain：<<DOMAIN_LIST_VALUE>>
+若任務內容確實還涉及上述以外的 domain，可依語意自訂新 domain 名稱。"""
 
-規格文件不寫成單一 Markdown 檔案，而是遵照 OpenSpec 的 change 資料夾格式，寫在目標專案的
-`openspec/changes/<change-name>/` 底下。章節結構維持 OpenSpec，**不要另開「Specine」專章**；
-把對齊要素寫進既有欄位（對照見下方「Specine 規格對齊」）。
-
-{_SPECINE_ALIGNMENT}
-
-自檢：強制三項是否已落在對應欄位且非任務原句複述；其餘七項適用者是否已納入，缺一項就補寫。
-
-### proposal.md
-`## Intent`（規範目的，適用時補規範背景）/ `## Scope`（In scope / Out of scope）/
-`## Approach`（適用時寫相關 APIs、建議演算法／資料結構／既有模組）
-
-### design.md（小改動可略過，採 OpenSpec 預設）
-符合以下情況可整份略過、不要建立空的 design.md：改動範圍小、沒有新的架構決策、沒有新的測試 seam 需要說明、也沒有要記錄的技術債。有架構取捨、新模組／接縫、或需要留下技術債時才寫。一旦撰寫，`## Technical Approach` / `## Architecture Decisions` / `## Testing Strategy`（含「Seam（測試接縫）」「測試案例矩陣（Test Matrix）」固定小節，矩陣須涵蓋主路徑逐步範例）/ `## Technical Debt & Follow-up Notes` 四個小節都要保留標題，沒有內容也要填「無」，不可留白或整段刪除。
-
-### specs/<domain>/spec.md（delta，可能有多個 domain，各自建一個檔案）
-只描述本次「改了什麼」，不是整份系統規格：`## ADDED Requirements` / `## MODIFIED Requirements` /
-`## REMOVED Requirements` 三種分節，每個 `### Requirement:`（SHALL/MUST/SHOULD）底下至少一個
-`#### Scenario:`（逐步邏輯 + GIVEN/WHEN/THEN）。規則：
-- 先用 Read/Grep 讀 `<project_dir>/openspec/specs/<domain>/spec.md`（已合併進主規格的既有內容，不是這次 change 自己的 delta 檔案），逐一分析既有 Requirement 的規範範圍——不是只比對標題或關鍵字：本次要規範的行為若與某個既有 Requirement 完全相同、或屬於同一件事可以合併進去（而不是另開一個涵蓋範圍重疊的新 Requirement），就用 `MODIFIED Requirements` 改寫該 Requirement（須含合併後完整的新版本內容 + 一行說明改了什麼）；找不到可合併或重複的既有 Requirement，才用 `ADDED Requirements` 視為新規則。domain 首次建立時該檔案還不存在，一律視為 ADDED
-- Requirement 與 Scenario 標題（`### Requirement:` / `#### Scenario:`）用抽象、涵蓋規則本身的措辭命名，不要寫死具體數量或列舉值：寫死的標題（連帶內文）在功能擴充時（例如權限或分頁數量增加）會對不上新情況，被迫另開一個 Requirement/Scenario，而不是原本的規則自然涵蓋。
-  錯誤：`Scenario: user 端兩個權限皆為 true 時兩個子分頁都顯示`；正確：`Scenario: 登入者具備全部受管功能時顯示對應開關`
-- 每個 Requirement 只講一件事、一個 SHALL/MUST/SHOULD；不要把好幾個「而且」塞進同一個 Requirement
-- 每個 Requirement 至少要有一個 Scenario；Scenario 要測到具體情境（含邊界/錯誤情況），不是重述 Requirement
-- 涉及使用者可觀察行為的 change：主路徑 Scenario 須含「逐步邏輯」、THEN 須含輸出要求（見上方 Specine 對齊強制三項），不可只寫「購物車可用」這類空泛結果
-- Requirement 與 Scenario（含逐步邏輯）都只能用自然語言描述規範（系統對外呈現的行為與約束），
-  不寫實作細節——不限特定技術棧，泛指任何屬於「怎麼做到」而非「對外呈現什麼」的內容：不寫具體程式碼
-  片段或條件式（例如 `a.b === true`）、不點名元件／模組／類別／函式／變數名稱、不使用框架特定的
-  生命週期或渲染機制用語（掛載、mount、render、re-render 等）、不寫 DOM 屬性／CSS selector／
-  資料庫欄位型別／SQL／特定框架 API。判斷依據一律換成使用者或系統看得到的業務語言（例如「具備某項
-  權限」而不是引用實際的欄位與比較式）；實作方式（用什麼元件、屬性、條件判斷式達成）留給 design.md
-  的 Technical Approach。
-  錯誤：`THEN 該 a-textarea 的 DOM maxlength 屬性為 1024`；正確：`THEN 字元計數以 1024 為上限` + `AND 使用者無法讓該欄位保留超過 1024 字`
-  錯誤：`逐步邏輯：系統依 selfInformation.allowOriginAuth === true 判定...使用者點擊後 OriginAuthModule 才會被掛載並發出請求`；
-  正確：`逐步邏輯：系統依登入者是否具備回源鑒權權限判定...使用者點擊該分頁後，右側才顯示回源鑒權模組的列表內容`
-- 適用時另寫邊界／錯誤 Scenario（Edge/Corner Cases、Error Handling），不可只靠主路徑
-- 每個 Scenario 都必須有至少一個與其 Scenario Title 名稱相同的 `describe` 或 `test`（驗收測試名稱須與 Scenario 標題一致，確保規格與測試可追溯）
-- 依下方「目標專案與 Domain」已確認的歸屬：沿用既有 domain 不需要加 `## Purpose`；domain 首次建立才在 delta 檔案最上面加一段 `## Purpose`（一兩句話，與 proposal Intent 的規範目的對齊）
-- 不需要獨立的「User Stories」章節——Scenario 已經是驗收條件的正式化版本
-- 若本次任務純粹是重構/文件/設定調整、完全沒有外部可觀察行為變化，可以在該 change 的 `.openspec.yaml` 加 `skip_specs: true` 並略過 specs delta；若 REMOVED 移除了某個 domain 的最後一個 Requirement，需在 `.openspec.yaml` 加 `retire_capabilities: true` 才能讓 archive 一併刪除該 domain 的 spec 檔
-
-### tasks.md
-`## N. <群組名稱>` + `- [ ] N.M <具體任務>` checkbox，依實作順序階層編號（1.1、1.2...）。
-- 涉及新增或修改行為的任務，須額外安排一個對應的「撰寫／更新測試」任務（優先在既有測試 seam 上以 tdd skill 的紅-綠循環進行）；純文件、設定調整或不改變行為的重構可不需要
-- 是否需要「更新文件」任務，依該任務所屬專案的 CLAUDE.md / AGENT.md 判斷：若說明檔要求同步維護 docs/ 下的商業邏輯說明文件，安排對應任務（通常放在最後）；未提及此類慣例時不強制新增
-- 這份檔案會被執行 Agent 逐項勾選、被審查 Agent 讀取確認完成度，是任務清單的唯一事實來源；不要另外在聊天輸出一份分析／計畫摘要
-
-（完成後系統會自動執行 `openspec validate --strict`；只有 error 等級會擋下並把訊息傳回來給你修正，
-warning 可視情況保留、不必為了消除 warning 硬湊內容，你不需要自己執行 validate。）"""
-
-# 檔案骨架範本：只有從零建立新 change 時才需要（僅初始規劃注入）。replan／依人工意見調整都是
-# Edit 既有檔案，實際格式直接 Read 現有內容就看得到，注入範本只是白佔 token。
-_OPENSPEC_TEMPLATES = """## 新建檔案時的骨架範本（格式規則見上方「OpenSpec 產出規則」）
-
-### proposal.md
-```markdown
-# Proposal: <Feature/Fix Name>
-
-## Intent
-<規範目的（強制，見上方 Specine 對齊第 1 項）；適用時補規範背景>
-
-## Scope
-In scope:
-- <本次要做的事項>
-
-Out of scope:
-- <明確排除、避免範疇蔓延的事項；沒有則寫「無」>
-
-## Approach
-<高階解決方案概述；適用時寫入相關 APIs、建議演算法／資料結構／既有模組>
-```
-
-### design.md
-```markdown
-# Design: <Feature/Fix Name>
-
-## Technical Approach
-<技術實作方式>
-
-## Architecture Decisions
-### Decision: <決策名稱>
-<決策內容與理由；沒有值得記錄的架構決策則寫「無」>
-
-## Testing Strategy
-### Seam（測試接縫）
-- **首選接縫**：<測試對象與測試方法>
-- **次要接縫**：<次要驗證方式，沒有則寫「無」>
-
-### 測試案例矩陣（Test Matrix）
-| 輸入值 / 情境 | 預期結果 | 斷言 Target / Reject Key |
-| --- | --- | --- |
-| <案例；須涵蓋主路徑的逐步範例，適用時加邊界／錯誤> | ... | ... |
-
-## Technical Debt & Follow-up Notes
-<需追蹤的技術債；沒有則寫「無」>
-```
-
-### specs/<domain>/spec.md
-```markdown
-## ADDED Requirements
-
-### Requirement: <名稱>
-The system SHALL/MUST <一個明確、可觀察的行為；含輸出要求（資料類型、格式、約束）>。
-
-#### Scenario: <情境名稱>
-逐步邏輯：<從觸發（輸入）到可觀察結果（輸出）的處理步驟>
-- GIVEN <前提；適用時含輸入型別／格式／約束>
-- WHEN <觸發>
-- THEN <結果；必須寫清可觀察輸出的資料類型、格式、約束>
-
-## MODIFIED Requirements
-（改變既有行為時使用，須包含完整的新版本內容 + 一行說明改了什麼）
-
-## REMOVED Requirements
-（行為被移除時使用，須說明原因）
-```
-
-### tasks.md
-```markdown
-# Tasks
-
-## 1. <群組名稱>
-- [ ] 1.1 <具體任務>
-- [ ] 1.2 <具體任務>
-
-## 2. <群組名稱>
-- [ ] 2.1 <具體任務>
-```"""
-
-_DOMAIN_CONTEXT_EXISTING = """沿用以下既有 domain（specs/**/*.md 不加 `## Purpose`）：<<DOMAIN_LIST_VALUE>>
-若任務內容確實還涉及上述以外的 domain，可依語意自訂新 domain 名稱（視為「domain 首次建立」，該
-delta 檔案最上面需加 `## Purpose`，與 proposal Intent 對齊）。"""
-
-_DOMAIN_CONTEXT_NEW = """使用者已確認本次為建立新 domain：請依任務語意自訂新 domain 名稱，視為
-「domain 首次建立」，specs/<domain>/spec.md 最上面需加 `## Purpose`（與 proposal Intent 對齊）。"""
+_DOMAIN_CONTEXT_NEW = """使用者已確認本次為建立新 domain：請依任務語意自訂新 domain 名稱。"""
 
 _DOMAIN_CONTEXT_NEW_WITH_PURPOSE = """使用者已確認本次為建立新 domain，並指定了這個 domain 的
 Purpose：<<DOMAIN_PURPOSE_VALUE>>
 
-請依任務語意自訂新 domain 名稱，視為「domain 首次建立」，specs/<domain>/spec.md 最上面的
-`## Purpose` 直接採用使用者這段文字（不要自己另外改寫或簡化），並確認 proposal.md 的 `## Intent`
-與其對齊。"""
+請依任務語意自訂新 domain 名稱。`## Purpose` 直接採用使用者這段文字，不要自己另外改寫或簡化。"""
 
-_PROJECT_AND_DOMAIN_INFO = """## 目標專案與 Domain（已由系統確認，不需再詢問或用 Bash 檢查）
+_PROJECT_AND_DOMAIN_INFO = """## <<PROJECT_SECTION_TITLE>>
 
 目標專案目錄：<<PROJECT_DIR_VALUE>>（相對 workspace root；`openspec/` 已確認存在）
 
 <<DOMAIN_CONTEXT_VALUE>>"""
 
+_PROJECT_SECTION_TITLE = "目標專案（已由系統確認，不需再詢問或用 Bash 檢查）"
+_PROJECT_AND_DOMAIN_SECTION_TITLE = "目標專案與 Domain（已由系統確認，不需再詢問或用 Bash 檢查）"
+
 _CHANGE_SETUP_INITIAL = """## OpenSpec Change 位置
 
 change 資料夾已由系統建立於 `<<PROJECT_DIR_VALUE>>/openspec/changes/<<CHANGE_NAME_VALUE>>/`
 （工作分支 `<<BRANCH_NAME_VALUE>>` 也已切換完成），change name 固定為 <<CHANGE_NAME_VALUE>>，
-不要另取。依下方「OpenSpec 產出規則」用 Write 在該資料夾底下寫 proposal.md / specs/**/*.md /
-tasks.md；非小改動時才寫 design.md。"""
+不要另取。"""
 
 _CHANGE_SETUP_EXISTING = """## 既有的 OpenSpec Change 位置
 
@@ -253,9 +92,16 @@ _CHANGE_SETUP_EXISTING = """## 既有的 OpenSpec Change 位置
 - 目標專案：<<PROJECT_DIR_VALUE>>（工作分支 <<BRANCH_NAME_VALUE>> 已切換完成）
 - Change 位置：`<<PROJECT_DIR_VALUE>>/openspec/changes/<<CHANGE_NAME_VALUE>>/`
 
-直接在這個資料夾下用 Read 讀取、Edit/Write 更新 proposal.md / specs/**/*.md / tasks.md
-（維持既有內容裡跟本次無關的部分，只改需要調整的段落）。已有 design.md 則一併更新；尚未有
-且本輪仍是小改動則不必新增；本輪已不再是小改動才 Write design.md。"""
+直接在這個資料夾下用 Read 讀取、Edit/Write 更新（維持既有內容裡跟本次無關的部分，只改需要調整的段落）。"""
+
+_ANALYZE_PROHIBITIONS = """## 嚴格禁止事項
+
+以下事項**嚴格禁止**，違反即為執行錯誤：
+
+- **不得修改任何應用程式原始碼**（`.py`、`.ts`、`.vue`、`.go` 等實作檔案）——程式碼修改由 execute node 負責；
+  此階段僅允許讀取程式碼（Read/Glob/Grep），以及寫入 OpenSpec change 資料夾下的規格文件
+- **不得將 `tasks.md` 中的 `- [ ]` 改為 `- [x]`**——task 完成標記由 execute node 在實作後即時更新；
+  analyze 階段只寫或改 task 的文字描述，不能標記完成"""
 
 _SYSTEM_INITIAL = f"""你是一位資深全端工程師，負責「分析與規劃」階段。
 
@@ -263,27 +109,26 @@ _SYSTEM_INITIAL = f"""你是一位資深全端工程師，負責「分析與規�
 
 ## 執行步驟
 
-1. 用 Read/Glob/Grep 閱讀相關程式碼，找出需修改的位置與潛在衝突（目標專案與 domain 已由系統確認，見下方）
+1. 用 Read/Glob/Grep 閱讀相關程式碼，找出需修改的位置與潛在衝突（<<CONFIRMED_SCOPE>>，見下方）
 2. 依 grilling 對本任務進行互動式釐清（見下方「提問規則」），過程中依 domain-modeling 即時記錄詞彙與 ADR；
-   grill 結果須能支撐 Specine 強制三項的具體內容（見下方「OpenSpec 產出規則」），其餘七項依適用納入
+   grill 結果須能支撐強制三項（見下方「OpenSpec 產出規則」）
 3. 共識達成後，依下方「OpenSpec 產出規則」完成規格文件（change 資料夾已由系統建立，見下方
-   「OpenSpec Change 位置」；探索程式碼以確認測試 seam，優先使用既有 seam、避免新增）
+   「OpenSpec Change 位置」）
 
 {_PROJECT_AND_DOMAIN_INFO}
 {_CHANGE_SETUP_INITIAL}
 
-{_OPENSPEC_ARTIFACT_RULES}
+<<SKIP_SPECS_CONTEXT>>
 
-{_OPENSPEC_TEMPLATES}
+{_ANALYZE_PROHIBITIONS}
 
 ## 最終輸出
 
-規格內容只寫在 OpenSpec change 資料夾，不要在聊天裡重複輸出分析／計畫／TASK 清單，一句話回報
-完成狀態即可。
+一句話回報完成狀態即可。
 
 {_QUESTION_PROTOCOL}
 
-請用繁體中文回答。
+{LANGUAGE_POLICY}
 """
 
 _SYSTEM_REPLAN = f"""你是一位資深全端工程師，負責「重新分析與規劃」階段。
@@ -302,25 +147,26 @@ _SYSTEM_REPLAN = f"""你是一位資深全端工程師，負責「重新分析�
 
 ### 若為「重寫」（系統已還原目標專案未提交的程式碼變更，openspec/ 不受影響）：
 1. 重新閱讀現有程式碼；依下方「提問規則」針對審查結果逐點 grill 確認，不需重新進行完整的 grilling 釐清或文件同步
-2. 依下方「更新既有的 OpenSpec Change」與「OpenSpec 產出規則」重新撰寫規格文件（強制三項仍須寫在對應位置）
+2. 依下方「更新既有的 OpenSpec Change」與「OpenSpec 產出規則」重新撰寫規格文件
 
 ### 若為「修補」：
 1. 不需要 rollback，保留已完成的修改
 2. 閱讀現有程式碼，精確定位需要修正的地方；依下方「提問規則」針對審查結果逐點 grill 確認
-3. 依下方「更新既有的 OpenSpec Change」與「OpenSpec 產出規則」更新規格文件相關段落（不必整份重寫，但維持章節結構，不可整段刪除某章節；強制三項仍須保留）
+3. 依下方「更新既有的 OpenSpec Change」與「OpenSpec 產出規則」更新規格文件相關段落（不必整份重寫，但維持章節結構，不可整段刪除某章節）
 
 {_CHANGE_SETUP_EXISTING}
 
-{_OPENSPEC_ARTIFACT_RULES}
+<<SKIP_SPECS_CONTEXT>>
+
+{_ANALYZE_PROHIBITIONS}
 
 ## 最終輸出
 
-規格內容以既有 OpenSpec change 資料夾為準，不要在聊天裡重複輸出分析／計畫／TASK 清單，一句話
-回報完成狀態即可。
+一句話回報完成狀態即可。
 
 {_REVIEW_QUESTION_PROTOCOL}
 
-請用繁體中文回答。
+{LANGUAGE_POLICY}
 """
 
 _SYSTEM_HUMAN_REVISE = f"""你是一位資深全端工程師，負責「根據人工意見調整規劃」階段。
@@ -343,16 +189,17 @@ _SYSTEM_HUMAN_REVISE = f"""你是一位資深全端工程師，負責「根據�
 
 {_CHANGE_SETUP_EXISTING}
 
-{_OPENSPEC_ARTIFACT_RULES}
+<<SKIP_SPECS_CONTEXT>>
+
+{_ANALYZE_PROHIBITIONS}
 
 ## 最終輸出
 
-規格內容以既有 OpenSpec change 資料夾為準，不要在聊天裡重複輸出分析／計畫／TASK 清單，一句話
-回報完成狀態即可。
+一句話回報完成狀態即可。
 
 {_QUESTION_PROTOCOL}
 
-請用繁體中文回答。
+{LANGUAGE_POLICY}
 """
 
 _BANNER = "\033[1;34m"
@@ -362,6 +209,9 @@ _RESET  = "\033[0m"
 
 _MAX_QUESTIONS = 15
 _MAX_VALIDATE_RETRIES = 5
+
+# 中斷 session 插槽的 owner 名稱（見 core/session.py）
+_SESSION_KEY = "analyze_plan"
 
 
 _QUESTION_LINE_RE = re.compile(r"^\s*" + re.escape(QUESTION_MARKER), re.MULTILINE)
@@ -466,11 +316,14 @@ def _run_with_grilling(prompt: str, tools: str, model: str, timeout: int, resume
         prompt = answer if answer else "請採用你自己建議的答案，並繼續下一個問題或流程。"
 
 
-def _run_with_validate(result, project_dir: str, change_name: str, tools: str, model: str) -> str:
+def _run_with_validate(
+    result, project_dir: str, change_name: str, tools: str, model: str
+) -> tuple[str, str]:
     """驗證迴圈：`openspec validate` 有 error 就把錯誤訊息回傳給同一個 session 修正，
     重試到通過或達上限為止（取代原本要求 Claude 自己在 Bash 裡跑 validate 迴圈）。
 
-    回傳空字串表示驗證通過；否則回傳失敗原因，由呼叫端視為錯誤。
+    回傳 `(失敗原因, 最後的 session_id)`；失敗原因為空字串表示驗證通過。一併回傳
+    session_id 是因為這個迴圈自己也會撞到用量上限，呼叫端要拿它存進 state 才接得回。
     """
     session_id = result.session_id
     project_dir_abs = os.path.join(REPO_ROOT, project_dir)
@@ -478,7 +331,7 @@ def _run_with_validate(result, project_dir: str, change_name: str, tools: str, m
     for attempt in range(1, _MAX_VALIDATE_RETRIES + 1):
         validation = validate_change(project_dir_abs, change_name)
         if validation.ok:
-            return ""
+            return "", session_id
 
         print(
             f"{_YELLOW}  [分析+規劃 Agent] openspec validate 發現問題（第 {attempt} 次）：\n"
@@ -486,18 +339,21 @@ def _run_with_validate(result, project_dir: str, change_name: str, tools: str, m
             flush=True,
         )
         if not session_id:
-            return f"openspec validate 失敗且沒有可延續的 session：\n{validation.error_text}"
+            return (
+                f"openspec validate 失敗且沒有可延續的 session：\n{validation.error_text}",
+                "",
+            )
 
         fix_prompt = (
-            "`openspec validate --strict` 發現以下 error，請修正對應檔案後我會重新驗證，"
-            "不需要自己執行 validate：\n\n" + validation.error_text
+            "`openspec validate --strict` 發現以下 error，請修正對應檔案後我會重新驗證：\n\n"
+            + validation.error_text
         )
         result = _run_with_grilling(fix_prompt, tools=tools, model=model, timeout=300, resume=session_id)
         session_id = result.session_id or session_id
         if result.is_error:
-            return result.text
+            return result.text, session_id
 
-    return f"openspec validate 重試 {_MAX_VALIDATE_RETRIES} 次仍未通過"
+    return f"openspec validate 重試 {_MAX_VALIDATE_RETRIES} 次仍未通過", session_id
 
 
 def _reset_task_checkboxes(project_dir: str, change_name: str) -> None:
@@ -524,15 +380,246 @@ def _list_existing_domains(project_dir: str) -> list[str]:
     )
 
 
-def _ask_domain_selection(project_dir: str) -> list[str]:
-    """初始規劃時（僅一次）列出既有 domain，讓使用者選擇本次歸屬哪個（可複選、逗號分隔），
-    或選「建立新 domain」。回傳選定的既有 domain 名稱清單；空清單表示本次視為建立新
-    domain（沒有任何既有 domain、或非互動式環境時也回傳空清單，不中止流程，交由 Claude
-    依任務語意自訂新名稱）。
+def _normalize_domains(raw) -> list[str]:
+    """過濾空字串、路徑片段與重複，保留原順序。"""
+    if not isinstance(raw, list):
+        return []
+    out: list[str] = []
+    for item in raw:
+        if not isinstance(item, str):
+            continue
+        name = item.strip()
+        if name and name not in (".", "..") and os.sep not in name and name not in out:
+            out.append(name)
+    return out
+
+
+def _domain_dirs_in(specs_dir: str) -> list[str]:
+    if not os.path.isdir(specs_dir):
+        return []
+    return sorted(
+        d for d in os.listdir(specs_dir)
+        if not d.startswith(".") and os.path.isdir(os.path.join(specs_dir, d))
+    )
+
+
+def _list_change_domains(project_dir: str, change_name: str) -> list[str]:
+    """從這個 change 資料夾的 specs/ 讀出已寫入的 domain。archive 後資料夾不在就回空。"""
+    if not project_dir or not change_name:
+        return []
+    if change_name in (".", "..") or os.sep in change_name:
+        return []
+    return _domain_dirs_in(
+        os.path.join(REPO_ROOT, project_dir, "openspec", "changes", change_name, "specs")
+    )
+
+
+def _list_archived_change_domains(project_dir: str, change_name: str) -> list[str]:
+    """change 已被 archive、state.json 也還沒有 domains 時，從 archive 快照還原。"""
+    if not project_dir or not change_name:
+        return []
+    if change_name in (".", "..") or os.sep in change_name:
+        return []
+    from ..lib.openspec_runner import archive_destination_name
+    archive_root = os.path.join(REPO_ROOT, project_dir, "openspec", "changes", "archive")
+    dest = archive_destination_name(change_name)
+    for name in (dest, change_name):
+        found = _domain_dirs_in(os.path.join(archive_root, name, "specs"))
+        if found:
+            return found
+    return []
+
+
+def _load_saved_domains(project_dir: str, change_name: str) -> list[str]:
+    """從同 change 的 state.json 讀上次寫入的 domains（新工作流不會載入整份 state）。"""
+    if not project_dir or not change_name:
+        return []
+    if change_name in (".", "..") or os.sep in change_name:
+        return []
+    path = os.path.join(
+        REPO_ROOT, project_dir, ".agentloop", "changes", change_name, "state.json"
+    )
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return []
+    return _normalize_domains(data.get("domains"))
+
+
+def _recover_domains(state: AgentState, project_dir: str, change_name: str) -> list[str]:
+    """還原這個 change 上次的 domain 歸屬：當前 state → state.json → change 資料夾 specs/。"""
+    from_state = _normalize_domains(state.get("domains"))
+    if from_state:
+        return from_state
+    saved = _load_saved_domains(project_dir, change_name)
+    if saved:
+        return saved
+    from_change = _list_change_domains(project_dir, change_name)
+    if from_change:
+        return from_change
+    return _list_archived_change_domains(project_dir, change_name)
+
+
+def _existing_domain_context(domains: list[str]) -> str:
+    return _DOMAIN_CONTEXT_EXISTING.replace("<<DOMAIN_LIST_VALUE>>", "、".join(domains))
+
+
+def _skip_specs_context(skip_specs: bool) -> str:
+    """只帶使用者已確認的旗標。怎麼寫進 .openspec.yaml、略過哪些檔，見 openspec-authoring skill。"""
+    return "skip_specs: true" if skip_specs else "skip_specs: false"
+
+
+_SKIP_SPECS_YAML_RE = re.compile(
+    r"(?mi)^skip_specs:\s*['\"]?(true|false|yes|no)['\"]?\s*$"
+)
+
+
+def _safe_change_name(change_name: str) -> bool:
+    return bool(change_name) and change_name not in (".", "..") and os.sep not in change_name
+
+
+def _parse_skip_specs_yaml(text: str) -> bool | None:
+    match = _SKIP_SPECS_YAML_RE.search(text)
+    if not match:
+        return None
+    return match.group(1).lower() in ("true", "yes")
+
+
+def _read_skip_specs_yaml(path: str) -> bool | None:
+    try:
+        with open(path, encoding="utf-8") as f:
+            return _parse_skip_specs_yaml(f.read())
+    except OSError:
+        return None
+
+
+def _load_saved_skip_specs(project_dir: str, change_name: str) -> bool | None:
+    """從同 change 的 state.json 讀上次寫入的 skip_specs。鍵不存在或不是布林時回傳 None。"""
+    if not project_dir or not _safe_change_name(change_name):
+        return None
+    path = os.path.join(
+        REPO_ROOT, project_dir, ".agentloop", "changes", change_name, "state.json"
+    )
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(data, dict) or "skip_specs" not in data:
+        return None
+    value = data["skip_specs"]
+    return value if isinstance(value, bool) else None
+
+
+def _load_change_yaml_skip_specs(project_dir: str, change_name: str) -> bool | None:
+    """從 change 資料夾的 .openspec.yaml 讀 skip_specs。沒有這行就回傳 None。"""
+    if not project_dir or not _safe_change_name(change_name):
+        return None
+    return _read_skip_specs_yaml(os.path.join(
+        REPO_ROOT, project_dir, "openspec", "changes", change_name, ".openspec.yaml"
+    ))
+
+
+def _load_archived_yaml_skip_specs(project_dir: str, change_name: str) -> bool | None:
+    """change 已被 archive、state.json 也還沒有 skip_specs 時，從 archive 快照還原。"""
+    if not project_dir or not _safe_change_name(change_name):
+        return None
+    from ..lib.openspec_runner import archive_destination_name
+    archive_root = os.path.join(REPO_ROOT, project_dir, "openspec", "changes", "archive")
+    dest = archive_destination_name(change_name)
+    for name in (dest, change_name):
+        if not _safe_change_name(name):
+            continue
+        found = _read_skip_specs_yaml(os.path.join(archive_root, name, ".openspec.yaml"))
+        if found is not None:
+            return found
+    return None
+
+
+def _load_skip_specs_from_disk(project_dir: str, change_name: str) -> bool | None:
+    """state.json → change 的 .openspec.yaml → archive 快照。都沒有明確布林就回傳 None。"""
+    saved = _load_saved_skip_specs(project_dir, change_name)
+    if saved is not None:
+        return saved
+    from_change = _load_change_yaml_skip_specs(project_dir, change_name)
+    if from_change is not None:
+        return from_change
+    return _load_archived_yaml_skip_specs(project_dir, change_name)
+
+
+def _recover_skip_specs(state: AgentState, project_dir: str, change_name: str) -> bool | None:
+    """還原這個 change 上次是否略過 specs。None 代表尚未決定，呼叫端才提問。"""
+    raw = state.get("skip_specs", None)
+    if isinstance(raw, bool):
+        return raw
+    return _load_skip_specs_from_disk(project_dir, change_name)
+
+
+def _ask_skip_specs() -> bool | None:
+    """初始規劃、且還原不出上次決定時，詢問本次是否需要撰寫 specs。
+
+    回傳 False＝要寫 spec；True＝不寫（對應 skip_specs: true）；None＝使用者中止。
+    非互動式環境預設要寫 spec，與既有行為一致。
+    """
+    print(
+        f"\n{_YELLOW}  [分析+規劃 Agent] 本次任務是否需要撰寫 OpenSpec spec"
+        f"（specs/<domain>/spec.md）？{_RESET}",
+        flush=True,
+    )
+    print(f"{_YELLOW}    y — 需要寫 spec{_RESET}", flush=True)
+    print(
+        f"{_YELLOW}    n — 不需要（純重構／文件／設定；.openspec.yaml 設 skip_specs: true，略過 specs）{_RESET}",
+        flush=True,
+    )
+    if not sys.stdin.isatty():
+        print(f"{_YELLOW}  非互動式環境，預設為需要寫 spec{_RESET}\n", flush=True)
+        return False
+    while True:
+        try:
+            answer = input(f"{_YELLOW}  > {_RESET}").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print(f"\n{_RED}  已取消，請明確選擇是否需要撰寫 spec{_RESET}\n", flush=True)
+            return None
+        if answer in ("y", "yes", "是"):
+            return False
+        if answer in ("n", "no", "否"):
+            return True
+        print(f"{_YELLOW}  請輸入 y 或 n{_RESET}", flush=True)
+
+
+def _skip_specs_label(skip_specs: bool) -> str:
+    return "不撰寫 spec" if skip_specs else "需要撰寫 spec"
+
+
+def _ask_new_domain_name() -> str:
+    """選擇「以上皆非，建立新 domain」後詢問 domain 名稱（選填；留白由 Claude 依任務語意自行命名）。
+    呼叫方已確認為互動式環境，不需再做 isatty 檢查。
+    """
+    print(
+        f"\n{_YELLOW}  [分析+規劃 Agent] 新 domain 名稱為何？"
+        f"（選填，建議英文 kebab-case；直接 Enter 由 Agent 依任務語意自行命名）：{_RESET}",
+        flush=True,
+    )
+    try:
+        return input(f"{_YELLOW}  > {_RESET}").strip()
+    except (EOFError, KeyboardInterrupt):
+        print(f"\n{_YELLOW}  已中止，由 Agent 依任務語意自行命名{_RESET}\n", flush=True)
+        return ""
+
+
+def _ask_domain_selection(project_dir: str) -> tuple[list[str], str]:
+    """初始規劃、且 `_recover_domains()` 還原不出上次歸屬時，列出既有 domain 讓使用者選
+    （可複選、逗號分隔），或選「以上皆非，建立新 domain」。
+
+    回傳 (selected_existing_domains, new_domain_name)：
+    - 使用者選擇既有 domain：([domain, ...], "")
+    - 使用者選擇「以上皆非」：([], domain_name_or_"")
+    - 沒有既有 domain 或非互動式環境：([], "")
     """
     domains = _list_existing_domains(project_dir)
     if not domains:
-        return []
+        return [], ""
 
     new_idx = len(domains) + 1
     print(f"\n{_YELLOW}  [分析+規劃 Agent] 本次需求歸屬於哪一個既有 domain？{_RESET}", flush=True)
@@ -543,24 +630,26 @@ def _ask_domain_selection(project_dir: str) -> list[str]:
 
     if not sys.stdin.isatty():
         print(f"{_YELLOW}  非互動式環境，預設建立新 domain{_RESET}\n", flush=True)
-        return []
+        return [], ""
 
     while True:
         try:
             answer = input(f"{_YELLOW}  > {_RESET}").strip()
         except (EOFError, KeyboardInterrupt):
             print(f"\n{_YELLOW}  已中止，預設建立新 domain{_RESET}\n", flush=True)
-            return []
+            return [], ""
         if not answer:
             continue
 
         parts = [p.strip() for p in answer.split(",") if p.strip()]
         selected: list[str] = []
+        wants_new = False
         valid = True
         for p in parts:
             if p.isdigit():
                 idx = int(p)
                 if idx == new_idx:
+                    wants_new = True
                     continue
                 if 1 <= idx <= len(domains):
                     selected.append(domains[idx - 1])
@@ -574,27 +663,86 @@ def _ask_domain_selection(project_dir: str) -> list[str]:
                 valid = False
                 break
 
-        if valid:
-            return selected
-        print(f"{_YELLOW}  請輸入清單中的編號{_RESET}", flush=True)
+        if not valid:
+            print(f"{_YELLOW}  請輸入清單中的編號{_RESET}", flush=True)
+            continue
+
+        if wants_new and selected:
+            print(f"{_YELLOW}  「以上皆非」與既有 domain 不可同時選擇{_RESET}", flush=True)
+            continue
+
+        if wants_new:
+            new_name = _ask_new_domain_name()
+            return [], new_name
+
+        return selected, ""
+
+
+def _drain_stdin() -> None:
+    """清除 stdin buffer 中剩餘的輸入，防止使用者貼上多行文字時，
+    未被消耗的行混入後續的 input() 呼叫。"""
+    try:
+        import termios
+        termios.tcflush(sys.stdin, termios.TCIFLUSH)
+    except Exception:
+        pass
 
 
 def _ask_domain_purpose() -> str:
     """本次確定會建立新 domain 時（僅初始規劃）詢問使用者這個 domain 的 Purpose，選填——
     留白（含非互動式環境、使用者中止）就交由 Claude 依當次任務語意自行撰寫，不視為錯誤。
+
+    支援多行貼上：連續兩個空行（Enter Enter）或 Ctrl+D 結束輸入。
+    使用「雙空行」而非「單空行」為終止符，允許 Purpose 本文內含有 markdown 段落分隔（單空行）。
+    結束後一律 drain stdin，防止剩餘 buffer 行污染後續 grilling 的 input()。
     """
     print(
         f"\n{_YELLOW}  [分析+規劃 Agent] 這是新建立的 domain，若要指定它的 Purpose 請輸入"
-        f"（選填，直接 Enter 留白則由 Agent 依本次任務自行撰寫）：{_RESET}",
+        f"（選填；支援多行，貼上後連按兩次 Enter 結束；直接 Enter 由 Agent 依本次任務自行撰寫）：{_RESET}",
         flush=True,
     )
     if not sys.stdin.isatty():
         return ""
+    lines: list[str] = []
+    consecutive_empty = 0
     try:
-        return input(f"{_YELLOW}  > {_RESET}").strip()
+        while True:
+            line = input(f"{_YELLOW}  > {_RESET}")
+            if not line:
+                if not lines:
+                    # 第一行就是空行 → 使用者選擇略過
+                    break
+                consecutive_empty += 1
+                if consecutive_empty >= 2:
+                    break
+                lines.append(line)  # 保留單一空行（markdown 段落分隔）
+            else:
+                consecutive_empty = 0
+                lines.append(line)
     except (EOFError, KeyboardInterrupt):
-        print(f"\n{_YELLOW}  已略過，由 Agent 自行撰寫 Purpose{_RESET}\n", flush=True)
-        return ""
+        if not lines:
+            print(f"\n{_YELLOW}  已略過，由 Agent 自行撰寫 Purpose{_RESET}\n", flush=True)
+    finally:
+        _drain_stdin()
+    # 去除結尾空行
+    while lines and not lines[-1]:
+        lines.pop()
+    return "\n".join(lines).strip()
+
+
+def _build_new_domain_context(name: str, purpose: str) -> str:
+    """依使用者提供的 domain 名稱與 Purpose 組合出適當的提示文字（四種組合）。"""
+    if name and purpose:
+        return (
+            f"使用者已確認本次為建立新 domain，domain 名稱為 `{name}`，"
+            f"並指定了它的 Purpose：{purpose}\n\n"
+            f"`## Purpose` 直接採用使用者這段文字，不要自己另外改寫或簡化。"
+        )
+    if name:
+        return f"使用者已確認本次為建立新 domain，domain 名稱為 `{name}`。"
+    if purpose:
+        return _DOMAIN_CONTEXT_NEW_WITH_PURPOSE.replace("<<DOMAIN_PURPOSE_VALUE>>", purpose)
+    return _DOMAIN_CONTEXT_NEW
 
 
 def _resolve_project_dir() -> str:
@@ -654,8 +802,15 @@ def analyze_plan_node(state: AgentState) -> dict:
     change_name = state.get("change_name", "")
     branch_name = state.get("branch_name", "")
     project_dir = state.get("project_dir", "")
+    domains = _normalize_domains(state.get("domains"))
+    raw_skip = state.get("skip_specs", None)
+    skip_specs: bool | None = raw_skip if isinstance(raw_skip, bool) else None
 
-    def _fail(analysis: str) -> dict:
+    prior_session = take_session(state, _SESSION_KEY)
+
+    def _fail(analysis: str, session_id: str | None = None) -> dict:
+        """session_id 省略時沿用插槽裡原本的值：guard 與前置步驟（切分支、openspec init）
+        失敗時還沒產生新的 session，不該把先前中斷留下的 id 清掉。"""
         return {
             "status": "error",
             "analysis": analysis,
@@ -663,7 +818,29 @@ def analyze_plan_node(state: AgentState) -> dict:
             "change_name": change_name,
             "branch_name": branch_name,
             "project_dir": project_dir,
+            "domains": domains,
+            "skip_specs": skip_specs,
+            **store_session(_SESSION_KEY, prior_session if session_id is None else session_id),
         }
+
+    # Guard: 初始規劃已完成，不可再次執行初始規劃（只允許重新規劃或修補）
+    if not is_replan and not is_human_revise and state.get("analysis"):
+        print(
+            f"{_RED}  [分析+規劃 Agent] 此 change 已完成初始規劃，"
+            f"不可重複執行初始規劃（僅允許重新規劃或修補）{_RESET}\n",
+            flush=True,
+        )
+        return _fail("此 change 已完成初始規劃，不可重複執行初始規劃")
+
+    # Guard: review_blocking=True 但 review_result 為空 → 狀態不一致，無法重新規劃
+    # human_feedback 提供的人工修補不依賴 review_result，不受此 guard 限制
+    if not is_human_revise and state.get("review_blocking") and not review_result:
+        print(
+            f"{_RED}  [分析+規劃 Agent] review_blocking=True 但 review_result 為空，"
+            f"無法執行重新規劃{_RESET}\n",
+            flush=True,
+        )
+        return _fail("review_result 為空，無法重新規劃")
 
     model = _MODEL
     domain_context_value = ""
@@ -714,17 +891,62 @@ def analyze_plan_node(state: AgentState) -> dict:
             print(f"{_RED}  [分析+規劃 Agent] openspec init 失敗：{init_result.error_text}{_RESET}\n", flush=True)
             return _fail(f"openspec init 失敗：{init_result.error_text}")
 
-        domains = _ask_domain_selection(project_dir)
-        if domains:
-            domain_context_value = _DOMAIN_CONTEXT_EXISTING.replace(
-                "<<DOMAIN_LIST_VALUE>>", "、".join(domains)
+        recovered_skip = _recover_skip_specs(state, project_dir, change_name)
+        if prior_session:
+            # 接回中斷的 session 時不會重送完整 prompt，這些提示不會被用到，別再問一次
+            skip_specs = False if recovered_skip is None else recovered_skip
+            print(
+                f"{_YELLOW}  [分析+規劃 Agent] 接續中斷的 session，略過是否撰寫 spec 的提問"
+                f"（{_skip_specs_label(skip_specs)}）{_RESET}",
+                flush=True,
+            )
+        elif recovered_skip is not None:
+            skip_specs = recovered_skip
+            print(
+                f"{_YELLOW}  [分析+規劃 Agent] 沿用上次的決定："
+                f"{_skip_specs_label(skip_specs)}，略過提問{_RESET}",
+                flush=True,
             )
         else:
-            domain_purpose = _ask_domain_purpose()
-            domain_context_value = (
-                _DOMAIN_CONTEXT_NEW_WITH_PURPOSE.replace("<<DOMAIN_PURPOSE_VALUE>>", domain_purpose)
-                if domain_purpose else _DOMAIN_CONTEXT_NEW
+            skip_specs = _ask_skip_specs()
+            if skip_specs is None:
+                return _fail("未確認是否需要撰寫 spec，無法繼續規劃")
+
+        if skip_specs:
+            domains = []
+            print(
+                f"{_YELLOW}  [分析+規劃 Agent] 本次不撰寫 spec，略過 domain 歸屬提問{_RESET}",
+                flush=True,
             )
+        elif prior_session:
+            print(
+                f"{_YELLOW}  [分析+規劃 Agent] 接續中斷的 session，略過 domain 歸屬提問{_RESET}",
+                flush=True,
+            )
+            recovered = _recover_domains(state, project_dir, change_name)
+            if recovered:
+                domains = recovered
+                domain_context_value = _existing_domain_context(domains)
+        else:
+            recovered = _recover_domains(state, project_dir, change_name)
+            if recovered:
+                domains = recovered
+                print(
+                    f"{_YELLOW}  [分析+規劃 Agent] 沿用上次的 domain："
+                    f"{'、'.join(domains)}，略過歸屬提問{_RESET}",
+                    flush=True,
+                )
+                domain_context_value = _existing_domain_context(domains)
+            else:
+                selected, new_domain_name = _ask_domain_selection(project_dir)
+                if selected:
+                    domains = selected
+                    domain_context_value = _existing_domain_context(domains)
+                else:
+                    domain_purpose = _ask_domain_purpose()
+                    domain_context_value = _build_new_domain_context(new_domain_name, domain_purpose)
+                    if new_domain_name:
+                        domains = [new_domain_name]
 
         change_result = ensure_change_created(project_dir_abs, change_name)
         if not change_result.ok:
@@ -733,6 +955,12 @@ def analyze_plan_node(state: AgentState) -> dict:
                 flush=True,
             )
             return _fail(f"openspec new change 失敗：{change_result.error_text}")
+    else:
+        # 重新規劃／依人工意見調整不重問；舊 state 沒有這個欄位時預設要寫 spec
+        if skip_specs is None:
+            skip_specs = _load_skip_specs_from_disk(project_dir, change_name)
+        if skip_specs is None:
+            skip_specs = False
 
     print(f"\n{_BANNER}{'═'*50}\n  [分析+規劃 Agent] 開始 — {label}\n{'═'*50}{_RESET}\n", flush=True)
 
@@ -755,6 +983,7 @@ def analyze_plan_node(state: AgentState) -> dict:
                 .replace("<<PROJECT_DIR_VALUE>>", project_dir)
                 .replace("<<CHANGE_NAME_VALUE>>", change_name)
                 .replace("<<BRANCH_NAME_VALUE>>", branch_name)
+                .replace("<<SKIP_SPECS_CONTEXT>>", _skip_specs_context(bool(skip_specs)))
             )
         elif is_human_revise:
             system = (
@@ -764,19 +993,38 @@ def analyze_plan_node(state: AgentState) -> dict:
                 .replace("<<PROJECT_DIR_VALUE>>", project_dir)
                 .replace("<<CHANGE_NAME_VALUE>>", change_name)
                 .replace("<<BRANCH_NAME_VALUE>>", branch_name)
+                .replace("<<SKIP_SPECS_CONTEXT>>", _skip_specs_context(bool(skip_specs)))
             )
         else:
             system = (
                 _SYSTEM_INITIAL
                 .replace("<<PROJECT_CONTEXT>>", project_context)
                 .replace("<<PROJECT_DIR_VALUE>>", project_dir)
+                .replace(
+                    "<<PROJECT_SECTION_TITLE>>",
+                    _PROJECT_SECTION_TITLE if skip_specs else _PROJECT_AND_DOMAIN_SECTION_TITLE,
+                )
+                .replace(
+                    "<<CONFIRMED_SCOPE>>",
+                    "目標專案已由系統確認" if skip_specs else "目標專案與 domain 已由系統確認",
+                )
                 .replace("<<DOMAIN_CONTEXT_VALUE>>", domain_context_value)
                 .replace("<<CHANGE_NAME_VALUE>>", change_name)
                 .replace("<<BRANCH_NAME_VALUE>>", branch_name)
+                .replace("<<SKIP_SPECS_CONTEXT>>", _skip_specs_context(bool(skip_specs)))
             )
 
         prompt = f"{system}\n\n{skills_block}\n\n任務：{state['task']}"
-        result = _run_with_grilling(prompt, tools=tools, model=model, timeout=300)
+
+        last_session = prior_session
+
+        def _run(p: str, resume: str | None):
+            nonlocal last_session
+            r = _run_with_grilling(p, tools=tools, model=model, timeout=300, resume=resume)
+            last_session = r.session_id or last_session
+            return r
+
+        result = call_resuming(_run, prompt, prior_session, "分析+規劃 Agent")
     except Exception as e:
         print(f"{_RED}  [分析+規劃 Agent] 發生例外：{e}{_RESET}\n", flush=True)
         return _fail(f"分析階段發生例外：{e}")
@@ -789,12 +1037,18 @@ def analyze_plan_node(state: AgentState) -> dict:
 
     if result.is_error:
         print(f"{_RED}  [分析+規劃 Agent] Claude 執行失敗：{result.text}{_RESET}\n", flush=True)
-        return _fail(result.text)
+        if is_usage_limit_error(result.text):
+            print(
+                f"{_YELLOW}  [分析+規劃 Agent] 用量重置後重跑 `--node analyze_plan` 並選同一個 "
+                f"change，即會接回這次的 session 續作{_RESET}\n",
+                flush=True,
+            )
+        return _fail(result.text, last_session)
 
-    validate_error = _run_with_validate(result, project_dir, change_name, tools, model)
+    validate_error, validate_session = _run_with_validate(result, project_dir, change_name, tools, model)
     if validate_error:
         print(f"{_RED}  [分析+規劃 Agent] {validate_error}{_RESET}\n", flush=True)
-        return _fail(validate_error)
+        return _fail(validate_error, validate_session or last_session)
 
     if is_replan and review_level == "重寫":
         _reset_task_checkboxes(project_dir, change_name)
@@ -808,6 +1062,9 @@ def analyze_plan_node(state: AgentState) -> dict:
         )
         return _fail("讀不到 proposal.md 或 tasks.md")
 
+    if not domains:
+        domains = _list_change_domains(project_dir, change_name)
+
     return {
         "analysis": analysis,
         "plan": plan,
@@ -819,4 +1076,7 @@ def analyze_plan_node(state: AgentState) -> dict:
         "change_name": change_name,
         "branch_name": branch_name,
         "project_dir": project_dir,
+        "domains": domains,
+        "skip_specs": skip_specs,
+        **store_session(_SESSION_KEY, ""),
     }

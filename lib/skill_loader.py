@@ -18,7 +18,7 @@ SKILLS_DIRS = [PROJECT_SKILLS_DIR, USER_SKILLS_DIR]
 # 的內建副本永遠不會被原生機制發現；只列名稱的話，能不能用完全取決於執行者自己的 ~/.claude/skills/
 # 剛好有沒有同名 skill，違反了本檔案開頭「讓專案自帶所需 skill、不依賴使用者本機設定」的設計目標。
 _FULL_CONTENT_SKILLS: set[str] = {
-    "grilling", "domain-modeling", "code-review", "tdd",
+    "grilling", "domain-modeling", "code-review", "tdd", "openspec-authoring",
 }
 
 

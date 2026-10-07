@@ -1,6 +1,11 @@
+import os
 import time
-from ..core import AgentState
-from ..lib import call_claude, format_usage_stats, build_skills_block, build_project_doc_hint_for, ensure_on_branch
+from ..core import AgentState, take_session, store_session
+from ..lib import (
+    call_claude, call_resuming, format_usage_stats, build_skills_block,
+    build_project_doc_hint_for, ensure_on_branch, is_usage_limit_error,
+    LANGUAGE_POLICY, REPO_ROOT,
+)
 
 _SKILLS = [
     "tdd",
@@ -10,16 +15,18 @@ _SKILLS = [
 # None 則沿用 claude CLI 本身的預設模型）
 _MODEL = "sonnet"
 
-_SYSTEM = """你是一位資深全端工程師，負責「執行」階段。
+_TIMEOUT = 900
 
-請用繁體中文回答。
+# 中斷 session 插槽的 owner 名稱（見 core/session.py）
+_SESSION_KEY = "execute"
+
+_SYSTEM = f"""你是一位資深全端工程師，負責「執行」階段。
 
 ## 執行前準備（必須完成）
 
 在開始任何修改前，必須先：
 1. 用 Read 讀取 `<<CHANGE_LOCATION>>` 下的 proposal.md、specs/**/*.md、tasks.md
    （若有 design.md 一併讀取；小改動可能沒有此檔，不視為缺漏）。
-   規格、驗收條件與任務清單以這些檔案為準，不要依賴本 prompt 是否貼上 TASK 正文。
 2. 依下方「目標專案」讀取其 CLAUDE.md / AGENT.md，了解該專案的架構、指令（測試、lint、build 等）、
    目錄慣例、程式碼規範，以及**技術棧**；找不到說明檔則自行用 Read/Glob/Grep 探索程式碼並比對現有風格
 3. 依偵測到的技術棧，自行從你可用的 skills 中挑選並使用適合的其他 skill
@@ -31,8 +38,9 @@ _SYSTEM = """你是一位資深全端工程師，負責「執行」階段。
 
 ## 執行方式
 
-依 `<<CHANGE_LOCATION>>/tasks.md` 的順序**嚴格依序**完成所有修改：
-- 逐一執行每個 TASK，不跳過、不重排順序
+依 `<<CHANGE_LOCATION>>/tasks.md` 的順序**嚴格依序**處理（不重排）：
+- `- [ ]` 的 TASK 必須執行，不得跳過
+- `- [x]` 的 TASK **預設略過，不要重做**。略過前先用 Read/Grep 核對該 TASK 聲稱完成的檔案是否真的在磁碟上、內容是否對得上規格；對得上就略過，對不上（checkbox 已勾但實作缺漏或不完整）才重做該項並維持勾選。這個規則在全新 session 與接回中斷 session 都適用——不要因為 prompt 說「完成所有修改」就把已完成的項目重做一遍
 - 用 Read 工具讀取現有內容，再用 Write/Edit 工具寫入修改
 - 用 Bash 執行必要指令
 - 程式碼風格、命名慣例、目錄結構、i18n／型別／auto-generated 檔案等規則，一律依照該專案
@@ -41,7 +49,13 @@ _SYSTEM = """你是一位資深全端工程師，負責「執行」階段。
   `- [ ]` 改成 `- [x]`，讓這份檔案即時反映實際完成進度（後續 Review Agent 會依此核對）
 - 若 tasks.md 中出現「撰寫／更新測試」的 TASK，**必須**依 tdd skill 的紅-綠循環執行該 TASK：
   先寫一個會失敗的測試，再寫最小可行的實作讓測試通過，最後重構；不可先完成其他 TASK 的實作、事後才回頭補測試
-- 過程中定期執行型別檢查與單一測試檔案；全部 TASK 完成後再跑完整測試（見下方）
+- 撰寫或更新測試前，先用 Grep/Read **讀取現有測試**，確認此次變動涉及的 Scenario 是否已有相同或可覆蓋情境的測試：
+  - 若現有測試已覆蓋相同情境，**不重複撰寫**；若情境相似但覆蓋範圍不完整，**合併**成一個測試即可
+  - 允許刪除或合併舊有重複測試，但**刪除後必須確認每個 Scenario 仍有至少一個對應測試**；
+    不可讓原本有測試的 Scenario 在修改後變成沒有任何測試
+- **Scenario ↔ 測試名稱對應**：`<<CHANGE_LOCATION>>/specs/**/*.md` 裡每一個 `#### Scenario:` 標題，
+  都必須有一個名稱**完全相同**的 `describe(...)` / `test(...)` / `it(...)`（或對應語言的測試語法）。
+- 全部 TASK 完成後再跑完整測試（見下方）
 - **不要** commit——修改是否提交由使用者事後決定
 - **不要**自行呼叫 /code-review——後續有獨立的 Review Agent 依專案規格審查本次修改，此處只需完成實作與測試
 
@@ -49,6 +63,7 @@ _SYSTEM = """你是一位資深全端工程師，負責「執行」階段。
 
 - 寫入前先讀取原始內容，避免覆蓋不相關程式碼
 - 不修改任何 auto-generated 檔案（CLAUDE.md / AGENT.md 通常會標示這類目錄）
+- **非必要不撰寫程式碼註解**：只在「為什麼」非顯而易見時（隱藏限制、微妙不變量、特定 bug 的繞過方式）才加一行短註解；說明程式碼「做什麼」的註解一律省略
 
 ## 文件同步要求
 
@@ -72,6 +87,8 @@ _SYSTEM = """你是一位資深全端工程師，負責「執行」階段。
 1. 所有已修改的程式碼檔案清單
 2. 所有已新增/修改的說明文件清單
 3. 每個 TASK 的完成狀態（✅ 已完成 / ❌ 未完成 + 原因）
+
+{LANGUAGE_POLICY}
 """
 
 _BANNER = "\033[1;32m"
@@ -83,10 +100,22 @@ _RESET  = "\033[0m"
 def execute_node(state: AgentState) -> dict:
     print(f"\n{_BANNER}{'═'*50}\n  [執行 Agent] 開始\n{'═'*50}{_RESET}\n", flush=True)
 
+    project_dir = state.get("project_dir", "")
+    change_name = state.get("change_name", "")
+    change_dir = os.path.join(REPO_ROOT, project_dir, "openspec", "changes", change_name)
+    if not os.path.isdir(change_dir):
+        print(
+            f"{_RED}  [執行 Agent] 找不到 OpenSpec change 目錄：{change_dir}，"
+            f"請先執行 analyze_plan{_RESET}\n",
+            flush=True,
+        )
+        return {"status": "error", "execution_result": f"找不到 OpenSpec change 目錄：{change_dir}"}
+
+    prior_session = take_session(state, _SESSION_KEY)
+
     start = time.monotonic()
 
     try:
-        project_dir = state.get("project_dir", "")
         branch_name = state.get("branch_name", "")
         if project_dir and branch_name:
             ok, msg = ensure_on_branch(project_dir, branch_name)
@@ -97,15 +126,22 @@ def execute_node(state: AgentState) -> dict:
             return {"status": "error", "execution_result": "缺少 branch_name，無法在指定分支上實作"}
 
         skills_block = build_skills_block(_SKILLS)
-        change_location = f"{project_dir}/openspec/changes/{state.get('change_name', '')}"
+        change_location = f"{project_dir}/openspec/changes/{change_name}"
         system = (
             _SYSTEM
             .replace("<<PROJECT_CONTEXT>>", build_project_doc_hint_for(project_dir))
             .replace("<<CHANGE_LOCATION>>", change_location)
             .replace("<<BRANCH_NAME_VALUE>>", branch_name)
         )
-        prompt = f"{system}\n\n{skills_block}\n\n任務：{state['task']}"
-        result = call_claude(prompt, tools="full", timeout=900, model=_MODEL)
+        prompt = (
+            f"{system}\n\n{skills_block}\n\n"
+            f"請依 `{change_location}` 的 OpenSpec change 執行："
+            "讀取該目錄後，依 tasks.md 處理未完成項。"
+        )
+        result = call_resuming(
+            lambda p, resume: call_claude(p, tools="full", timeout=_TIMEOUT, model=_MODEL, resume=resume),
+            prompt, prior_session, "執行 Agent",
+        )
     except Exception as e:
         print(f"{_RED}  [執行 Agent] 發生例外：{e}{_RESET}\n", flush=True)
         return {"status": "error", "execution_result": f"執行階段發生例外：{e}"}
@@ -118,7 +154,21 @@ def execute_node(state: AgentState) -> dict:
 
     if result.is_error:
         print(f"{_RED}  [執行 Agent] Claude 執行失敗：{result.text}{_RESET}\n", flush=True)
-        return {"status": "error", "execution_result": result.text}
+        if is_usage_limit_error(result.text):
+            print(
+                f"{_YELLOW}  [執行 Agent] 用量重置後重跑 `--node execute` 並選同一個 change，"
+                f"即會接回這次的 session 續作{_RESET}\n",
+                flush=True,
+            )
+        return {
+            "status": "error",
+            "execution_result": result.text,
+            **store_session(_SESSION_KEY, result.session_id or prior_session),
+        }
 
     trimmed = result.text[-4000:] if len(result.text) > 4000 else result.text
-    return {"execution_result": trimmed}
+    return {
+        "status": "ok",
+        "execution_result": trimmed,
+        **store_session(_SESSION_KEY, ""),
+    }

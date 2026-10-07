@@ -1,8 +1,12 @@
-from langgraph.graph import StateGraph, END
+from langgraph.graph import StateGraph, START, END
 from .state import AgentState
 from ..nodes import analyze_plan_node, execute_node, review_node, human_confirm_node, archive_node
 
 MAX_ITERATIONS = 3
+
+
+def _route_start(state: AgentState) -> str:
+    return state.get("start_from", "") or "analyze_plan"
 
 
 def route_after_review(state: AgentState) -> str:
@@ -62,7 +66,18 @@ def build_workflow() -> StateGraph:
     # - review 通過 → archive_change：把這次的 OpenSpec change 併入目標專案持久的 openspec/specs/
     #   （放棄重試、或發生 error 時直接 END，不 archive）
 
-    graph.set_entry_point("analyze_plan")
+    graph.add_conditional_edges(
+        START,
+        _route_start,
+        {
+            "analyze_plan": "analyze_plan",
+            "human_confirm": "human_confirm",
+            "execute": "execute",
+            "review": "review",
+            "increment": "increment",
+            "archive_change": "archive_change",
+        },
+    )
     graph.add_edge("analyze_plan", "human_confirm")
 
     graph.add_conditional_edges(

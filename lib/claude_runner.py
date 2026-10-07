@@ -5,6 +5,7 @@ import shutil
 import subprocess
 import sys
 from dataclasses import dataclass
+from typing import Callable
 from .project_context import REPO_ROOT
 
 TOOL_PRESETS = {
@@ -22,8 +23,8 @@ TOOL_PRESETS = {
 
 MODEL_IDS = {
     "haiku":  "claude-haiku-4-5-20251001",
-    "sonnet": "claude-sonnet-4-6",
-    "opus":   "claude-opus-4-7",
+    "sonnet": "claude-sonnet-5",
+    "opus":   "claude-opus-5-5",
     "fable":  "claude-fable-5",
 }
 
@@ -48,8 +49,27 @@ _RESET   = "\033[0m"
 QUESTION_MARKER = "QUESTION:"
 _QUESTION_LINE_RE = re.compile(r"(?:^|\n)\s*" + re.escape(QUESTION_MARKER))
 
-_RESUME_AFTER_LIMIT_PROMPT = (
-    "系統偵測到上一輪呼叫因 token / rate limit 中斷，現在恢復執行。"
+# 語言政策（三個 Claude 節點共用）：`_log_event()` 印出的過程敘述從不存入任何變數，換成英文可省下
+# 約一半的 output token（中文約 1 token/字；同樣語意的英文字數約兩倍，但約 4 字才 1 token），而
+# output 又比 input 貴。反過來，最終回應會被寫進 state.json、被 `extract_review_level()` 這類
+# regex 解析、並直接呈現給使用者，所以它與所有寫出的檔案一律維持繁體中文——省 token 不能省到
+# 改變交付物的語言。這也是為什麼政策必須明確切在「過程」與「最終回應」之間，而不是整體換語言。
+LANGUAGE_POLICY = """## Language
+
+Narrate your work in **English** — progress notes, reasoning, tool commentary. None of it is
+persisted anywhere, and English costs roughly half the tokens of Chinese.
+
+Write the following in **繁體中文（Traditional Chinese）** regardless of the above:
+
+- every file you create or edit: OpenSpec artifacts, code comments, docs, on-disk reports
+- anything addressed to the user, including every `QUESTION:` line
+- your final response for this turn, report text included, keeping any required markers
+  (such as `REVIEW_LEVEL:` values) exactly as this prompt specifies them
+
+In short: work in English, deliver in 繁體中文."""
+
+RESUME_AFTER_INTERRUPT_PROMPT = (
+    "系統偵測到上一輪呼叫中斷（用量上限或程序結束），現在恢復執行。"
     "在繼續之前，請先重新確認目前的檔案內容與 tasks.md 的勾選狀態"
     "（中斷前可能已經寫入部分變更或打勾），不要重做已完成的部分，"
     "也不要假設中斷前的最後一個動作一定完整或正確，"
@@ -69,10 +89,67 @@ _TOKEN_LIMIT_KEYWORDS = [
     "billing",
 ]
 
+# 訂閱制（Pro / Max / Team 席位）的三種上限訊息共用同一個句型：
+#   You've hit your session limit · resets 3:45pm
+#   You've hit your weekly limit · resets Mon 12:00am
+#   You've hit your Opus limit · resets 3:45pm
+# 三句都對不上上面任何關鍵字，漏判的後果不是重試失敗而是節點直接以 error 收場
+# （execute 曾因此在 1.8 秒內結束、review 跟著跳過），所以額外比對整句形狀，
+# 也順帶涵蓋未來可能出現的其他 per-model 上限（例如 Sonnet limit）。
+_LIMIT_MESSAGE_RE = re.compile(r"hit your\b.{0,40}?\blimit\b", re.S)
 
-def _is_token_limit_error(text: str) -> bool:
+
+def is_usage_limit_error(text: str) -> bool:
+    """判斷錯誤訊息是否為「等重置就會好」的用量上限。
+
+    脈絡視窗滿了雖然也長得像上限，但等待不會讓它恢復（由 auto-compact 處理），
+    因此明確排除，避免無限期停在等待人工按鍵的狀態。
+    """
     lower = text.lower()
-    return any(kw in lower for kw in _TOKEN_LIMIT_KEYWORDS)
+    if any(kw in lower for kw in _TOKEN_LIMIT_KEYWORDS):
+        return True
+    match = _LIMIT_MESSAGE_RE.search(lower)
+    return bool(match) and "context" not in match.group(0)
+
+
+def call_resuming(
+    run: Callable[[str, str | None], "ClaudeResult"],
+    prompt: str,
+    session_id: str,
+    label: str,
+) -> "ClaudeResult":
+    """上次因用量上限中斷、且 session id 已存進 state 時，接回同一個 Claude session。
+
+    接回時只送 `RESUME_AFTER_INTERRUPT_PROMPT` 這段續作指示，**不重送完整 prompt**：
+    沒有記憶的新 session 會重新探索、把做到一半的最後一項從頭來；execute 的 `_SYSTEM`
+    已要求略過核對過的 `- [x]`，所以冷啟動不再重做已完成項，但接回仍能保住「做到一半」
+    的脈絡，也避免再付一次完整探索。
+
+    `run(prompt, resume)` 由呼叫端提供，因為各節點對 Claude 的呼叫包著不同的自有迴圈
+    （analyze_plan 的 grilling 問答、review 的報告補完重試），不是單純一次 `call_claude`。
+
+    session 已失效（換機器、`agent_home` volume 重建、Claude 端過期）時退回完整 prompt
+    重跑，也就是沒有這個機制之前的行為。**接回後又撞上限不算失效**——那要維持回報，讓呼叫端
+    再存一次 session id，否則就會退回完整 prompt 而重做已完成的工作。
+    """
+    if not session_id:
+        return run(prompt, None)
+
+    print(
+        f"{_YELLOW}  [{label}] 接續上次中斷的 session（{session_id}），"
+        f"依實際進度續作、不重跑已完成的部分{_RESET}",
+        flush=True,
+    )
+    result = run(RESUME_AFTER_INTERRUPT_PROMPT, session_id)
+    if not result.is_error or is_usage_limit_error(result.text):
+        return result
+
+    print(
+        f"{_YELLOW}  [{label}] 無法接續該 session（{result.text[:120]}），"
+        f"改以完整 prompt 重新開始{_RESET}",
+        flush=True,
+    )
+    return run(prompt, None)
 
 
 def _log_event(event: dict) -> None:
@@ -268,13 +345,13 @@ def call_claude(
     while True:
         result = _run_claude_once(timeout, cmd)
 
-        if result.is_error and _is_token_limit_error(result.text):
+        if result.is_error and is_usage_limit_error(result.text):
             print(f"\n{_YELLOW}{'═'*60}", flush=True)
-            print(f"  ⚠  偵測到 Token / Rate Limit 錯誤，工作流程已暫停", flush=True)
+            print(f"  ⚠  偵測到用量上限（session / weekly / Opus / rate limit），工作流程已暫停", flush=True)
             print(f"  錯誤訊息：{result.text[:300]}", flush=True)
             print(f"{'═'*60}", flush=True)
-            print(f"  請等待 token 配額更新後，按 Enter 繼續；", flush=True)
-            print(f"  或輸入 q 後按 Enter 中止程序。{_RESET}", flush=True)
+            print(f"  請等到訊息中的 resets 時間、用量重置後，按 Enter 繼續；", flush=True)
+            print(f"  或輸入 q 後按 Enter 中止程序（session id 會存進 state，之後可再接回）。{_RESET}", flush=True)
             print(f"{_YELLOW}  > {_RESET}", end="", flush=True)
             try:
                 user_input = sys.stdin.readline()
@@ -293,7 +370,7 @@ def call_claude(
                     f"{_YELLOW}  接續中斷前的 session（{result.session_id}）繼續...{_RESET}\n",
                     flush=True,
                 )
-                cmd = _build_cmd(_RESUME_AFTER_LIMIT_PROMPT, result.session_id)
+                cmd = _build_cmd(RESUME_AFTER_INTERRUPT_PROMPT, result.session_id)
             else:
                 print(
                     f"{_YELLOW}  中斷前未取得 session id，改為重新呼叫 Claude...{_RESET}\n",

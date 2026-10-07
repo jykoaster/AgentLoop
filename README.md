@@ -93,19 +93,53 @@ docker exec -it agent_loop claude login
 python -m AgentLoop.main "幫我在後端新增一個 GET /tables/featured 端點"
 
 # 只單獨執行某一個 node，方便除錯（human_confirm 不支援單獨執行）
-python -m AgentLoop.main --node analyze_plan "任務描述"
-python -m AgentLoop.main --node execute --state-file /tmp/state.json "任務描述"
-python -m AgentLoop.main --node review "任務描述"
-
-# archive：參數即 OpenSpec change 名稱，會掃描工作區 */openspec/changes/<name>/ 定位後封存
-python -m AgentLoop.main --node archive 54-feat-ai-ad-content-extend-to-1024-chars
+# 會列出目標專案 .agentloop/changes/ 底下已有的 change 供選擇，跑完繼續後面的流程
+# 不帶任務描述：任務描述與其餘欄位一律沿用選定 change 的 state.json
+python -m AgentLoop.main --node analyze_plan
+python -m AgentLoop.main --node execute
+python -m AgentLoop.main --node review
+python -m AgentLoop.main --node archive
 ```
+
+`--node` 模式刻意不接受任務描述（傳了會直接報錯）：state 裡已經有當初的任務，再傳一份只會覆蓋掉原值並寫回 `state.json`。也因此 `--node` 一定要選到一個既有的 change，找不到任何 `state.json` 時會中止——全新任務請用上面完整工作流的形式。
 
 完整工作流跑到 `human_confirm` 時會暫停，在終端機顯示規劃摘要與 TASK 清單，輸入 `y` 才會繼續往下執行。
 
 執行過程中，`analyze_plan` 第一次進行初始規劃時會先在終端機詢問**本次任務要使用的 git 分支名稱（必填）**：已存在則切過去，不存在則從目前 HEAD 新建。OpenSpec change 名稱由此分支轉成 kebab-case（例如 `feature/add-login` → `feature-add-login`），之後規劃、實作、審查、archive 都在這個分支上進行。此值會沿用到同一個任務後續的重新規劃／依人工意見調整，不會重複問。
 
+接著會問**本次是否需要撰寫 spec**（`y` 寫 `specs/<domain>/spec.md`；`n` 表示純重構／文件／設定，不寫 spec）。答案記在 state 的 `skip_specs`（`n` 為 `true`），同一個 change 之後再規劃、或驗收後再開一輪，都會沿用、不再問。選 `n` 時不會再問 domain 歸屬。
+
+### 撞到 Claude 用量上限時
+
+任一節點跑到一半撞上用量上限（`You've hit your session limit · resets 3:45pm` 這類訊息，訂閱制另有 weekly 與 Opus 各自的上限）時，工作流程會**暫停**並在終端機等待：
+
+- 等到訊息裡的 `resets` 時間、用量重置後按 **Enter** → 接回中斷前的同一個 Claude session 繼續（只送一段「先確認 tasks.md 實際進度再續作」的指示，不重跑已完成的部分）
+- 輸入 **`q`** 後按 Enter → 中止
+
+**只要別關掉終端機，按 Enter 就好。** 若已經按 `q`、Ctrl-C 或程序已結束，中斷節點的 session id 會被存進目標專案的 `.agentloop/changes/<change>/state.json`，所以重置後重跑**中斷的那個節點**、並選同一個 change，就會 `--resume` 接回原本的 session 續作：
+
+```bash
+python -m AgentLoop.main --node analyze_plan
+python -m AgentLoop.main --node execute
+python -m AgentLoop.main --node review
+```
+
+`analyze_plan`、`execute`、`review` 三個節點都支援。每個 change 同時只會有一個中斷中的 session，節點正常跑完就自動清掉，所以不需要自己記是哪個節點斷的——記錯也不會接錯，節點只認屬於自己的 session。
+
+注意 `analyze_plan` 預設用 Opus 且 grilling 最多問 15 題，很容易先把 5 小時窗口吃掉，導致後面的 `execute` 一開跑就沒額度。
+
 規格文件遵照 [OpenSpec](https://github.com/Fission-AI/OpenSpec) 的 change/spec-delta 規則，寫在**目標專案**（不是 AgentLoop 這個 repo）下的 `openspec/changes/<change 名稱>/`（`proposal.md`/`tasks.md`/`specs/<domain>/spec.md`；非小改動時另有 `design.md`）。目標專案第一次被處理時，若尚未有 `openspec/` 目錄，`analyze_plan` 會自動執行一次 `openspec init` bootstrap，不需要手動介入；`openspec` CLI 已由 Dockerfile 自動安裝在容器內。審查通過後，最後一個節點會呼叫 `openspec archive` 把這次的規格差異併入目標專案持久的 `openspec/specs/`，跨任務累積成完整的行為規格。
+
+### 語意搜尋目標專案的規格
+
+```bash
+python -m AgentLoop.search "目前有哪些功能有被權限控管"
+python -m AgentLoop.search --reindex "query"   # 強制重建索引後再搜尋
+```
+
+對目標專案的整個 `openspec/`（`specs/` + `changes/`）做向量語意搜尋，然後由 Claude 依搜尋結果合成自然語言答案（RAG）。索引儲存於目標專案的 `openspec/.vector_index/vector.db`，每次查詢前自動偵測是否有新的規格檔案，有則重建；第一次執行會下載 embedding 模型（約 100 MB，快取於容器的 `~/.cache/fastembed/`）。
+
+**認證**：優先使用 `.env` 的 `ANTHROPIC_API_KEY`；未設定時自動 fallback 到 `claude` CLI（使用容器現有的 OAuth 登入狀態）。可用 `SEARCH_MODEL` 覆蓋模型（`haiku`/`sonnet`/`opus`/`fable`），預設為 `haiku`。
 
 ---
 
@@ -160,7 +194,7 @@ python -m AgentLoop.main --node archive 54-feat-ai-ad-content-extend-to-1024-cha
 視情況而定，不是所有目標專案都一定要有 Docker：
 
 - **規劃／審查中的讀取類操作**（讀 `CLAUDE.md`、產出計畫、`git diff HEAD` 比對）不需要目標專案有 Docker，任何技術棧都能處理。
-- 但 `execute` 與 `review` 節點**強制要執行目標專案的測試指令**，而 AgentLoop 容器本身只原生安裝了 **Python 3.11** 與 **Node.js 20**（見 `Dockerfile`）。因此：
+- 但 `execute` 與 `review` 節點**強制要執行目標專案的測試指令**，而 AgentLoop 容器本身只原生安裝了 **Python 3.11** 與 **Node.js 22**（見 `Dockerfile`）。因此：
   - 若目標專案是 Python／Node 專案，且測試不依賴額外服務（資料庫、cache 等），可以在 AgentLoop 容器內直接跑測試，**不需要**目標專案有 Docker。
   - 若目標專案使用其他語言、或測試需要額外服務，則**需要**目標專案本身能透過 `docker compose up` / `exec` 之類的指令啟動與跑測試——AgentLoop 容器內建 Docker CLI 並掛載 host 的 `docker.sock`（DooD，見上方「首次使用」前的 Docker outside of Docker 說明），正是為了讓 Agent 能在容器內對目標專案下這類指令；容器本身沒有其他語言 runtime，也不會另外起一顆 Docker daemon。
   - 這件事應該寫進目標專案的 `CLAUDE.md`／`AGENT.md`：測試指令若需要透過 `docker compose exec ...` 執行，直接寫清楚，Agent 才會照著跑，而不是誤用容器內不存在的原生指令。

@@ -3,3 +3,4 @@ __pycache__/
 .claude/*
 !.claude/skills/
 docs/nodes/
+tests/evals/outputs/
