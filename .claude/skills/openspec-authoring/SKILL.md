@@ -55,23 +55,17 @@
 `#### Scenario:`（逐步邏輯 + GIVEN/WHEN/THEN）。
 
 **【核心原則：spec 是正向契約，不是實作差異紀錄】**
-spec 只描述「系統保證具備哪些行為」。讀者不知道歷史版本——不提某個行為，就等同於不保證它存在；
-不需要、也絕對不可以另外寫 MUST NOT 或負向 Scenario 來宣告它不在。
-在任何 Requirement 主文或 Scenario（含逐步邏輯、GIVEN/WHEN/THEN）中，**禁止以下寫法**：
+spec 只描述系統仍保證的行為。沒寫到就沒有承諾（不存在、送出時不帶、原值不變、不受影響），靠不寫，不准點名。
 
-- 描述 UI 元件缺席：`MUST NOT 顯示分頁元件`、`不顯示總筆數說明` 等
-- 標題帶有負向語意：`Scenario: 訪問日誌不顯示統計文字`、`Scenario: 沒有分頁控制` 等
-- 以「不存在的行為」為主要斷言的 Scenario
-
-MUST NOT 唯一合法用途：描述正向 Scenario 的副作用約束（例：正向 Scenario 是「滑到底載入下一批」，副作用 AND 子句 MUST NOT 在 hasMore=false 後繼續發出請求）。
+本次拿掉的能力只進 `REMOVED`（從未 specced 則完全不寫），不得出現在 ADDED／MODIFIED。禁止 `MUST NOT 寫入某授權`、`其中沒有某開關`、`不受某授權影響`、`原值維持不變`、`MUST NOT 顯示分頁元件`、`Scenario: 不顯示統計文字`，以及依「有／沒有／不明」拆 Scenario 或列表。仍在的行為只寫仍提供的項目（對話框只列仍開放的授權並只寫入這些項目；子分頁只列仍顯示的名稱與預設選中）。別蓋掉後端舊欄位，寫在 design.md 或 tasks.md。MUST NOT 只准約束這條 Scenario 已經在講的行為（滑到底載入下一批，AND 在 hasMore=false 後不再請求）。
 
 **【規格來源：以 openspec/specs 為唯一基準，不從 proposal 的 Scope/Approach 翻譯】**
 寫 spec 前先用 Read 讀 `<project_dir>/openspec/specs/<domain>/spec.md`（已合併的主規格），逐一比對規範範圍（不只比對標題）。與既有 Requirement 相同或可合併就用 MODIFIED，找不到重疊才用 ADDED：
 
-- 既有 spec 提及的行為，本次要修改 → `MODIFIED Requirements`（改寫成新版正向內容，不附「改了什麼」說明）
-- 既有 spec 提及的行為，本次要完全移除 → `REMOVED Requirements`
+- 既有 spec 提及的行為，本次要修改 → `MODIFIED Requirements`（改寫成仍存在的正向內容，不附「改了什麼」）
+- 既有 spec 提及的行為，本次要完全移除 → 只寫 `REMOVED Requirements`
 - 既有 spec 未提及，本次新增 → `ADDED Requirements`
-- 既有 spec 未提及，本次從程式碼移除 → **不寫任何條文**（從未 specced，移除不需要 spec 記錄）
+- 既有 spec 未提及，本次從程式碼移除 → 不寫任何條文
 
 `proposal.md` 的 Scope 與 Approach 段描述的是工程任務（HOW），不是規格項目（WHAT）；
 禁止把 Scope 的「移除 X 元件」「刪除 Y API call」翻譯成任何 Requirement 或 Scenario。
@@ -79,7 +73,7 @@ MUST NOT 唯一合法用途：描述正向 Scenario 的副作用約束（例：�
 新建 domain（openspec/specs/<domain>/spec.md 尚不存在）：一律全 ADDED。
 
 **【MODIFIED 的正確做法】**
-直接改寫 Requirement 正文，只保留縮減後仍存在的行為（例：移除某開關就從對照表刪那一列，Scenario 改成描述僅剩開關的正向行為）。
+直接改寫正文，只留仍存在的行為（移除某開關就從對照表刪那一列）。取代 REMOVED 而新寫的 ADDED 同樣只留仍在的項目。
 集合變大（頁面加一個 tab／欄／按鈕）時：改寫那一條「初始化組成」Scenario，讓 THEN 涵蓋完整新集合。舊標題不再出現於 delta，tasks.md 為它安排移除測試任務。
 
 **【Requirement 與 Scenario 的寫法規則】**
@@ -100,7 +94,7 @@ MUST NOT 唯一合法用途：描述正向 Scenario 的副作用約束（例：�
   - **【例外：後端 API 合約規格】** 若本次變動的交付物本身就是 API 合約（`backend-api` 類型專案，或任務描述明確指出是定義新 endpoint、修改 response schema），則 endpoint path、HTTP method、request／response 欄位名稱是對外承諾、屬於可觀察輸出的一部分，可直接寫入 Requirement 的 SHALL／MUST 與 Scenario 的 THEN；此例外不適用前端消費端。
     錯誤（frontend）：`THEN 該 a-textarea 的 DOM maxlength 屬性為 1024`；正確：`THEN 字元計數以 1024 為上限，使用者無法讓該欄位保留超過 1024 字`
     錯誤（frontend）：`請求本文 MUST 帶 siteIDs、startTime、endTime、pageSize=20`；正確：`首次查詢 MUST 帶入查詢時間範圍與使用者設定的進階篩選條件；每批固定最多 20 筆`
-    錯誤（frontend）：`系統依 selfInformation.allowOriginAuth === true 判定`；正確：`系統依登入者是否具備回源鑒權授權判定`
+    錯誤（frontend）：`系統依 user.isAdmin === true 判定`；正確：`系統依登入者是否為管理者判定`
 - **每個 Scenario 必須有至少一個名稱完全相同的** `describe` 或 `test`（Scenario 標題即驗收測試名稱）
 - 沿用既有 domain 不加 `## Purpose`；domain 首次建立才在 delta 最上面加一段 `## Purpose`（一兩句話，與 proposal Intent 對齊）
 - 不需要獨立的「User Stories」章節
