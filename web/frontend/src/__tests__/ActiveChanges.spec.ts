@@ -164,8 +164,9 @@ describe('ActiveChanges', () => {
     await analyzeCard.trigger('click')
     await flushPromises()
 
-    expect(wrapper.find('.question-prompt').text()).toBe('網頁服務要用什麼技術棧？')
-    const optionButtons = wrapper.findAll('.question-form > button')
+    const row = wrapper.find('[data-change-name="feat-login"]')
+    expect(row.find('.question-prompt').text()).toBe('網頁服務要用什麼技術棧？')
+    const optionButtons = row.findAll('.question-form > button')
     expect(optionButtons).toHaveLength(3)
 
     await optionButtons[0].trigger('click')
@@ -278,6 +279,86 @@ describe('ActiveChanges', () => {
     expect(tempRow.findAll('.stage-card')[0].attributes('data-status')).toBe('running')
   })
 
+  test('點擊階段卡片後詳情展開在該任務列卡片下方且各列可各自展開一個', async () => {
+    mockedApi.getChanges.mockResolvedValue([
+      makeRow(),
+      makeRow({ change_name: 'fix-css', branch_name: 'fix/css' }),
+    ])
+
+    const wrapper = mount(ActiveChanges)
+    await flushPromises()
+
+    const featRow = () => wrapper.find('[data-change-name="feat-login"]')
+    const cssRow = () => wrapper.find('[data-change-name="fix-css"]')
+
+    await featRow().findAll('.stage-card')[3].trigger('click') // review
+    await flushPromises()
+    expect(featRow().find('.stage-detail-panel').exists()).toBe(true)
+    expect(cssRow().find('.stage-detail-panel').exists()).toBe(false)
+    expect(wrapper.findAll('.stage-detail-panel')).toHaveLength(1)
+    expect(mockedApi.getStageDetail).toHaveBeenCalledWith('feat-login', 'review')
+
+    await cssRow().findAll('.stage-card')[2].trigger('click') // execute
+    await flushPromises()
+    expect(wrapper.findAll('.stage-detail-panel')).toHaveLength(2)
+    expect(mockedApi.getStageDetail).toHaveBeenCalledWith('fix-css', 'execute')
+
+    await featRow().findAll('.stage-card')[0].trigger('click') // analyze_plan
+    await flushPromises()
+    expect(wrapper.findAll('.stage-detail-panel')).toHaveLength(2)
+    expect(mockedApi.getStageDetail).toHaveBeenCalledWith('feat-login', 'analyze_plan')
+
+    await cssRow().find('[aria-label="關閉"]').trigger('click')
+    await flushPromises()
+    expect(cssRow().find('.stage-detail-panel').exists()).toBe(false)
+    expect(featRow().find('.stage-detail-panel').exists()).toBe(true)
+  })
+
+  test('任務列收合後只保留標題列且展開後恢復原詳情', async () => {
+    vi.useFakeTimers()
+    mockedApi.getChanges.mockResolvedValue([makeRow()])
+
+    const wrapper = mount(ActiveChanges)
+    await flushPromises()
+
+    const row = () => wrapper.find('[data-change-name="feat-login"]')
+
+    await row().findAll('.stage-card')[3].trigger('click') // review
+    await flushPromises()
+    expect(row().find('.stage-detail-panel').exists()).toBe(true)
+
+    const collapseButton = row().find('[aria-label="收合"]')
+    expect(collapseButton.exists()).toBe(true)
+    expect(collapseButton.attributes('title')).toBe('收合')
+    expect(collapseButton.find('svg[data-icon="chevron-up"]').exists()).toBe(true)
+
+    await collapseButton.trigger('click')
+    await flushPromises()
+
+    expect(row().find('.stage-card').exists()).toBe(false)
+    expect(row().find('.stage-detail-panel').exists()).toBe(false)
+    expect(row().find('[aria-label="檢視規格文件"]').exists()).toBe(false)
+    expect(row().find('.change-name').exists()).toBe(true)
+
+    const expandButton = row().find('[aria-label="展開"]')
+    expect(expandButton.exists()).toBe(true)
+    expect(expandButton.attributes('title')).toBe('展開')
+    expect(expandButton.find('svg[data-icon="chevron-down"]').exists()).toBe(true)
+
+    await vi.advanceTimersByTimeAsync(2000)
+    await flushPromises()
+
+    expect(row().find('.stage-card').exists()).toBe(false)
+    expect(row().find('[aria-label="展開"]').exists()).toBe(true)
+
+    await row().find('[aria-label="展開"]').trigger('click')
+    await flushPromises()
+
+    expect(row().findAll('.stage-card')).toHaveLength(5)
+    expect(row().find('.stage-detail-panel').exists()).toBe(true)
+    expect(mockedApi.getStageDetail).toHaveBeenCalledWith('feat-login', 'review')
+  })
+
   test('純圖示按鈕以滑鼠停留提示與無障礙名稱呈現原本文字', async () => {
     mockedApi.getChanges.mockResolvedValue([makeRow()])
 
@@ -302,7 +383,8 @@ describe('ActiveChanges', () => {
     await reviewCard.trigger('click')
     await flushPromises()
 
-    const closeButton = wrapper.find('[aria-label="關閉"]')
+    const row = wrapper.find('[data-change-name="feat-login"]')
+    const closeButton = row.find('[aria-label="關閉"]')
     expect(closeButton.exists()).toBe(true)
     expect(closeButton.text()).toBe('')
     expect(closeButton.attributes('title')).toBe('關閉')
@@ -310,7 +392,7 @@ describe('ActiveChanges', () => {
 
     await closeButton.trigger('click')
     await flushPromises()
-    expect(wrapper.find('.stage-detail-panel').exists()).toBe(false)
+    expect(row.find('.stage-detail-panel').exists()).toBe(false)
   })
 
   test('主要操作與階段狀態徽章在文字旁顯示對應圖示', async () => {

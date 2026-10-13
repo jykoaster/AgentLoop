@@ -8,3 +8,4 @@ tests/evals/outputs/
 web/frontend/node_modules/
 web/frontend/dist/
 web/frontend/*.tsbuildinfo
+.agentloop/
