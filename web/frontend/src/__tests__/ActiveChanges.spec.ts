@@ -16,6 +16,7 @@ vi.mock('../api', async (importOriginal) => {
     postNewTask: vi.fn(),
     postRerun: vi.fn(),
     postAnswer: vi.fn(),
+    postAbort: vi.fn(),
   }
 })
 
@@ -361,6 +362,67 @@ describe('ActiveChanges', () => {
     expect(tempRow.exists()).toBe(true)
     expect(tempRow.text()).toContain('新增登入頁')
     expect(tempRow.findAll('.stage-card')[0].attributes('data-status')).toBe('running')
+  })
+
+  test('新增任務的暫時列在 analyze_plan 執行中可中止並結束執行', async () => {
+    vi.useFakeTimers()
+    mockedApi.getRun.mockResolvedValue({
+      active: true, change_name: '', label: '新增登入頁', task: '新增登入頁', stage: 'analyze_plan',
+      question: null,
+    })
+    mockedApi.postAbort.mockResolvedValue(undefined)
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
+
+    const wrapper = mount(ActiveChanges)
+    await flushPromises()
+    await expandRow(wrapper, '(temp)')
+
+    const tempRow = () => wrapper.find('.change-row[data-change-name="(temp)"]')
+    await tempRow().findAll('.stage-card')[0].trigger('click') // analyze_plan
+    await flushPromises()
+
+    expect(mockedApi.getStageDetail).not.toHaveBeenCalledWith('', 'analyze_plan')
+
+    const abortButton = tempRow().findAll('button').find((b) => b.text().includes('中止'))!
+    expect(abortButton.exists()).toBe(true)
+    await abortButton.trigger('click')
+    await flushPromises()
+
+    expect(confirmSpy).toHaveBeenCalledWith('確定要中止這個階段嗎？')
+    expect(mockedApi.postAbort).toHaveBeenCalledTimes(1)
+
+    mockedApi.getRun.mockResolvedValue(IDLE_RUN)
+    mockedApi.getChanges.mockResolvedValue([])
+    await vi.advanceTimersByTimeAsync(2000)
+    await flushPromises()
+
+    expect(wrapper.find('.change-row[data-change-name="(temp)"]').exists()).toBe(false)
+    const addTaskButton = wrapper
+      .findAll('button')
+      .find((b) => b.text().includes('新增任務'))!
+    expect((addTaskButton.element as HTMLButtonElement).disabled).toBe(false)
+  })
+
+  test('暫時列按中止但取消確認時不呼叫中止 API', async () => {
+    mockedApi.getRun.mockResolvedValue({
+      active: true, change_name: '', label: '新增登入頁', task: '新增登入頁', stage: 'analyze_plan',
+      question: null,
+    })
+    vi.spyOn(window, 'confirm').mockReturnValue(false)
+
+    const wrapper = mount(ActiveChanges)
+    await flushPromises()
+    await expandRow(wrapper, '(temp)')
+
+    const tempRow = wrapper.find('.change-row[data-change-name="(temp)"]')
+    await tempRow.findAll('.stage-card')[0].trigger('click') // analyze_plan
+    await flushPromises()
+
+    const abortButton = tempRow.findAll('button').find((b) => b.text().includes('中止'))!
+    await abortButton.trigger('click')
+    await flushPromises()
+
+    expect(mockedApi.postAbort).not.toHaveBeenCalled()
   })
 
   test('點擊階段卡片後詳情展開在該任務列卡片下方且各列可各自展開一個', async () => {
