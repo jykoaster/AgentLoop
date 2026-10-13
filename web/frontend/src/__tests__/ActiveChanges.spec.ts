@@ -1,5 +1,5 @@
 import { describe, test, expect, vi, beforeEach, afterEach } from 'vitest'
-import { mount, flushPromises } from '@vue/test-utils'
+import { mount, flushPromises, type VueWrapper } from '@vue/test-utils'
 import ActiveChanges from '../components/active-changes/ActiveChanges.vue'
 import * as api from '../api'
 import type { ChangeRow, RunStatus } from '../api'
@@ -41,6 +41,13 @@ function makeRow(overrides: Partial<ChangeRow> = {}): ChangeRow {
 
 const IDLE_RUN: RunStatus = { active: false }
 
+async function expandRow(wrapper: VueWrapper, changeName = 'feat-login'): Promise<void> {
+  const toggle = wrapper.find(`[data-change-name="${changeName}"] [aria-label="展開"]`)
+  if (!toggle.exists()) return
+  await toggle.trigger('click')
+  await flushPromises()
+}
+
 beforeEach(() => {
   vi.clearAllMocks()
   mockedApi.getChanges.mockResolvedValue([])
@@ -65,6 +72,7 @@ describe('ActiveChanges', () => {
     expect(rows[0].text()).toContain('新增登入頁')
     expect(rows[0].text()).toContain('第 0 次迭代')
 
+    await expandRow(wrapper)
     const cards = rows[0].findAll('.stage-card')
     expect(cards.map((c) => c.attributes('data-status'))).toEqual([
       'done', 'done', 'running', 'pending', 'pending',
@@ -107,6 +115,7 @@ describe('ActiveChanges', () => {
     ])
     const wrapper = mount(ActiveChanges)
     await flushPromises()
+    await expandRow(wrapper)
 
     const cards = wrapper.findAll('.stage-card')
     expect(cards.every((c) => c.attributes('data-status') === 'pending')).toBe(true)
@@ -157,6 +166,7 @@ describe('ActiveChanges', () => {
 
     const wrapper = mount(ActiveChanges)
     await flushPromises()
+    await expandRow(wrapper)
 
     const analyzeCard = wrapper.findAll('.stage-card')[0]
     expect(analyzeCard.find('.question-mark').exists()).toBe(true)
@@ -184,6 +194,76 @@ describe('ActiveChanges', () => {
     expect(analyzeCardAfter.attributes('data-status')).toBe('running')
   })
 
+  test('有待回覆提問的任務列外框顯示警示光暈且收合展開皆可見並於回覆後消失', async () => {
+    vi.useFakeTimers()
+    mockedApi.getChanges.mockResolvedValue([
+      makeRow({
+        stages: {
+          analyze_plan: 'running', human_confirm: 'pending', execute: 'pending',
+          review: 'pending', archive: 'pending',
+        },
+      }),
+      makeRow({ change_name: 'fix-css', branch_name: 'fix/css' }),
+    ])
+    mockedApi.getRun.mockResolvedValue({
+      active: true, change_name: 'feat-login', label: 'feat-login', stage: 'analyze_plan',
+      question: {
+        id: 'q1', stage: 'analyze_plan', kind: 'choice',
+        prompt: '網頁服務要用什麼技術棧？',
+        options: ['1. FastAPI（建議）', '2. Flask', '3. Django'],
+        required: false, multiline: false,
+      },
+    })
+
+    const wrapper = mount(ActiveChanges)
+    await flushPromises()
+
+    const featRow = () => wrapper.find('[data-change-name="feat-login"]')
+    const cssRow = () => wrapper.find('[data-change-name="fix-css"]')
+
+    expect(featRow().classes()).toContain('animate-breathe-warning')
+    expect(cssRow().classes()).not.toContain('animate-breathe-warning')
+
+    await featRow().find('[aria-label="展開"]').trigger('click')
+    await flushPromises()
+
+    expect(featRow().classes()).toContain('animate-breathe-warning')
+    const analyzeCard = featRow().findAll('.stage-card')[0]
+    expect(analyzeCard.find('.question-mark').exists()).toBe(true)
+
+    mockedApi.getRun.mockResolvedValue({
+      active: true, change_name: 'feat-login', label: 'feat-login', stage: 'analyze_plan',
+      question: null,
+    })
+    await vi.advanceTimersByTimeAsync(2000)
+    await flushPromises()
+
+    expect(featRow().classes()).not.toContain('animate-breathe-warning')
+    expect(featRow().findAll('.stage-card')[0].find('.question-mark').exists()).toBe(false)
+  })
+
+  test('有待回覆提問的執行屬於其他 change 時任務列不帶警示光暈', async () => {
+    mockedApi.getChanges.mockResolvedValue([
+      makeRow(),
+      makeRow({ change_name: 'fix-css', branch_name: 'fix/css' }),
+    ])
+    mockedApi.getRun.mockResolvedValue({
+      active: true, change_name: 'fix-css', label: 'fix-css', stage: 'analyze_plan',
+      question: {
+        id: 'q1', stage: 'analyze_plan', kind: 'choice',
+        prompt: '網頁服務要用什麼技術棧？',
+        options: ['1. FastAPI（建議）', '2. Flask', '3. Django'],
+        required: false, multiline: false,
+      },
+    })
+
+    const wrapper = mount(ActiveChanges)
+    await flushPromises()
+
+    expect(wrapper.find('[data-change-name="feat-login"]').classes()).not.toContain('animate-breathe-warning')
+    expect(wrapper.find('[data-change-name="fix-css"]').classes()).toContain('animate-breathe-warning')
+  })
+
   test('重跑某階段時從該階段開始並接續後續流程', async () => {
     mockedApi.getChanges.mockResolvedValue([
       makeRow({
@@ -197,6 +277,7 @@ describe('ActiveChanges', () => {
 
     const wrapper = mount(ActiveChanges)
     await flushPromises()
+    await expandRow(wrapper)
 
     const rerunButtons = wrapper.findAll('[aria-label="重跑"]')
     expect(rerunButtons).toHaveLength(4)
@@ -216,6 +297,7 @@ describe('ActiveChanges', () => {
 
     const wrapper = mount(ActiveChanges)
     await flushPromises()
+    await expandRow(wrapper, 'fix-css')
 
     const newTaskButton = wrapper.find('.new-task-button')
     expect((newTaskButton.element as HTMLButtonElement).disabled).toBe(true)
@@ -236,6 +318,7 @@ describe('ActiveChanges', () => {
 
     const wrapper = mount(ActiveChanges)
     await flushPromises()
+    await expandRow(wrapper, 'fix-css')
 
     const reviewCard = wrapper.findAll('.stage-card')[3]
     const rerunButton = reviewCard.find('[aria-label="重跑"]')
@@ -273,6 +356,7 @@ describe('ActiveChanges', () => {
     await flushPromises()
 
     expect(mockedApi.postNewTask).toHaveBeenCalledWith('新增登入頁')
+    await expandRow(wrapper, '(temp)')
     const tempRow = wrapper.find('.change-row[data-change-name="(temp)"]')
     expect(tempRow.exists()).toBe(true)
     expect(tempRow.text()).toContain('新增登入頁')
@@ -287,6 +371,8 @@ describe('ActiveChanges', () => {
 
     const wrapper = mount(ActiveChanges)
     await flushPromises()
+    await expandRow(wrapper, 'feat-login')
+    await expandRow(wrapper, 'fix-css')
 
     const featRow = () => wrapper.find('[data-change-name="feat-login"]')
     const cssRow = () => wrapper.find('[data-change-name="fix-css"]')
@@ -323,6 +409,18 @@ describe('ActiveChanges', () => {
 
     const row = () => wrapper.find('[data-change-name="feat-login"]')
 
+    expect(row().find('.stage-card').exists()).toBe(false)
+    expect(row().find('.change-name').exists()).toBe(true)
+    expect(row().find('[aria-label="檢視規格文件"]').exists()).toBe(true)
+
+    const expandButton = row().find('[aria-label="展開"]')
+    expect(expandButton.exists()).toBe(true)
+    expect(expandButton.attributes('title')).toBe('展開')
+    expect(expandButton.find('svg[data-icon="chevron-down"]').exists()).toBe(true)
+
+    await expandButton.trigger('click')
+    await flushPromises()
+
     await row().findAll('.stage-card')[3].trigger('click') // review
     await flushPromises()
     expect(row().find('.stage-detail-panel').exists()).toBe(true)
@@ -337,13 +435,8 @@ describe('ActiveChanges', () => {
 
     expect(row().find('.stage-card').exists()).toBe(false)
     expect(row().find('.stage-detail-panel').exists()).toBe(false)
-    expect(row().find('[aria-label="檢視規格文件"]').exists()).toBe(false)
+    expect(row().find('[aria-label="檢視規格文件"]').exists()).toBe(true)
     expect(row().find('.change-name').exists()).toBe(true)
-
-    const expandButton = row().find('[aria-label="展開"]')
-    expect(expandButton.exists()).toBe(true)
-    expect(expandButton.attributes('title')).toBe('展開')
-    expect(expandButton.find('svg[data-icon="chevron-down"]').exists()).toBe(true)
 
     await vi.advanceTimersByTimeAsync(2000)
     await flushPromises()
@@ -364,6 +457,7 @@ describe('ActiveChanges', () => {
 
     const wrapper = mount(ActiveChanges)
     await flushPromises()
+    await expandRow(wrapper)
 
     const cards = wrapper.findAll('.stage-card')
     const executeCard = cards[2]
@@ -414,6 +508,7 @@ describe('ActiveChanges', () => {
 
     const wrapper = mount(ActiveChanges)
     await flushPromises()
+    await expandRow(wrapper)
 
     const newTaskButton = wrapper.find('.new-task-button')
     expect(newTaskButton.find('svg[data-icon]').exists()).toBe(true)
@@ -437,6 +532,7 @@ describe('ActiveChanges', () => {
 
     const wrapper = mount(ActiveChanges)
     await flushPromises()
+    await expandRow(wrapper, 'fix-css')
 
     const analyzeCard = wrapper.findAll('.stage-card')[0]
     expect(analyzeCard.classes()).toContain('cursor-pointer')
