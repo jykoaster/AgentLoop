@@ -64,7 +64,7 @@ async function onAbort(): Promise<void> {
 </script>
 
 <template>
-  <div class="flex flex-col gap-3">
+  <div class="flex min-w-0 flex-col gap-3">
     <p v-if="isAborted" class="aborted-note font-semibold text-danger">使用者中止</p>
 
     <QuestionForm
@@ -73,38 +73,38 @@ async function onAbort(): Promise<void> {
       :external-error="answerError"
       @submit="onSubmitAnswer"
     />
-    
+
     <template v-if="stage === 'analyze_plan'">
       <h4 class="font-semibold text-fg">分析摘要</h4>
-      <pre class="whitespace-pre-wrap rounded-md bg-surface-muted p-3 font-mono text-sm">{{ field('analysis') }}</pre>
+      <pre class="output-text rounded-md bg-surface-muted p-3 font-mono text-sm">{{ field('analysis') }}</pre>
       <h4 class="font-semibold text-fg">執行計畫</h4>
       <ol v-if="plan.length" class="list-decimal pl-5">
-        <li v-for="(t, i) in plan" :key="i">{{ t }}</li>
+        <li v-for="(t, i) in plan" :key="i" class="output-text">{{ t }}</li>
       </ol>
       <p v-else class="text-fg-muted">（尚無資料）</p>
     </template>
 
     <template v-else-if="stage === 'human_confirm'">
       <h4 class="font-semibold text-fg">確認結果</h4>
-      <p>{{ field('status') }}</p>
+      <p class="output-text">{{ field('status') }}</p>
       <h4 class="font-semibold text-fg">修改意見</h4>
-      <pre class="whitespace-pre-wrap rounded-md bg-surface-muted p-3 font-mono text-sm">{{ field('human_feedback') }}</pre>
+      <pre class="output-text rounded-md bg-surface-muted p-3 font-mono text-sm">{{ field('human_feedback') }}</pre>
     </template>
 
     <template v-else-if="stage === 'execute'">
       <h4 class="font-semibold text-fg">執行摘要</h4>
-      <pre class="whitespace-pre-wrap rounded-md bg-surface-muted p-3 font-mono text-sm">{{ field('execution_result') }}</pre>
+      <pre class="output-text rounded-md bg-surface-muted p-3 font-mono text-sm">{{ field('execution_result') }}</pre>
     </template>
 
     <template v-else-if="stage === 'review'">
       <h4 class="font-semibold text-fg">審查等級</h4>
-      <p>{{ field('review_level') }}</p>
+      <p class="output-text">{{ field('review_level') }}</p>
       <h4 class="font-semibold text-fg">審查報告</h4>
-      <pre class="whitespace-pre-wrap rounded-md bg-surface-muted p-3 font-mono text-sm">{{ field('review_result') }}</pre>
+      <pre class="output-text rounded-md bg-surface-muted p-3 font-mono text-sm">{{ field('review_result') }}</pre>
     </template>
 
     <h4 class="font-semibold text-fg">執行日誌</h4>
-    <pre class="log max-h-96 overflow-auto whitespace-pre-wrap rounded-md bg-surface-muted p-3 font-mono text-sm">{{ detail?.log ?? '' }}</pre>
+    <pre class="log output-text max-h-96 overflow-auto rounded-md bg-surface-muted p-3 font-mono text-sm">{{ detail?.log ?? '' }}</pre>
 
     <button
       v-if="isRunning"

@@ -54,7 +54,14 @@ function onRerunClick(event: Event): void {
     :data-status="status"
     @click="emit('click')"
   >
-    <div class="mb-2 font-semibold">{{ stage }}</div>
+    <div class="flex items-center justify-between gap-2 mb-1">
+      <div class=" font-semibold" :class="{ 'break-all': hasQuestion }">{{ stage }}</div>
+      <span
+        v-if="hasQuestion"
+        class="question-mark text-2xl font-black leading-none text-warning"
+        aria-label="等待回覆"
+      >!</span>
+    </div>
     <div
       class="stage-status flex w-fit items-center gap-1 rounded-full px-2 text-xs font-medium text-on-accent"
       :class="statusClass(status).badge"
@@ -62,11 +69,7 @@ function onRerunClick(event: Event): void {
       <font-awesome-icon :icon="statusIcon(status)" :spin="status === 'running'" class="motion-reduce:animate-none" />
       {{ STATUS_LABEL[status] ?? status }}
     </div>
-    <span
-      v-if="hasQuestion"
-      class="question-mark absolute right-2 top-2 flex h-4 w-4 items-center justify-center rounded-full bg-warning text-xs font-bold text-on-accent"
-      aria-label="等待回覆"
-    ><font-awesome-icon icon="circle-exclamation" /></span>
+  
     <button
       v-if="rerunnable"
       type="button"

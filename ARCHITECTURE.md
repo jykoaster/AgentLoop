@@ -980,7 +980,9 @@ FastAPI，前綴 `/api`；`repo_view.py` 純讀檔（`.agentloop/changes/*/state
 ### 前端：`web/frontend/`
 
 Vue 3 + TypeScript + `<script setup>` + Vite，測試用 Vitest + `@vue/test-utils` + jsdom；不
-引入 UI 元件庫，Markdown 以 `<pre>` 純文字呈現。`src/api.ts` 集中封裝所有對 `/api/*` 的
+引入 UI 元件庫，Markdown 以 `<pre>` 純文字呈現。階段詳情（`StageDetail`）與待回覆提問
+（`QuestionForm`）顯示的使用者可讀輸出一律套用 `style.css` 的 `output-text` utility，保留原文
+換行與空白、長字串在區塊寬度內強制折行。`src/api.ts` 集中封裝所有對 `/api/*` 的
 `fetch`，元件測試用 `vi.mock('../api')` 取代；`composables/usePolling.ts` 提供 2 秒輪詢。
 `src/components/` 依頁面分資料夾：`active-changes/`（`ActiveChanges`／`ChangeRow`／`StageCard`／
 `StageDetail`／`QuestionForm`／`NewTaskDialog`）、`archived-changes/`（`ArchivedChanges`）、
