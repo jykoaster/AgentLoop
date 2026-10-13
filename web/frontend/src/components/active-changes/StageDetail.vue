@@ -83,9 +83,9 @@ async function onAbort(): Promise<void> {
       <h4 class="font-semibold text-fg">分析摘要</h4>
       <pre class="output-text rounded-md bg-surface-muted p-3 font-mono text-sm">{{ field('analysis') }}</pre>
       <h4 class="font-semibold text-fg">執行計畫</h4>
-      <ol v-if="plan.length" class="list-decimal pl-5">
+      <ul v-if="plan.length" class="list-none pl-5">
         <li v-for="(t, i) in plan" :key="i" class="output-text">{{ t }}</li>
-      </ol>
+      </ul>
       <p v-else class="text-fg-muted">（尚無資料）</p>
     </template>
 

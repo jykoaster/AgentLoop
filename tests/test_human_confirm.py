@@ -95,3 +95,30 @@ class TestHumanConfirmInputHandling:
 
         mock_input.assert_not_called()
         assert result["status"] == "error"
+
+    def test_plan_lines_use_tasks_md_numbering_without_extra_prefix(self, capsys):
+        """CLI 輸出與 confirm prompt 都直接印 tasks.md 原文，不加 TASK N: 或 1. 2. 3. 前綴"""
+        from AgentLoop.nodes.human_confirm import human_confirm_node
+
+        plan = ["1.1 撰寫測試", "1.2 實作功能", "2.1 更新 ARCHITECTURE.md"]
+        with patch("sys.stdin.isatty", return_value=True), \
+             patch("AgentLoop.lib.interaction.ask", return_value="y") as mock_ask:
+            result = human_confirm_node(_state(plan=plan))
+
+        assert result["status"] == "confirmed"
+
+        captured = capsys.readouterr()
+        out_lines = captured.out.splitlines()
+        assert "  1.1 撰寫測試" in out_lines
+        assert "  1.2 實作功能" in out_lines
+        assert "  2.1 更新 ARCHITECTURE.md" in out_lines
+        assert "TASK 1:" not in captured.out
+        assert "TASK 2:" not in captured.out
+        assert "TASK 3:" not in captured.out
+
+        confirm_prompt = mock_ask.call_args[0][0]
+        assert (
+            "## 執行計畫（共 3 個 TASK）\n\n"
+            "1.1 撰寫測試\n1.2 實作功能\n2.1 更新 ARCHITECTURE.md\n\n"
+            "繼續執行？"
+        ) in confirm_prompt

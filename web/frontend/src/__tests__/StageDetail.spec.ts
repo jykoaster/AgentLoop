@@ -30,7 +30,7 @@ describe('StageDetail', () => {
   test.each([
     {
       stage: 'analyze_plan',
-      fields: { analysis: '分析內容\n第二行', plan: ['TASK 1', 'TASK 2'] },
+      fields: { analysis: '分析內容\n第二行', plan: ['1.1 撰寫測試', '1.2 實作功能'] },
     },
     {
       stage: 'human_confirm',
@@ -65,9 +65,13 @@ describe('StageDetail', () => {
       expect(pres[0]!.classes()).toContain('output-text')
       const items = wrapper.findAll('li')
       expect(items).toHaveLength(2)
+      expect(items.map((item) => item.text())).toEqual(['1.1 撰寫測試', '1.2 實作功能'])
       for (const item of items) {
         expect(item.classes()).toContain('output-text')
       }
+      const list = wrapper.find('ul, ol')
+      expect(list.element.tagName).not.toBe('OL')
+      expect(list.classes()).not.toContain('list-decimal')
     } else if (stage === 'human_confirm') {
       const statusEl = wrapper.findAll('p').find((p) => p.text() === '已通過')!
       expect(statusEl.classes()).toContain('output-text')
@@ -171,7 +175,7 @@ describe('StageDetail', () => {
       expect(button.classes()).toContain('output-text')
     }
 
-    const confirmPrompt = '## 執行計畫（共 3 個 TASK）\n\n1. a\n2. b\n3. c\n\n繼續執行？'
+    const confirmPrompt = '## 執行計畫（共 3 個 TASK）\n\n1.1 a\n1.2 b\n2.1 c\n\n繼續執行？'
     const confirmQuestion = {
       id: 'q2', stage: 'human_confirm', kind: 'confirm' as const,
       prompt: confirmPrompt, options: [], required: false, multiline: false,

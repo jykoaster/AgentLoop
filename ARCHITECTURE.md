@@ -381,7 +381,7 @@ validate 的錯誤修正也接到同一套「有問題就等使用者、否則�
 
 **行為：**
 
-- 列印分析摘要、TASK 清單（含數量）、OpenSpec change 路徑與工作分支
+- 列印分析摘要、執行計畫（含數量；逐行印出 tasks.md checkbox 原文，沿用其 1.1、2.1 階層編號，不另加序號）、OpenSpec change 路徑與工作分支
 - 偵測到非互動式 stdin（如管道重導向）時自動中止，避免無限等待
 - 輸入 `y`（不區分大小寫、忽略空白；`yes` 亦可）→ 返回 `status: "confirmed"` → 工作流程繼續至 `execute`
 - 輸入非 `y` 後，再輸入修改意見（非空白）→ 返回 `status: "needs_revision"` + `human_feedback` → 回到 `analyze_plan` 重新規劃

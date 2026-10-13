@@ -37,8 +37,8 @@ def human_confirm_node(state: AgentState) -> dict:
 
     if plan:
         print(f"\n{_YELLOW}## 執行計畫（共 {len(plan)} 個 TASK）{_RESET}", flush=True)
-        for i, task in enumerate(plan, 1):
-            print(f"  TASK {i}: {task}", flush=True)
+        for task in plan:
+            print(f"  {task}", flush=True)
 
     project_dir = state.get("project_dir", "")
     change_name = state.get("change_name", "")
@@ -57,7 +57,7 @@ def human_confirm_node(state: AgentState) -> dict:
 
     confirm_prompt = (
         f"## 分析摘要\n\n{analysis}\n\n"
-        + (f"## 執行計畫（共 {len(plan)} 個 TASK）\n\n" + "\n".join(f"{i}. {t}" for i, t in enumerate(plan, 1)) + "\n\n" if plan else "")
+        + (f"## 執行計畫（共 {len(plan)} 個 TASK）\n\n" + "\n".join(plan) + "\n\n" if plan else "")
         + "繼續執行？"
     )
 
