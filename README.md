@@ -26,12 +26,13 @@
    ```bash
    # AgentLoop 與目標專案的共同上層目錄（host 上的真實絕對路徑）
    HOST_WORKSPACE_ROOT=/Users/<you>/workspace
-
-   # 目標專案的資料夾名稱（相對於 HOST_WORKSPACE_ROOT）
-   TARGET_PROJECT=my-project
    ```
 
-   `docker-compose.yml` 會依 `TARGET_PROJECT` 掛載 `${HOST_WORKSPACE_ROOT}/${TARGET_PROJECT}`，不需要再手動改 `docker-compose.yml`。只支援單一目標專案，不提供多專案掛載的擴充方式。
+   `.env` 只**必填**這一個變數——`docker-compose.yml` 會掛載整個 `${HOST_WORKSPACE_ROOT}`（而不
+   是只掛單一目標專案），讓網頁控制台能用資料夾選擇器切換目標專案，不需要為此重建容器。
+   `TARGET_PROJECT`、`CLAUDE_CODE_OAUTH_TOKEN`、`ANTHROPIC_API_KEY` 這幾項仍可
+   寫在 `.env` 裡當作預設值，但也可以改到網頁的「設定」分頁設定（見下方「網頁控制台」）——網頁
+   設定的值優先於 `.env`。只支援單一目標專案同時執行。
 
 2. 確認目標專案內已放好 [`CLAUDE.md` / `AGENT.md`](#目標專案文件需求)——這是系統判斷架構與慣例的主要依據。
 
@@ -42,11 +43,36 @@ docker compose build
 docker compose up -d
 ```
 
-容器啟動後會保持存活（`tail -f /dev/null`），透過 `docker exec` 進入下指令：
+容器啟動後會自動跑起網頁控制台（`uvicorn` 監聽容器內 `0.0.0.0:8000`，compose 只對外綁
+`127.0.0.1:8000`），前端是映像裡的建置產物。在瀏覽器開啟：
+
+```
+http://127.0.0.1:8000
+```
+
+CLI 用法仍然可用，透過 `docker exec` 進容器下指令：
 
 ```bash
 docker exec -it agent_loop bash
 ```
+
+### 網頁控制台
+
+最外層四個分頁：
+
+- **執行中任務**：每個未封存的任務一列，依序顯示五個工作階段（`analyze_plan`／
+  `human_confirm`／`execute`／`review`／`archive`）各自的卡片，以顏色區分尚未開始（灰）／
+  執行中（藍）／完成（綠）／錯誤（紅）；等待回覆時卡片顯示驚嘆號，點卡片進入詳情回覆（選項題／
+  是非題／文字題／用量上限暫停都在這裡處理，效果等同在終端機輸入同一內容）或中止該階段；
+  `analyze_plan`／`execute`／`review`／`archive` 四張卡片可單獨重跑。「新增任務」等同命令列的
+  完整工作流程模式。同一時間只允許一個執行進行中，進行中時其他啟動動作會停用並顯示原因
+- **已封存任務**：唯讀瀏覽目標專案 `openspec/changes/archive/` 底下每個已封存的 change
+- **既有 Spec**：唯讀瀏覽目標專案 `openspec/specs/` 底下每個 domain，並提供語意搜尋（等同
+  `python -m AgentLoop.search`）
+- **設定**：目標專案、Claude OAuth token、Anthropic API key；尚未指定目標專案時
+  自動開啟資料夾選擇器（只能選工作區根目錄底下的資料夾）。這裡存的值優先於 `.env`
+
+未設定目標專案前，「執行中任務」「已封存任務」「既有 Spec」三個分頁會提示先到「設定」選擇。
 
 ### 首次使用：容器內登入 Claude Code
 
@@ -99,6 +125,10 @@ python -m AgentLoop.main --node analyze_plan
 python -m AgentLoop.main --node execute
 python -m AgentLoop.main --node review
 python -m AgentLoop.main --node archive
+
+# 搭配 --change <name> 直接指定 change，不顯示終端選單（找不到就報錯結束）；
+# 網頁控制台的重跑功能在背後就是呼叫這個組合
+python -m AgentLoop.main --node execute --change feat-login
 ```
 
 `--node` 模式刻意不接受任務描述（傳了會直接報錯）：state 裡已經有當初的任務，再傳一份只會覆蓋掉原值並寫回 `state.json`。也因此 `--node` 一定要選到一個既有的 change，找不到任何 `state.json` 時會中止——全新任務請用上面完整工作流的形式。
@@ -139,7 +169,7 @@ python -m AgentLoop.search --reindex "query"   # 強制重建索引後再搜尋
 
 對目標專案的整個 `openspec/`（`specs/` + `changes/`）做向量語意搜尋，然後由 Claude 依搜尋結果合成自然語言答案（RAG）。索引儲存於目標專案的 `openspec/.vector_index/vector.db`，每次查詢前自動偵測是否有新的規格檔案，有則重建；第一次執行會下載 embedding 模型（約 100 MB，快取於容器的 `~/.cache/fastembed/`）。
 
-**認證**：優先使用 `.env` 的 `ANTHROPIC_API_KEY`；未設定時自動 fallback 到 `claude` CLI（使用容器現有的 OAuth 登入狀態）。可用 `SEARCH_MODEL` 覆蓋模型（`haiku`/`sonnet`/`opus`/`fable`），預設為 `haiku`。
+**認證**：優先使用 `.env` 的 `ANTHROPIC_API_KEY`；未設定時自動 fallback 到 `claude` CLI（使用容器現有的 OAuth 登入狀態）。搜尋一律使用 `haiku`；`SEARCH_MODEL` 已不再支援。
 
 ---
 

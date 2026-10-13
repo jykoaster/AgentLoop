@@ -32,13 +32,15 @@ Delete or merge the overlap in the same change. Do not append a new section to "
 
 ## Commands
 
-Everything runs inside the Docker container (see `README.md` for `.env` / `docker-compose.yml` setup — it requires `HOST_WORKSPACE_ROOT` and `TARGET_PROJECT` and mounts the target project by the _same absolute path_ as on the host):
+Everything runs inside the Docker container (see `README.md` for `.env` / `docker-compose.yml` setup — it requires `HOST_WORKSPACE_ROOT`; the whole workspace root is mounted at the _same absolute path_ as on the host, and `TARGET_PROJECT` is now optional, settable from the web console's Settings tab instead):
 
 ```bash
 docker compose build
 docker compose up -d
 docker exec -it agent_loop bash
 ```
+
+The container also starts the web console on boot (`uvicorn`, compose binds host `127.0.0.1:8000` only; the GUI is the image's frontend build) — see `http://127.0.0.1:8000`. CLI usage is unchanged and still the way to run things from inside `docker exec`.
 
 Inside the container, working directory is `${HOST_WORKSPACE_ROOT}` (the parent of `AgentLoop/`), so it's invoked as a package:
 
@@ -55,9 +57,23 @@ python -m AgentLoop.main --node execute
 python -m AgentLoop.main --node review
 python -m AgentLoop.main --node archive
 
+# --node with --change <name> skips the terminal selection menu and loads that change's
+# state.json directly (errors out if it doesn't exist) — this is what the web console's
+# rerun button calls under the hood
+python -m AgentLoop.main --node execute --change feat-login
+
 # semantic search over TARGET_PROJECT's openspec (see search.py)
 python -m AgentLoop.search "query"
 python -m AgentLoop.search --reindex "query"   # force rebuild index before searching
+
+# web service (same thing docker-compose's CMD runs); AGENTLOOP_INTERACTION/AGENTLOOP_RUN_DIR
+# are set by web/runner.py per subprocess, not needed for manual local runs against the API only
+python -m uvicorn AgentLoop.web.app:app --host 0.0.0.0 --port 8000
+
+# frontend tests (from AgentLoop/web/frontend/)
+npm install
+npm run test     # vitest run
+npm run build    # vue-tsc -b && vite build
 ```
 
 Run tests inside the container from `${HOST_WORKSPACE_ROOT}`:
@@ -71,11 +87,18 @@ pytest AgentLoop/tests/test_workflow_entrypoints.py -v
 
 # all tests
 pytest AgentLoop/tests/ -v
+
+# frontend tests (from AgentLoop/web/frontend/, needs `npm install` once first)
+cd AgentLoop/web/frontend && npx vitest run
 ```
 
 When editing a node, also verify its `_SYSTEM` prompt still produces output the regexes in that node (or in `workflow.py`'s routing functions) can parse.
 
 ## Architecture: what requires cross-file reading
+
+**Every place a node asks the user something must go through `lib/interaction.py`'s `ask()` / `is_interactive()`, never `input()` / `sys.stdin.isatty()` / `sys.stdin.readline()` directly.** The web console's only way to answer a running node's question is by writing `$AGENTLOOP_RUN_DIR/answer.json` for `interaction.ask()`'s web branch to pick up; a new prompt that bypasses this and calls `input()` straight will hang forever under `AGENTLOOP_INTERACTION=web` (no terminal to read from) and silently work under the CLI, making the gap easy to miss in local testing. CLI behavior is an exact passthrough (`ask()` calls `input()`/`readline()` with no prompt argument — the call site's own `print()` is still what the user sees). Existing tests patching `builtins.input` / `sys.stdin.isatty` only keep working because `tests/conftest.py`'s autouse fixture clears `AGENTLOOP_INTERACTION`/`AGENTLOOP_RUN_DIR` before every test, and because `claude_runner` doesn't forward those two env vars to the `claude` subprocess it spawns — otherwise a command the agent runs under the hood (e.g. the `pytest` invoked inside execute/review) would inherit them and silently flip into web mode.
+
+**Stage status (`AgentState["stages"]`) is written by a wrapper, not by the nodes themselves.** `core/workflow.py`'s `_tracked()` wraps all five nodes to call `core/stages.py`'s `start()`/`finish()` around each one; a node function never touches `stages`/`stage_notes` directly. The one gotcha: `_tracked()` skips calling `start()`/`finish()` entirely when the incoming state already has `status == "error"`, because `human_confirm_node`/`review_node` still get invoked once over the graph's unconditional edges in that case and immediately short-circuit — they didn't really run that stage, so it must stay `pending`, not flip to `running`/`error`. `main.py`'s `run_node()` (the `--node` direct-call path, bypassing the graph) duplicates this same `start()`/`finish()` pairing by hand since it doesn't go through `_tracked()`. `web/runner.py`'s abort path also writes through `finish(state, stage, "error", note="使用者中止")` rather than hand-copying `stages`/`stage_notes` itself — `finish()`'s `note` kwarg is the only place that dict gets mutated.
 
 **State flows one way through a compiled `StateGraph` (`workflow.py`), never through direct node-to-node calls.** All four nodes (`nodes/analyze_plan.py`, `human_confirm.py`, `execute.py`, `review.py`) read/write only the shared `AgentState` TypedDict (`state.py`). Two conditional-edge functions in `workflow.py` (`route_after_confirm`, `route_after_review`) are the only place routing decisions are made. `route_after_confirm` reads `status` directly. `route_after_review` reads the boolean `review_blocking` that `review_node` computes internally — it no longer parses `review_result` itself — so if you touch `review.py`'s output-format instructions, check its own `has_blocking_issues`/`extract_review_level`/`extract_suggestions` regexes there, since they're still brittle to prompt wording changes even though `workflow.py` is now insulated from them.
 
@@ -91,7 +114,7 @@ When editing a node, also verify its `_SYSTEM` prompt still produces output the 
 
 **Code review happens exactly once, in `review`, by design — `execute` deliberately does not review its own work.** `execute.py`'s `_SYSTEM` forbids commit and `/code-review` so that `review_node`'s two-axis Standards/Spec review (via the `code-review` skill's parallel sub-agents, requiring the `Task` tool) is the only review pass. If you're touching either prompt, preserve this split — reintroducing self-review in `execute` would silently duplicate the review pass. `execute` and `review` both read the OpenSpec change folder themselves (not a flattened `state["plan"]` copy); `execute` also does not receive `state["task"]` — the original user request is planning-only, and re-injecting it makes execute re-diagnose those problems instead of the remaining `- [ ]` items. `review` additionally re-derives `git diff HEAD` and does not receive `execution_result`. Both nodes independently run the target project's test suite (execute to auto-fix failures, review to verify without trusting execute's self-report) — this duplication _is_ intentional.
 
-**`review` can finish without calling Claude at all.** `_run_spec_trace_check()` greps the target project for a `describe`/`test` named exactly like each `#### Scenario:` in the change's specs, *before* the Claude call. Any Scenario without one short-circuits the node to `review_blocking: True` / `review_level: "修補"` and straight back to replan, spending no review tokens; otherwise the per-Scenario result is injected as `<<SPEC_TRACE_RESULT>>` and the prompt is told to quote it rather than grep again. This was an instruction in `_SYSTEM` before, and as an instruction it got skipped — a Scenario with no test could still come back `Ready to merge? Yes`. So if you are debugging "review came back 修補 with only a `## Spec` section and no Standards axis", that is the short-circuit, not a truncated report — look at the trace check before the prompt. The `_SYSTEM` rule that a missing test forces `No` is now near-unreachable belt-and-braces and should stay that way.
+**`review` can finish without calling Claude at all.** `_run_spec_trace_check()` greps the target project for the exact text of each `#### Scenario:` in the change's specs, *before* the Claude call. Any Scenario without one short-circuits the node to `review_blocking: True` / `review_level: "修補"` and straight back to replan, spending no review tokens; otherwise the per-Scenario result is injected as `<<SPEC_TRACE_RESULT>>` and the prompt is told to quote it rather than grep again. This was an instruction in `_SYSTEM` before, and as an instruction it got skipped — a Scenario with no test could still come back `Ready to merge? Yes`. So if you are debugging "review came back 修補 with only a `## Spec` section and no Standards axis", that is the short-circuit, not a truncated report — look at the trace check before the prompt. The `_SYSTEM` rule that a missing test forces `No` is now near-unreachable belt-and-braces and should stay that way.
 
 **No target project's structure is ever hardcoded.** `project_context.py` scans the workspace root for `CLAUDE.md`/`AGENT.md`/`AGENTS.md` per subdirectory and injects a hint block (not the file contents) into every node's prompt; the agent decides at runtime which project docs to `Read`. `skill_loader.py` similarly injects Claude Code skills from `AgentLoop/.claude/skills/` (fallback `~/.claude/skills/`) — the whitelist `_FULL_CONTENT_SKILLS` (`grilling`, `domain-modeling`, `code-review`, `tdd`, `openspec-authoring`) gets full content injected; everything else is listed by name only, left for the agent to pick based on the detected stack. Name-only listing only works if Claude Code's own native skill discovery happens to find a same-named skill — verified empirically that this discovery is keyed off the invoking user's `$HOME/.claude/skills/`, not the `cwd` `claude_runner.py` passes to the subprocess, so a project-bundled skill under `AgentLoop/.claude/skills/` is never found by it. `tdd` was moved into the whitelist for exactly this reason (it needs to work regardless of whose machine runs the container), and `openspec-authoring` exists only under `AgentLoop/.claude/skills/`, so name-only listing would never resolve it at all.
 

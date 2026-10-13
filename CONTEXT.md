@@ -1,0 +1,43 @@
+# AgentLoop 領域詞彙
+
+## 網頁控制台（web-gui）
+
+**目標專案（Target Project）**
+AgentLoop 驅動 Claude Code 去修改的那一個專案；位於工作區根目錄底下，同一時間只有一個。
+
+**工作區根目錄（Workspace Root）**
+AgentLoop 與目標專案共同的上層資料夾；選擇目標專案時只能從這個資料夾底下挑選。
+
+**任務（Change）**
+一次從任務描述出發、經規劃到封存的完整工作單位，以 change 名稱識別；網頁上一個任務佔一列。
+
+**執行中任務（Active Change）**
+已有執行狀態紀錄、但尚未封存的任務；不論此刻是否真的有程序在跑。
+
+**封存任務（Archived Change）**
+review 通過後已併入目標專案既有 Spec 的任務；只供瀏覽，不能再執行。
+
+**工作階段（Stage）**
+工作流中的一個節點：analyze_plan、human_confirm、execute、review、archive。search 不屬於工作流，不是工作階段。
+
+**階段狀態（Stage Status）**
+一個工作階段目前的進度，只有四種：尚未開始、執行中、完成、錯誤。
+
+**執行（Run）**
+一次啟動工作流的程序，從新增任務或重跑某階段開始，到工作流結束或被中止為止。同一目標專案同時最多一個執行。
+_避免_：job、process（指作業系統程序時才用「程序」）
+
+**待回覆提問（Pending Question）**
+執行中的工作流停下來等使用者回答的問題，例如分支名稱、grilling 提問、人工確認、用量上限暫停。卡片以驚嘆號標示。
+
+**互動埠（Interaction Port）**
+工作流向使用者提問的唯一出入口；命令列模式下問在終端，網頁模式下變成待回覆提問。
+
+**重跑（Rerun）**
+從某個可單獨執行的工作階段（analyze_plan、execute、review、archive）重新開始，並依原路由接續後面的流程。
+
+**中止（Abort）**
+使用者強制結束目前的執行；當下的工作階段記為錯誤並註明使用者中止。
+
+**既有 Spec（Existing Spec）**
+目標專案 `openspec/specs/` 底下已合併的各 domain 規格。

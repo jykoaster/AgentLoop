@@ -5,13 +5,13 @@ services:
       dockerfile: Dockerfile
     container_name: agent_loop
     volumes:
-      # AgentLoop 與目標專案一律用「與 host 相同的絕對路徑」掛載（而非重新映射到
-      # /workspace/...）。原因：容器內執行的 docker compose 是透過下方 docker.sock
-      # 操控 host 上同一顆 daemon，daemon 建立目標專案的 bind mount 時，用的是這裡
-      # 掛載路徑本身的字串，該路徑必須在 host 上真實存在，否則會掛載到空目錄
-      - ${HOST_WORKSPACE_ROOT}/AgentLoop:${HOST_WORKSPACE_ROOT}/AgentLoop
-      # 目標專案掛載，資料夾名稱由 .env 的 TARGET_PROJECT 決定。只支援單一目標專案。
-      - ${HOST_WORKSPACE_ROOT}/${TARGET_PROJECT}:${HOST_WORKSPACE_ROOT}/${TARGET_PROJECT}
+      # 整個工作區根目錄用「與 host 相同的絕對路徑」掛載（而非重新映射到 /workspace/...）。
+      # 原因：容器內執行的 docker compose 是透過下方 docker.sock 操控 host 上同一顆
+      # daemon，daemon 建立目標專案的 bind mount 時，用的是這裡掛載路徑本身的字串，
+      # 該路徑必須在 host 上真實存在，否則會掛載到空目錄。
+      # 改掛整個根目錄（而非只掛 AgentLoop/ 與單一 TARGET_PROJECT）是為了讓網頁控制台
+      # 能切換目標專案、用資料夾選擇器看到其他專案，不需要為此重建容器。
+      - ${HOST_WORKSPACE_ROOT}:${HOST_WORKSPACE_ROOT}
       # 讓容器內的 docker CLI 操控 host 的 docker engine（Docker outside of Docker）
       - /var/run/docker.sock:/var/run/docker.sock
       # 容器專屬的 Claude Code 登入狀態（.claude/ 其餘內容、.claude.json 等），
@@ -33,6 +33,11 @@ services:
     # 當成頂層 package 解析（原本掛在 /workspace/agentloop 時也是靠 working_dir
     # 停在其上層 /workspace 達成同樣效果）
     working_dir: ${HOST_WORKSPACE_ROOT}
+    # 網頁控制台只綁 host 的 127.0.0.1，不對外開放；容器內監聽 0.0.0.0:8000 讓
+    # uvicorn 能被上面這層的 127.0.0.1 轉送到。前端用映像裡的建置產物（WEB_DIST_DIR）。
+    ports:
+      - "127.0.0.1:8000:8000"
+    command: python -m uvicorn AgentLoop.web.app:app --host 0.0.0.0 --port 8000
 
 volumes:
   agent_home:

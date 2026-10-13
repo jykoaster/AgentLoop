@@ -222,7 +222,17 @@ class TestCliArgs:
     def test_node_without_task_runs(self):
         with patch("AgentLoop.main.run_node") as mock_run_node:
             self._main(["--node", "execute"])
-        mock_run_node.assert_called_once_with("execute")
+        mock_run_node.assert_called_once_with("execute", change_name=None)
+
+    def test_node_with_change_runs(self):
+        with patch("AgentLoop.main.run_node") as mock_run_node:
+            self._main(["--node", "execute", "--change", "feat-login"])
+        mock_run_node.assert_called_once_with("execute", change_name="feat-login")
+
+    def test_change_without_node_rejected(self):
+        with pytest.raises(SystemExit) as exc:
+            self._main(["--change", "feat-login"])
+        assert exc.value.code == 2
 
     def test_full_workflow_requires_task_description(self):
         with pytest.raises(SystemExit) as exc:

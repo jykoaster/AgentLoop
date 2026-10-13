@@ -1,7 +1,7 @@
 import re
-import sys
 import unicodedata
 from ..core import AgentState
+from ..lib import interaction
 
 _CYAN   = "\033[1;36m"
 _YELLOW = "\033[1;33m"
@@ -51,9 +51,15 @@ def human_confirm_node(state: AgentState) -> dict:
 
     print(f"\n{_CYAN}{'─'*60}{_RESET}", flush=True)
 
-    if not sys.stdin.isatty():
+    if not interaction.is_interactive():
         print(f"{_RED}  [人工確認] 非互動式模式，自動中止執行。{_RESET}\n", flush=True)
         return {"status": "aborted"}
+
+    confirm_prompt = (
+        f"## 分析摘要\n\n{analysis}\n\n"
+        + (f"## 執行計畫（共 {len(plan)} 個 TASK）\n\n" + "\n".join(f"{i}. {t}" for i, t in enumerate(plan, 1)) + "\n\n" if plan else "")
+        + "繼續執行？"
+    )
 
     # 中文／全形字元不可放進 input() 的 prompt：GNU readline 用字元數而非
     # 顯示欄寬計算游標，會把第一個輸入字元吃掉或混進控制碼，導致畫面上看
@@ -65,7 +71,7 @@ def human_confirm_node(state: AgentState) -> dict:
     while True:
         print(f"{_YELLOW}  繼續執行？[y/N] {_RESET}", end="", flush=True)
         try:
-            answer = _normalize_confirm(input())
+            answer = _normalize_confirm(interaction.ask(confirm_prompt, kind="confirm", stage="human_confirm"))
         except (EOFError, KeyboardInterrupt):
             print(f"\n{_RED}  [人工確認] 已取消。{_RESET}\n", flush=True)
             return {"status": "aborted"}
@@ -80,7 +86,10 @@ def human_confirm_node(state: AgentState) -> dict:
     # User rejected — ask for revision comments before aborting
     print(f"\n{_YELLOW}  請輸入修改意見，讓 Agent 調整計畫（直接按 Enter 則中止執行）：{_RESET}", flush=True)
     try:
-        feedback = input(f"{_YELLOW}  > {_RESET}").strip()
+        feedback = interaction.ask(
+            "請輸入修改意見，讓 Agent 調整計畫（留空則中止執行）",
+            kind="text", stage="human_confirm",
+        ).strip()
     except (EOFError, KeyboardInterrupt):
         feedback = ""
 

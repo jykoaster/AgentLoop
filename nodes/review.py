@@ -1,14 +1,13 @@
 import glob
 import re
 import subprocess
-import sys
 import time
 import os
 from ..core import AgentState, take_session, store_session
 from ..lib import (
     call_claude, call_resuming, format_usage_stats, build_skills_block,
     build_project_doc_hint_for, ensure_on_branch, is_usage_limit_error,
-    LANGUAGE_POLICY, REPO_ROOT,
+    LANGUAGE_POLICY, REPO_ROOT, interaction,
 )
 
 # 使用的模型（"haiku" | "sonnet" | "opus" | "fable"，見 claude_runner.MODEL_IDS；
@@ -410,13 +409,15 @@ def review_node(state: AgentState) -> dict:
         print(f"  {i}. {s}", flush=True)
     print(f"{_BANNER}{'─'*50}{_RESET}\n", flush=True)
 
-    if not sys.stdin.isatty():
+    if not interaction.is_interactive():
         print(f"{_YELLOW}  [Review Agent] 非互動式環境，預設不修改任何建議，直接前往 Check{_RESET}\n", flush=True)
         selected = []
     else:
         try:
-            answer = input(
-                f"{_YELLOW}  請輸入要修改的建議編號（例如 1,3；all=全部；直接 Enter=不修改）：{_RESET}"
+            answer = interaction.ask(
+                "請輸入要修改的建議編號（例如 1,3；all=全部；留空＝不修改）",
+                kind="choice", stage="review",
+                options=[f"{i}. {s}" for i, s in enumerate(suggestions, 1)],
             ).strip()
         except (EOFError, KeyboardInterrupt):
             print(f"\n{_YELLOW}  [Review Agent] 已取消，預設不修改任何建議{_RESET}\n", flush=True)

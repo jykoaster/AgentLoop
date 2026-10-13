@@ -19,7 +19,10 @@ class OpenSpecResult:
 
 
 def ensure_initialized(project_dir_abs: str, timeout: int = 60) -> OpenSpecResult:
-    """確保目標專案已有 `openspec/`；已存在則直接視為成功，不重複執行 init。"""
+    """確保目標專案已有 `openspec/`；已存在則直接視為成功，不重複執行 init。
+
+    `--tools none`：只建目錄，不把 OpenSpec 的 workflow skill 寫進目標專案。
+    """
     if os.path.isdir(os.path.join(project_dir_abs, "openspec")):
         return OpenSpecResult(ok=True)
     if not shutil.which("openspec"):
@@ -27,7 +30,7 @@ def ensure_initialized(project_dir_abs: str, timeout: int = 60) -> OpenSpecResul
 
     try:
         proc = subprocess.run(
-            ["openspec", "init", "--tools", "claude", "--force"],
+            ["openspec", "init", "--tools", "none", "--force"],
             cwd=project_dir_abs,
             capture_output=True,
             text=True,

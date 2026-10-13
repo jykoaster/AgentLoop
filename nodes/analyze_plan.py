@@ -1,7 +1,6 @@
 import json
 import os
 import re
-import sys
 import time
 from ..core import AgentState, take_session, store_session
 from ..lib import (
@@ -10,6 +9,7 @@ from ..lib import (
     build_project_doc_hint_for, REPO_ROOT,
     ensure_on_branch, rollback_except_openspec,
     ensure_initialized, ensure_change_created, validate_change,
+    interaction,
 )
 
 # 初始規劃／依人工意見調整：完整 grilling + domain-modeling（人工意見可能牽涉詞彙或架構決策）
@@ -216,6 +216,12 @@ _SESSION_KEY = "analyze_plan"
 
 _QUESTION_LINE_RE = re.compile(r"^\s*" + re.escape(QUESTION_MARKER), re.MULTILINE)
 _TASK_CHECKBOX_RE = re.compile(r"^-\s\[[ xX]\]\s*(.+)$", re.MULTILINE)
+_OPTION_LINE_RE = re.compile(r"^\s*\d+\.\s*(.+)$", re.MULTILINE)
+
+
+def _parse_question_options(text: str) -> list[str]:
+    """抽出 QUESTION 區塊裡 `數字. 選項內容` 的選項清單，供網頁模式顯示按鈕用。"""
+    return [m.strip() for m in _OPTION_LINE_RE.findall(text)]
 
 _KEBAB_INVALID_RE = re.compile(r"[^a-z0-9-]+")
 _MULTI_HYPHEN_RE = re.compile(r"-{2,}")
@@ -299,7 +305,7 @@ def _run_with_grilling(prompt: str, tools: str, model: str, timeout: int, resume
             )
             return result
 
-        if not sys.stdin.isatty():
+        if not interaction.is_interactive():
             print(
                 f"{_YELLOW}  [分析+規劃 Agent] 非互動式環境，無法提問，採用建議答案繼續{_RESET}\n",
                 flush=True,
@@ -308,7 +314,10 @@ def _run_with_grilling(prompt: str, tools: str, model: str, timeout: int, resume
             continue
 
         try:
-            answer = input(f"{_YELLOW}  > {_RESET}").strip()
+            answer = interaction.ask(
+                result.text, kind="choice", stage="analyze_plan",
+                options=_parse_question_options(result.text),
+            ).strip()
         except (EOFError, KeyboardInterrupt):
             print(f"\n{_YELLOW}  [分析+規劃 Agent] 已中止提問，採用建議答案繼續{_RESET}\n", flush=True)
             answer = ""
@@ -572,12 +581,15 @@ def _ask_skip_specs() -> bool | None:
         f"{_YELLOW}    n — 不需要（純重構／文件／設定；.openspec.yaml 設 skip_specs: true，略過 specs）{_RESET}",
         flush=True,
     )
-    if not sys.stdin.isatty():
+    if not interaction.is_interactive():
         print(f"{_YELLOW}  非互動式環境，預設為需要寫 spec{_RESET}\n", flush=True)
         return False
     while True:
         try:
-            answer = input(f"{_YELLOW}  > {_RESET}").strip().lower()
+            answer = interaction.ask(
+                "本次任務是否需要撰寫 OpenSpec spec（specs/<domain>/spec.md）？",
+                kind="confirm", stage="analyze_plan",
+            ).strip().lower()
         except (EOFError, KeyboardInterrupt):
             print(f"\n{_RED}  已取消，請明確選擇是否需要撰寫 spec{_RESET}\n", flush=True)
             return None
@@ -602,7 +614,10 @@ def _ask_new_domain_name() -> str:
         flush=True,
     )
     try:
-        return input(f"{_YELLOW}  > {_RESET}").strip()
+        return interaction.ask(
+            "新 domain 名稱為何？（選填，建議英文 kebab-case；留空由 Agent 依任務語意自行命名）",
+            kind="text", stage="analyze_plan",
+        ).strip()
     except (EOFError, KeyboardInterrupt):
         print(f"\n{_YELLOW}  已中止，由 Agent 依任務語意自行命名{_RESET}\n", flush=True)
         return ""
@@ -628,13 +643,17 @@ def _ask_domain_selection(project_dir: str) -> tuple[list[str], str]:
     print(f"{_YELLOW}  {new_idx}. 以上皆非，建立新 domain{_RESET}", flush=True)
     print(f"{_YELLOW}  （同時涉及多個既有 domain 可用逗號輸入多個編號，例如 1,3）{_RESET}", flush=True)
 
-    if not sys.stdin.isatty():
+    if not interaction.is_interactive():
         print(f"{_YELLOW}  非互動式環境，預設建立新 domain{_RESET}\n", flush=True)
         return [], ""
 
+    options = [*domains, "以上皆非，建立新 domain"]
     while True:
         try:
-            answer = input(f"{_YELLOW}  > {_RESET}").strip()
+            answer = interaction.ask(
+                "本次需求歸屬於哪一個既有 domain？（可用逗號輸入多個編號，例如 1,3）",
+                kind="choice", stage="analyze_plan", options=options,
+            ).strip()
         except (EOFError, KeyboardInterrupt):
             print(f"\n{_YELLOW}  已中止，預設建立新 domain{_RESET}\n", flush=True)
             return [], ""
@@ -678,56 +697,29 @@ def _ask_domain_selection(project_dir: str) -> tuple[list[str], str]:
         return selected, ""
 
 
-def _drain_stdin() -> None:
-    """清除 stdin buffer 中剩餘的輸入，防止使用者貼上多行文字時，
-    未被消耗的行混入後續的 input() 呼叫。"""
-    try:
-        import termios
-        termios.tcflush(sys.stdin, termios.TCIFLUSH)
-    except Exception:
-        pass
-
-
 def _ask_domain_purpose() -> str:
     """本次確定會建立新 domain 時（僅初始規劃）詢問使用者這個 domain 的 Purpose，選填——
     留白（含非互動式環境、使用者中止）就交由 Claude 依當次任務語意自行撰寫，不視為錯誤。
 
-    支援多行貼上：連續兩個空行（Enter Enter）或 Ctrl+D 結束輸入。
-    使用「雙空行」而非「單空行」為終止符，允許 Purpose 本文內含有 markdown 段落分隔（單空行）。
-    結束後一律 drain stdin，防止剩餘 buffer 行污染後續 grilling 的 input()。
+    命令列支援多行貼上：連續兩個空行（Enter Enter）或 Ctrl+D 結束輸入，結束後 drain
+    stdin，防止剩餘 buffer 行污染後續 grilling 的 input()；網頁模式一次送出全文，
+    不需要這個終止符與 drain（見 interaction.ask 的 multiline 實作）。
     """
     print(
         f"\n{_YELLOW}  [分析+規劃 Agent] 這是新建立的 domain，若要指定它的 Purpose 請輸入"
         f"（選填；支援多行，貼上後連按兩次 Enter 結束；直接 Enter 由 Agent 依本次任務自行撰寫）：{_RESET}",
         flush=True,
     )
-    if not sys.stdin.isatty():
+    if not interaction.is_interactive():
         return ""
-    lines: list[str] = []
-    consecutive_empty = 0
     try:
-        while True:
-            line = input(f"{_YELLOW}  > {_RESET}")
-            if not line:
-                if not lines:
-                    # 第一行就是空行 → 使用者選擇略過
-                    break
-                consecutive_empty += 1
-                if consecutive_empty >= 2:
-                    break
-                lines.append(line)  # 保留單一空行（markdown 段落分隔）
-            else:
-                consecutive_empty = 0
-                lines.append(line)
+        return interaction.ask(
+            "這是新建立的 domain，若要指定它的 Purpose 請輸入（選填，留空由 Agent 自行撰寫）",
+            kind="text", stage="analyze_plan", multiline=True,
+        ).strip()
     except (EOFError, KeyboardInterrupt):
-        if not lines:
-            print(f"\n{_YELLOW}  已略過，由 Agent 自行撰寫 Purpose{_RESET}\n", flush=True)
-    finally:
-        _drain_stdin()
-    # 去除結尾空行
-    while lines and not lines[-1]:
-        lines.pop()
-    return "\n".join(lines).strip()
+        print(f"\n{_YELLOW}  已略過，由 Agent 自行撰寫 Purpose{_RESET}\n", flush=True)
+        return ""
 
 
 def _build_new_domain_context(name: str, purpose: str) -> str:
@@ -771,12 +763,15 @@ def _ask_branch_name() -> str:
         f"（必填，例如 feature/add-login；已存在則切過去，不存在則新建）：{_RESET}",
         flush=True,
     )
-    if not sys.stdin.isatty():
+    if not interaction.is_interactive():
         print(f"{_RED}  非互動式環境，無法輸入分支名稱{_RESET}\n", flush=True)
         return ""
     while True:
         try:
-            answer = input(f"{_YELLOW}  > {_RESET}").strip()
+            answer = interaction.ask(
+                "請輸入本次任務要使用的 git 分支名稱（必填，例如 feature/add-login；已存在則切過去，不存在則新建）",
+                kind="text", stage="analyze_plan", required=True,
+            ).strip()
         except (EOFError, KeyboardInterrupt):
             print(f"\n{_RED}  已取消，分支名稱為必填{_RESET}\n", flush=True)
             return ""

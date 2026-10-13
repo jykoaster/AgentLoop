@@ -116,6 +116,55 @@ class TestIsUsageLimitError:
         assert not is_usage_limit_error("You've hit your context limit for this conversation")
 
 
+# ── claude 子行程不應繼承網頁模式環境變數 ──────────────────────────────────────
+
+class _FakePopen:
+    """回傳空 stdout 的假 Popen，不真的啟動 `claude`，只記錄收到的呼叫參數。"""
+
+    def __init__(self, cmd, **kwargs):
+        self.cmd = cmd
+        self.kwargs = kwargs
+        self.stdout = iter(())
+        self.stderr = MagicMock()
+        self.stderr.read.return_value = ""
+        self.returncode = 0
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc_info):
+        return False
+
+    def wait(self, timeout=None):
+        return 0
+
+
+class TestRunClaudeOnceDoesNotLeakWebInteractionEnv:
+    def test_subprocess_does_not_inherit_web_interaction_env(self, monkeypatch):
+        """子行程不應繼承網頁模式互動埠環境變數"""
+        from AgentLoop.lib import claude_runner
+
+        monkeypatch.setenv("AGENTLOOP_INTERACTION", "web")
+        monkeypatch.setenv("AGENTLOOP_RUN_DIR", "/tmp/does-not-matter")
+        monkeypatch.setenv("PATH", "/usr/bin:/bin")
+
+        captured: dict = {}
+
+        def _fake_popen(cmd, **kwargs):
+            popen = _FakePopen(cmd, **kwargs)
+            captured["env"] = kwargs.get("env")
+            return popen
+
+        with patch.object(claude_runner.subprocess, "Popen", side_effect=_fake_popen):
+            claude_runner._run_claude_once(timeout=5, cmd=["claude", "-p", "hi"])
+
+        env = captured["env"]
+        assert env is not None
+        assert "AGENTLOOP_INTERACTION" not in env
+        assert "AGENTLOOP_RUN_DIR" not in env
+        assert env.get("PATH") == "/usr/bin:/bin"
+
+
 # ── session 插槽 ──────────────────────────────────────────────────────────────
 
 class TestSessionSlot:
