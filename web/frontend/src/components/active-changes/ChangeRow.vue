@@ -30,10 +30,14 @@ const disabledReason = computed(() =>
   props.runStatus.active ? `目前已有 ${props.runStatus.label ?? ''} 執行中` : '',
 )
 
+const hasPendingQuestion = computed(() =>
+  !!props.runStatus.active &&
+  !!props.runStatus.question &&
+  (props.runStatus.change_name || '') === (props.row.change_name || ''),
+)
+
 function hasQuestion(stage: string): boolean {
-  if (!props.runStatus.active || !props.runStatus.question) return false
-  if (props.runStatus.question.stage !== stage) return false
-  return (props.runStatus.change_name || '') === (props.row.change_name || '')
+  return hasPendingQuestion.value && props.runStatus.question?.stage === stage
 }
 
 const question = computed(() =>
@@ -52,6 +56,7 @@ function rerun(stage: string): void {
 <template>
   <div
     class="change-row flex flex-col gap-3 rounded-xl border border-line bg-surface p-5 shadow-lg"
+    :class="{ 'animate-breathe-warning motion-reduce:animate-none': hasPendingQuestion }"
     :data-change-name="row.change_name || '(temp)'"
   >
     <div class="flex items-start justify-between gap-2">

@@ -27,6 +27,7 @@
   --color-stage-error: #ef4444;
 
   --animate-breathe: breathe 2s ease-in-out infinite;
+  --animate-breathe-warning: breathe-warning 2s ease-in-out infinite;
 
   @keyframes breathe {
     0%,
@@ -35,6 +36,16 @@
     }
     50% {
       box-shadow: 0 0 12px 2px var(--color-stage-running);
+    }
+  }
+
+  @keyframes breathe-warning {
+    0%,
+    100% {
+      box-shadow: 0 0 0 0 var(--color-warning);
+    }
+    50% {
+      box-shadow: 0 0 12px 2px var(--color-warning);
     }
   }
 }
