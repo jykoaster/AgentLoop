@@ -402,11 +402,12 @@ def review_node(state: AgentState) -> dict:
             **store_session(_SESSION_KEY, ""),
         }
 
+    numbered_suggestions = interaction.numbered(suggestions)
     print(f"\n{_BANNER}{'─'*50}", flush=True)
     print("  [Review Agent] 無嚴重影響功能的問題，但有以下修改建議：", flush=True)
     print(f"{'─'*50}{_RESET}", flush=True)
-    for i, s in enumerate(suggestions, 1):
-        print(f"  {i}. {s}", flush=True)
+    for line in numbered_suggestions:
+        print(f"  {line}", flush=True)
     print(f"{_BANNER}{'─'*50}{_RESET}\n", flush=True)
 
     if not interaction.is_interactive():
@@ -417,7 +418,7 @@ def review_node(state: AgentState) -> dict:
             answer = interaction.ask(
                 "請輸入要修改的建議編號（例如 1,3；all=全部；留空＝不修改）",
                 kind="choice", stage="review",
-                options=[f"{i}. {s}" for i, s in enumerate(suggestions, 1)],
+                options=numbered_suggestions,
             ).strip()
         except (EOFError, KeyboardInterrupt):
             print(f"\n{_YELLOW}  [Review Agent] 已取消，預設不修改任何建議{_RESET}\n", flush=True)

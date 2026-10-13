@@ -250,7 +250,9 @@ OpenSpec change 位置，不需要各自重新判斷；`archive_node` 單獨執�
    `<目標專案>/openspec/specs/` 底下既有的 domain（資料夾名稱）；沒有既有 domain 時不提問，直接
    視為新建 domain。有既有 domain 時在終端機列出清單 + 一個「以上皆非，建立新 domain」選項，讓
    使用者輸入編號選擇本次規格 delta 歸屬哪個（可用逗號輸入多個編號，對應「同一任務涉及多個既有
-   domain」的情況）；非互動式環境預設視為新建 domain。選定的既有 domain 名稱清單會組進 system
+   domain」的情況）；非互動式環境預設視為新建 domain。送給 `interaction.ask()` 的 `options` 一律是
+   「編號. 文字」格式（例如「1. web-gui」「2. 以上皆非，建立新 domain」），讓網頁模式的選項按鈕能把
+   編號交給工作流，效果與終端輸入同一編號相同。選定的既有 domain 名稱清單會組進 system
    prompt 的 `_DOMAIN_CONTEXT_EXISTING` 區塊（只給名稱；`## Purpose` 的寫法在 `openspec-authoring` skill）。回傳空清單（確定是
    純粹新建 domain：沒有既有 domain，或使用者選了「建立新 domain」）時，額外呼叫
    `_ask_domain_purpose()` 讓使用者選填這個新 domain 的 Purpose 文字；有填就用
@@ -898,6 +900,10 @@ domain Purpose／grilling 提問、`human_confirm` 的 y/N 與修改意見、`re
 `archive` 的是否併入 specs、`claude_runner.call_claude()` 的用量上限暫停（`kind="pause"`，
 `stage` 取自 `core/stages.current_stage()`）。**新增任何提問點都必須走這裡**，否則網頁模式下
 會卡住等不到回覆，命令列模式下則可能誤用非互動預設值。
+
+選項題的「編號. 文字」清單統一由 `interaction.numbered(items)` 產生（回傳 `["1. a", "2.
+b", ...]`，編號從 1 起算），`analyze_plan` 的 domain 歸屬提問與 `review` 的建議選擇題共用這份
+清單餵給終端 `print()` 與 `ask(..., options=...)`，因此終端清單與網頁選項按鈕看到的編號永遠一致。
 
 ### 階段狀態：`core/stages.py` + `AgentState["stages"]`
 

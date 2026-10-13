@@ -637,17 +637,16 @@ def _ask_domain_selection(project_dir: str) -> tuple[list[str], str]:
         return [], ""
 
     new_idx = len(domains) + 1
+    options = interaction.numbered(domains + ["以上皆非，建立新 domain"])
     print(f"\n{_YELLOW}  [分析+規劃 Agent] 本次需求歸屬於哪一個既有 domain？{_RESET}", flush=True)
-    for i, d in enumerate(domains, 1):
-        print(f"{_YELLOW}  {i}. {d}{_RESET}", flush=True)
-    print(f"{_YELLOW}  {new_idx}. 以上皆非，建立新 domain{_RESET}", flush=True)
+    for line in options:
+        print(f"{_YELLOW}  {line}{_RESET}", flush=True)
     print(f"{_YELLOW}  （同時涉及多個既有 domain 可用逗號輸入多個編號，例如 1,3）{_RESET}", flush=True)
 
     if not interaction.is_interactive():
         print(f"{_YELLOW}  非互動式環境，預設建立新 domain{_RESET}\n", flush=True)
         return [], ""
 
-    options = [*domains, "以上皆非，建立新 domain"]
     while True:
         try:
             answer = interaction.ask(
