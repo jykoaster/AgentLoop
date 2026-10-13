@@ -47,6 +47,16 @@ def _write_answer(run_dir: Path, question: dict, answer: str) -> None:
     )
 
 
+class TestNumbered:
+    def test_numbers_items_from_one(self):
+        assert interaction.numbered(["auth", "billing", "以上皆非，建立新 domain"]) == [
+            "1. auth", "2. billing", "3. 以上皆非，建立新 domain",
+        ]
+
+    def test_empty_list_returns_empty(self):
+        assert interaction.numbered([]) == []
+
+
 class TestCliWorkflowRepliesInTerminal:
     def test_cli_questions_stay_on_the_terminal(self, capsys):
         """以命令列執行工作流時提問仍在終端回覆"""

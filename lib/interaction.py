@@ -40,6 +40,11 @@ def is_web_mode() -> bool:
     return _web_mode()
 
 
+def numbered(items: list[str]) -> list[str]:
+    """選項題的「編號. 文字」清單，編號從 1 起算連續遞增；終端清單與網頁選項按鈕共用。"""
+    return [f"{i}. {item}" for i, item in enumerate(items, 1)]
+
+
 def _run_dir() -> str:
     run_dir = os.environ.get("AGENTLOOP_RUN_DIR", "")
     if not run_dir:
