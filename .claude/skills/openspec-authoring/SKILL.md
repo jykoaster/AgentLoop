@@ -95,7 +95,7 @@ spec 只描述系統仍保證的行為。沒寫到就沒有承諾（不存在、
     錯誤（frontend）：`THEN 該 a-textarea 的 DOM maxlength 屬性為 1024`；正確：`THEN 字元計數以 1024 為上限，使用者無法讓該欄位保留超過 1024 字`
     錯誤（frontend）：`請求本文 MUST 帶 siteIDs、startTime、endTime、pageSize=20`；正確：`首次查詢 MUST 帶入查詢時間範圍與使用者設定的進階篩選條件；每批固定最多 20 筆`
     錯誤（frontend）：`系統依 user.isAdmin === true 判定`；正確：`系統依登入者是否為管理者判定`
-- **每個 Scenario 必須有至少一個名稱完全相同的** `describe` 或 `test`（Scenario 標題即驗收測試名稱）
+- **每個 Scenario 標題都要有一段完全相同的文字寫在對應測試的本體裡**（review 以此 grep）。該測試以外不算
 - 沿用既有 domain 不加 `## Purpose`；domain 首次建立才在 delta 最上面加一段 `## Purpose`（一兩句話，與 proposal Intent 對齊）
 - 不需要獨立的「User Stories」章節
 - 純重構/文件/設定調整、無外部可觀察行為變化：在 `.openspec.yaml` 加 `skip_specs: true` 並略過 specs delta；REMOVED 移除了某 domain 最後一個 Requirement 時加 `retire_capabilities: true`
@@ -106,10 +106,10 @@ spec 只描述系統仍保證的行為。沒寫到就沒有承諾（不存在、
 `## N. <群組名稱>` + `- [ ] N.M <具體任務>` checkbox，依實作順序階層編號（1.1、1.2...）。
 
 - 涉及新增或修改行為的任務，須額外安排一個對應的「撰寫／更新測試」任務（優先在既有測試 seam 上以 tdd skill 的紅-綠循環進行）；純文件、設定調整或不改變行為的重構可不需要
-- **測試改名任務**：spec 完成後 grep 既有測試，凡行為與某 Scenario 相符但名稱不同的測試，安排「將 `<既有測試名稱>` 改名為 `<Scenario 標題>`」任務，**不另開新測試**；既有測試完全不存在才安排撰寫新測試
+- **測試對齊任務**：spec 完成後 grep 既有測試。行為已涵蓋某 Scenario、但標題原字串不在該測試本體裡的，安排把原字串補進該測試本體，**不另開新測試**。完全沒有對應測試才安排新寫
 - **測試刪除任務（必須安排，不可遺漏）**：比對既有 spec.md，凡有測試需要移除的情況均需在 tasks.md 明確列出；兩種觸發情境，格式各別如下：
   - `MODIFIED Requirements`：Requirement 保留但某些 Scenario 標題不再出現於 delta 新版本 → 安排「移除 `<消失的 Scenario 標題>` 測試」任務，以 **Scenario 標題**為準
-  - `REMOVED Requirements`：整個 Requirement 被移除 → 安排「移除 `<Requirement 標題>` 相關測試」任務（Requirement 層級），**並**為其下每個 Scenario 各別安排「移除 `<Scenario 標題>` 測試」任務（Scenario 標題即測試函式名稱）
+  - `REMOVED Requirements`：整個 Requirement 被移除 → 安排「移除 `<Requirement 標題>` 相關測試」任務（Requirement 層級），**並**為其下每個 Scenario 各別安排「移除 `<Scenario 標題>` 測試」任務（以該測試本體裡的標題原字串定位）
 - 是否需要「更新文件」任務，依該任務所屬專案的 CLAUDE.md / AGENT.md 判斷：若說明檔要求同步維護 docs/ 下的商業邏輯說明文件，安排對應任務（通常放在最後）；未提及此類慣例時不強制新增
 - 這份檔案會被執行 Agent 逐項勾選、被審查 Agent 讀取確認完成度，是任務清單的唯一事實來源；不要另外在聊天輸出一份分析／計畫摘要
 
