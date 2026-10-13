@@ -49,3 +49,9 @@ body {
 @utility btn-secondary {
   @apply rounded-md border border-line text-fg transition-colors hover:bg-surface-muted disabled:cursor-not-allowed disabled:opacity-50 cursor-pointer;
 }
+
+@utility output-text {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  min-width: 0;
+}

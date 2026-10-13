@@ -425,7 +425,7 @@ describe('ActiveChanges', () => {
     expect(new Set(icons)).toEqual(new Set(['spinner', 'clock', 'circle-xmark', 'circle-check']))
 
     const analyzeCard = wrapper.findAll('.stage-card')[0]
-    expect(analyzeCard.find('svg[data-icon="circle-exclamation"]').exists()).toBe(true)
+    expect(analyzeCard.find('.question-mark').text()).toBe('!')
   })
 
   test('滑鼠移到可點擊元素時顯示手指游標且停用按鈕顯示禁止游標', async () => {

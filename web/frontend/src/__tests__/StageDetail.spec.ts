@@ -23,7 +23,66 @@ afterEach(() => {
   vi.useRealTimers()
 })
 
+const longPathReviewResult =
+  '## Standards\n- `tests/unit/user/views/userManagement/userListContainer/UsersListContainer.spec.js`：新增 describe `分頁`\n\n## Spec\n無問題'
+
 describe('StageDetail', () => {
+  test.each([
+    {
+      stage: 'analyze_plan',
+      fields: { analysis: '分析內容\n第二行', plan: ['TASK 1', 'TASK 2'] },
+    },
+    {
+      stage: 'human_confirm',
+      fields: { status: '已通過', human_feedback: '修改意見\n第二行' },
+    },
+    {
+      stage: 'execute',
+      fields: { execution_result: '執行摘要\n第二行' },
+    },
+    {
+      stage: 'review',
+      fields: { review_level: '修補', review_result: longPathReviewResult },
+    },
+  ])('各階段結果欄位、執行計畫與執行日誌以使用者可讀輸出呈現：$stage', async ({ stage, fields }) => {
+    mockedApi.getStageDetail.mockResolvedValue({
+      status: 'done',
+      note: '',
+      fields,
+      log: 'log line1\nlog line2',
+    })
+
+    const wrapper = mount(StageDetail, {
+      props: { changeName: 'feat-login', stage, question: null },
+    })
+    await flushPromises()
+
+    const pres = wrapper.findAll('pre')
+    const logPre = wrapper.find('.log')
+    expect(logPre.classes()).toContain('output-text')
+
+    if (stage === 'analyze_plan') {
+      expect(pres[0]!.classes()).toContain('output-text')
+      const items = wrapper.findAll('li')
+      expect(items).toHaveLength(2)
+      for (const item of items) {
+        expect(item.classes()).toContain('output-text')
+      }
+    } else if (stage === 'human_confirm') {
+      const statusEl = wrapper.findAll('p').find((p) => p.text() === '已通過')!
+      expect(statusEl.classes()).toContain('output-text')
+      expect(pres[0]!.classes()).toContain('output-text')
+    } else if (stage === 'execute') {
+      expect(pres[0]!.classes()).toContain('output-text')
+    } else if (stage === 'review') {
+      const levelEl = wrapper.findAll('p').find((p) => p.text() === '修補')!
+      expect(levelEl.classes()).toContain('output-text')
+      expect(pres[0]!.classes()).toContain('output-text')
+      expect(pres[0]!.element.textContent).toBe(longPathReviewResult)
+    }
+  })
+
+
   test('點擊卡片後顯示該階段的執行結果與執行日誌', async () => {
     mockedApi.getStageDetail.mockResolvedValue({
       status: 'done',
@@ -82,6 +141,50 @@ describe('StageDetail', () => {
 
     expect(mockedApi.postAnswer).not.toHaveBeenCalled()
     expect(wrapper.text()).toContain('此欄位為必填')
+  })
+
+  test('待回覆提問的提示文字照原文換行顯示且選項可在區塊內折行', async () => {
+    mockedApi.getStageDetail.mockResolvedValue({
+      status: 'running', note: '', fields: {}, log: '',
+    })
+    const choicePrompt = 'QUESTION: 這次要做到哪個程度？\n1. 純文字排版（建議）\n2. 轉譯 Markdown'
+    const choiceQuestion = {
+      id: 'q1', stage: 'analyze_plan', kind: 'choice' as const,
+      prompt: choicePrompt,
+      options: ['1. 純文字排版（建議）', '2. 轉譯 Markdown'],
+      required: false, multiline: false,
+    }
+
+    const choiceWrapper = mount(StageDetail, {
+      props: { changeName: 'feat-login', stage: 'analyze_plan', question: choiceQuestion },
+    })
+    await flushPromises()
+
+    const choicePromptEl = choiceWrapper.find('.question-prompt')
+    expect(choicePromptEl.element.textContent).toBe(choicePrompt)
+    expect(choicePromptEl.classes()).toContain('output-text')
+    const optionButtons = choiceWrapper
+      .findAll('.question-form button')
+      .filter((b) => choiceQuestion.options.includes(b.text()))
+    expect(optionButtons).toHaveLength(2)
+    for (const button of optionButtons) {
+      expect(button.classes()).toContain('output-text')
+    }
+
+    const confirmPrompt = '## 執行計畫（共 3 個 TASK）\n\n1. a\n2. b\n3. c\n\n繼續執行？'
+    const confirmQuestion = {
+      id: 'q2', stage: 'human_confirm', kind: 'confirm' as const,
+      prompt: confirmPrompt, options: [], required: false, multiline: false,
+    }
+
+    const confirmWrapper = mount(StageDetail, {
+      props: { changeName: 'feat-login', stage: 'human_confirm', question: confirmQuestion },
+    })
+    await flushPromises()
+
+    const confirmPromptEl = confirmWrapper.find('.question-prompt')
+    expect(confirmPromptEl.element.textContent).toBe(confirmPrompt)
+    expect(confirmPromptEl.classes()).toContain('output-text')
   })
 
   test('提問已被回覆後再送出回覆時顯示提問已結束', async () => {

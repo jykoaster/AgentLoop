@@ -102,7 +102,7 @@ function rerun(stage: string): void {
 
       <div v-if="selectedStage" class="stage-detail-panel rounded-lg border border-line p-4">
         <div class="flex justify-between items-center mb-5">
-          {{ selectedStage }}
+          <p class="text-2xl font-bold">{{ selectedStage }}</p>
           <button
             type="button"
             class="rounded-md p-1.5 text-danger transition-colors cursor-pointer hover:bg-danger/15"

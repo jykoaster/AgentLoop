@@ -55,15 +55,15 @@ function submitPause(value: '' | 'q'): void {
 </script>
 
 <template>
-  <div class="question-form flex flex-col items-start gap-2 rounded-xl border border-line bg-surface p-4 shadow-lg">
-    <p class="question-prompt font-medium text-fg">{{ question.prompt }}</p>
+  <div class="question-form flex min-w-0 max-w-full flex-col items-start gap-2 rounded-xl border border-line bg-surface p-4 shadow-lg">
+    <p class="question-prompt output-text font-medium text-fg">{{ question.prompt }}</p>
 
     <template v-if="question.kind === 'choice'">
       <button
         v-for="opt in question.options"
         :key="opt"
         type="button"
-        class="btn-secondary px-3 py-1.5 text-sm"
+        class="btn-secondary output-text max-w-full text-left text-sm px-3 py-1.5"
         @click="submitOption(opt)"
       >
         {{ opt }}
