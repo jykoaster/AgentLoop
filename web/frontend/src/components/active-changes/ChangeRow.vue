@@ -48,6 +48,10 @@ function openStage(stage: string): void {
   selectedStage.value = stage
 }
 
+const selectedStageStatus = computed<string | undefined>(() =>
+  selectedStage.value ? props.row.stages[selectedStage.value as keyof ChangeRowType['stages']] : undefined,
+)
+
 function rerun(stage: string): void {
   emit('rerun', { changeName: props.row.change_name, stage })
 }
@@ -122,6 +126,8 @@ function rerun(stage: string): void {
           :change-name="row.change_name"
           :stage="selectedStage"
           :question="question"
+          :temporary="temporary"
+          :stage-status="selectedStageStatus"
         />
       </div>
     </template>

@@ -126,6 +126,28 @@ class TestAbortMarksStageErrorAndKeepsSession:
         assert mgr.status()["active"] is False
 
 
+class TestTempRowAbortEndsRunWithoutState:
+    def test_temp_row_abort_ends_run_without_state(self, workspace, monkeypatch):
+        """新增任務的暫時列在 analyze_plan 執行中可中止並結束執行"""
+        script = _write_script(workspace, "fake_main.py", FAKE_SLEEP_SCRIPT.format(sleep=60))
+        monkeypatch.setattr(runner_mod, "MAIN_CMD", [sys.executable, str(script)])
+
+        mgr = runner_mod.RunManager()
+        mgr.start_new_task("新增登入頁")
+
+        run_dir = Path(web_settings.web_state_dir()) / "run"
+        _wait_until(lambda: (run_dir / "session.json").exists())
+
+        start = time.monotonic()
+        mgr.abort()
+        elapsed = time.monotonic() - start
+        assert elapsed < 10
+
+        assert mgr.status()["active"] is False
+        changes_root = workspace / "my-project" / ".agentloop" / "changes"
+        assert not list(changes_root.glob("*/state.json"))
+
+
 class TestRejectsStartWhileRunning:
     def test_second_start_is_rejected_while_run_active(self, workspace, monkeypatch):
         """執行進行中再送出啟動要求時系統拒絕"""

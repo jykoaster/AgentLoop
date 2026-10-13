@@ -9,12 +9,15 @@ const props = defineProps<{
   changeName: string
   stage: string
   question: Question | null
+  temporary?: boolean
+  stageStatus?: string
 }>()
 
 const detail = ref<StageDetailType | null>(null)
 const answerError = ref('')
 
 async function load(): Promise<void> {
+  if (props.temporary) return
   try {
     detail.value = await api.getStageDetail(props.changeName, props.stage)
   } catch {
@@ -25,8 +28,10 @@ async function load(): Promise<void> {
 usePolling(load)
 watch(() => [props.changeName, props.stage], load)
 
-const isRunning = computed(() => detail.value?.status === 'running')
-const isAborted = computed(() => detail.value?.note === '使用者中止')
+const isRunning = computed(() =>
+  props.temporary ? props.stageStatus === 'running' : detail.value?.status === 'running',
+)
+const isAborted = computed(() => !props.temporary && detail.value?.note === '使用者中止')
 
 function field(key: string): string {
   const value = detail.value?.fields?.[key]
