@@ -986,15 +986,22 @@ Vue 3 + TypeScript + `<script setup>` + Vite，測試用 Vitest + `@vue/test-uti
 `StageDetail`／`QuestionForm`／`NewTaskDialog`）、`archived-changes/`（`ArchivedChanges`）、
 `existing-specs/`（`ExistingSpecs`／`SpecSearch`）、`settings/`（`SettingsPanel`）、`utils/`
 （跨頁共用的 `FileBrowser`／`FolderPicker`）；四個主分頁對應的元件都掛在 `App.vue` 底下，相對
-import 路徑隨資料夾深度調整（例如 `../../api`）。
+import 路徑隨資料夾深度調整（例如 `../../api`）。階段詳情由 `ChangeRow` 在自己的卡片列下方渲
+染（不再是 `ActiveChanges` 底部的共用面板），`selectedStage`／`collapsed` 兩個狀態各自存在每個
+`ChangeRow` 內部的 `ref`：點卡片設定 `selectedStage`，同列最多一個詳情、跨列互不影響；標題列
+右側的收合按鈕切換 `collapsed`，收合時以 `v-if` 隱藏卡片列、詳情與「檢視規格文件」按鈕但不清
+空 `selectedStage`，展開後原詳情隨之恢復。`ActiveChanges` 以 `:key="row.change_name"` 渲染
+`ChangeRow`，輪詢只替換 `rows` 陣列內容、不重建元件實例，這兩個狀態因此不受 2 秒輪詢影響，只
+在整頁重新整理後重置。
 
 圖示使用 `@fortawesome/vue-fontawesome`（SVG 版，非 webfont）：`src/icons.ts` 匯出用到的
 `free-solid-svg-icons` 清單，`main.ts` 以 `library.add(...)` 註冊並全域掛載
 `FontAwesomeIcon`；測試另以 `src/__tests__/setup.ts`（由 `vite.config.ts` 的
 `test.setupFiles` 載入）註冊同一份清單，確保 jsdom 掛載時能渲染出帶 `data-icon` 屬性的
-`<svg>`，測試可據以斷言圖示種類。「關閉」「重跑」「檢視規格文件」「上一層」四個按鈕是純圖
-示（不顯示文字），以 `aria-label` 承載原文字供測試定位與無障礙朗讀、`title` 提供滑鼠停留提
-示（「重跑」停用時 `title` 改顯示停用原因，`aria-label` 仍為「重跑」）；其餘主要操作、主分
+`<svg>`，測試可據以斷言圖示種類。「關閉」「重跑」「檢視規格文件」「上一層」「收合／展開」五
+個按鈕是純圖示（不顯示文字），以 `aria-label` 承載原文字供測試定位與無障礙朗讀、`title` 提供
+滑鼠停留提示（「重跑」停用時 `title` 改顯示停用原因，`aria-label` 仍為「重跑」；「收合／展
+開」依 `collapsed` 狀態切換文字與 `chevron-up`／`chevron-down` 圖示）；其餘主要操作、主分
 頁、階段狀態徽章與清單項目則是圖示＋文字並存，文字不變，既有以 `.text()` 斷言這些文字的測
 試不受影響。
 
