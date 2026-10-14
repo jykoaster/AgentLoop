@@ -287,8 +287,9 @@ HEAD 建立）——這一步在呼叫 Claude 之前就完成，不再讓 Claude
 路徑：
 
 1. `_ask_base_branch()` 用 `git_ops.list_local_branches()` 列出目標專案全部本地分支（依名稱排序），
-   以 `interaction.numbered()` 組成「編號. 分支名稱」選項，目前所在分支加註「（目前分支）」，向使用者
-   提問「要從哪個分支建立 `<branch_name>`？」。直接 Enter 或非互動式環境採用目前分支（detached HEAD
+   以 `interaction.numbered()` 組成「編號. 分支名稱」選項，目前所在分支加註「（目前分支）」，以選項題
+   （`kind="choice"`）提問「要從哪個分支建立 `<branch_name>`？」——網頁上每個本地分支各顯示為一顆
+   按鈕，另保留自訂輸入框。直接 Enter／自訂輸入框留空送出或非互動式環境採用目前分支（detached HEAD
    時直接 Enter 要重問，非互動式環境則直接回傳空字串）；輸入非清單內編號會提示後重問；使用者中止
    （EOF／Ctrl-C）回傳空字串，呼叫端 `_fail()` 記為錯誤，不建立工作分支、不呼叫 Claude
 2. 取得起點分支後呼叫 `git_ops.create_branch_from(project_dir, branch_name, base_branch)`：

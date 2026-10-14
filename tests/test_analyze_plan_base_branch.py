@@ -68,6 +68,7 @@ class TestAsksBaseBranchWhenMissing:
             result = analyze_plan_node(state)
 
         assert mock_ask.call_args.kwargs["options"] == ["1. develop（目前分支）", "2. main"]
+        assert mock_ask.call_args.kwargs["kind"] == "choice"
         mock_create.assert_called_once_with("my-project", "feat/login", "main")
         assert result["status"] != "error"
 

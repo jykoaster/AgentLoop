@@ -883,7 +883,7 @@ def _ask_base_branch(project_dir: str, branch_name: str) -> str:
             interactive_msg=f"{_YELLOW}  非互動式環境，以目前分支為起點{_RESET}\n",
             abort_msg=f"\n{_YELLOW}  已中止，未選擇起點分支{_RESET}\n",
             abort_default=None,
-            kind="text", options=options,
+            kind="choice", options=options,
         )
         if answer is _NON_INTERACTIVE_BASE_BRANCH:
             return current
