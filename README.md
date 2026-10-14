@@ -142,6 +142,16 @@ python -m AgentLoop.main --node execute --change feat-login
 
 接著會問**本次是否需要撰寫 spec**（`y` 寫 `specs/<domain>/spec.md`；`n` 表示純重構／文件／設定，不寫 spec）。答案記在 state 的 `skip_specs`（`n` 為 `true`），同一個 change 之後再規劃、或驗收後再開一輪，都會沿用、不再問。選 `n` 時不會再問 domain 歸屬。
 
+### 對同一個任務進行調整
+
+對一個已完成規劃（甚至已執行、已通過審查）的任務，不需要手動改 `state.json`，直接重跑它的 `analyze_plan` 即可——網頁控制台任務列的「重跑」按鈕，或命令列：
+
+```bash
+python -m AgentLoop.main --node analyze_plan --change feat-login
+```
+
+都會先以必填文字題詢問**本次要調整的內容**，不會再問一次分支名稱、是否撰寫 spec、domain 歸屬（這些沿用原本的決定）。調整內容會保留任務描述原文，附加成「調整 N：<內容>」，依調整內容更新同一個 `openspec/changes/<name>/`；已勾選完成的 `tasks.md` 項目維持不動，只新增或改寫尚未完成的項目，接著照原工作流進入人工確認、`execute`、`review`，審查重試次數重新從 0 起算。若該任務有尚未處理的審查退回，會先讓你選「依審查結果重新規劃」或「輸入調整內容」。已封存的任務（`openspec/changes/archive/` 底下）不能用這個方式調整，會直接報錯，請改開新任務。
+
 ### 撞到 Claude 用量上限時
 
 任一節點跑到一半撞上用量上限（`You've hit your session limit · resets 3:45pm` 這類訊息，訂閱制另有 weekly 與 Opus 各自的上限）時，工作流程會**暫停**並在終端機等待：

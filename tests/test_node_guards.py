@@ -59,16 +59,6 @@ def _make_openspec_dir(workspace: Path, project: str = "my-project", change: str
 # ── analyze_plan guards ───────────────────────────────────────────────────────
 
 class TestAnalyzePlanGuards:
-    def test_blocks_initial_plan_when_already_planned(self):
-        """analysis 已存在且非重新規劃/修補 → 拒絕初始規劃"""
-        from AgentLoop.nodes.analyze_plan import analyze_plan_node
-
-        state = _base_state(analysis="existing analysis")
-        result = analyze_plan_node(state)
-
-        assert result["status"] == "error"
-        assert "初始規劃" in result["analysis"]
-
     def test_blocks_when_review_blocking_but_review_result_empty(self):
         """review_blocking=True 但 review_result 為空 → 拒絕重新規劃。
         analysis 故意留空，避免同時觸發 Guard 1（已規劃過的 guard）。"""
