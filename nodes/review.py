@@ -181,6 +181,9 @@ _RESET  = "\033[0m"
 
 _MAX_REVIEW_ATTEMPTS = 3
 
+_SUGGESTION_PROMPT_WEB = "請勾選要修改的建議後按送出（未勾選＝不修改）"
+_SUGGESTION_PROMPT_CLI = "請輸入要修改的建議編號（例如 1,3；all=全部；留空＝不修改）"
+
 _REVIEW_CONTINUE_PROMPT = (
     "你上一輪的回應在還沒完成前就結束了（缺少完整的 `## Standards` / `## Spec` 報告，"
     "疑似把 sub-agent 或測試丟出去後就提前結束回應，而不是真的等到結果）。"
@@ -415,9 +418,10 @@ def review_node(state: AgentState) -> dict:
         selected = []
     else:
         try:
+            prompt = _SUGGESTION_PROMPT_WEB if interaction.is_web_mode() else _SUGGESTION_PROMPT_CLI
             answer = interaction.ask(
-                "請輸入要修改的建議編號（例如 1,3；all=全部；留空＝不修改）",
-                kind="choice", stage="review",
+                prompt,
+                kind="multi_choice", stage="review",
                 options=numbered_suggestions,
             ).strip()
         except (EOFError, KeyboardInterrupt):
