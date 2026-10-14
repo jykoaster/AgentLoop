@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, watch } from 'vue'
+import { computed, ref, watch } from 'vue'
 import type { Question } from '../../api'
 
 const props = defineProps<{
@@ -12,6 +12,7 @@ const emit = defineEmits<{ submit: [answer: string] }>()
 const requiredError = ref('')
 const customText = ref('')
 const textValue = ref('')
+const selectedOptions = ref<Set<string>>(new Set())
 
 watch(
   () => props.question.id,
@@ -19,12 +20,38 @@ watch(
     requiredError.value = ''
     customText.value = ''
     textValue.value = ''
+    selectedOptions.value = new Set()
   },
 )
 
 function parseOptionAnswer(option: string): string {
   const match = option.match(/^(\d+)\.\s*/)
   return match ? match[1] : option
+}
+
+const allSelected = computed(
+  () => props.question.options.length > 0
+    && props.question.options.every((opt) => selectedOptions.value.has(opt)),
+)
+
+function toggleOption(option: string): void {
+  const next = new Set(selectedOptions.value)
+  if (next.has(option)) next.delete(option)
+  else next.add(option)
+  selectedOptions.value = next
+}
+
+function toggleSelectAll(): void {
+  selectedOptions.value = allSelected.value
+    ? new Set()
+    : new Set(props.question.options)
+}
+
+function submitMultiChoice(): void {
+  const numbers = Array.from(selectedOptions.value)
+    .map((opt) => Number(parseOptionAnswer(opt)))
+    .sort((a, b) => a - b)
+  emit('submit', numbers.join(','))
 }
 
 function submitOption(option: string): void {
@@ -83,6 +110,38 @@ function submitPause(value: '' | 'q'): void {
           <font-awesome-icon icon="paper-plane" class="mr-1" />送出
         </button>
       </div>
+    </template>
+
+    <template v-else-if="question.kind === 'multi_choice'">
+      <label
+        v-for="opt in question.options"
+        :key="opt"
+        class="output-text flex max-w-full items-start gap-2 text-sm text-fg"
+      >
+        <input
+          type="checkbox"
+          class="suggestion-checkbox mt-1"
+          :checked="selectedOptions.has(opt)"
+          @change="toggleOption(opt)"
+        />
+        <span>{{ opt }}</span>
+      </label>
+      <label class="flex items-center gap-2 text-sm font-medium text-fg">
+        <input
+          type="checkbox"
+          class="select-all-checkbox"
+          :checked="allSelected"
+          @change="toggleSelectAll"
+        />
+        全選
+      </label>
+      <button
+        type="button"
+        class="cursor-pointer rounded-md bg-primary px-3 py-1.5 text-on-accent shadow-sm transition-colors hover:bg-primary-hover"
+        @click="submitMultiChoice"
+      >
+        <font-awesome-icon icon="paper-plane" class="mr-1" />送出
+      </button>
     </template>
 
     <template v-else-if="question.kind === 'confirm'">

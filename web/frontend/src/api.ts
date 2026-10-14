@@ -19,7 +19,7 @@ export interface ChangeRow {
   stage_notes: Record<string, string>
 }
 
-export type QuestionKind = 'text' | 'choice' | 'confirm' | 'pause'
+export type QuestionKind = 'text' | 'choice' | 'multi_choice' | 'confirm' | 'pause'
 
 export interface Question {
   id: string

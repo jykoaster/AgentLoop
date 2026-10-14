@@ -212,4 +212,122 @@ describe('StageDetail', () => {
 
     expect(wrapper.text()).toContain('此提問已結束，請重新整理')
   })
+
+  test('多選題在詳情中以勾選框與送出按鈕呈現', async () => {
+    mockedApi.getStageDetail.mockResolvedValue({
+      status: 'running', note: '', fields: {}, log: '',
+    })
+    const question = {
+      id: 'q1', stage: 'review', kind: 'multi_choice' as const,
+      prompt: '請勾選要修改的建議後按送出（未勾選＝不修改）',
+      options: ['1. 補上型別註記', '2. 合併重複的測試'],
+      required: false, multiline: false,
+    }
+
+    const wrapper = mount(StageDetail, {
+      props: { changeName: 'feat-login', stage: 'review', question },
+    })
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('請勾選要修改的建議後按送出（未勾選＝不修改）')
+    const checkboxes = wrapper.find('.question-form').findAll('input[type="checkbox"]')
+    expect(checkboxes).toHaveLength(3) // 2 個建議勾選框 + 1 個全選
+    expect(wrapper.find('.question-form').text()).toContain('全選')
+    const submitButton = wrapper
+      .findAll('.question-form button')
+      .find((b) => b.text() === '送出')
+    expect(submitButton).toBeTruthy()
+    expect(wrapper.find('.question-form input[type="text"]').exists()).toBe(false)
+  })
+
+  test('勾選多條建議後按送出只針對勾選的建議重新規劃', async () => {
+    mockedApi.getStageDetail.mockResolvedValue({
+      status: 'running', note: '', fields: {}, log: '',
+    })
+    const question = {
+      id: 'q1', stage: 'review', kind: 'multi_choice' as const,
+      prompt: '請勾選要修改的建議後按送出（未勾選＝不修改）',
+      options: ['1. 抽出重複的路徑組裝', '2. 補上型別註記', '3. 合併重複的測試'],
+      required: false, multiline: false,
+    }
+
+    const wrapper = mount(StageDetail, {
+      props: { changeName: 'feat-login', stage: 'review', question },
+    })
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('請勾選要修改的建議後按送出（未勾選＝不修改）')
+    const suggestionCheckboxes = wrapper.find('.question-form').findAll('.suggestion-checkbox')
+    await suggestionCheckboxes[2]!.setValue(true) // 第 3 條
+    await suggestionCheckboxes[0]!.setValue(true) // 第 1 條
+
+    expect(mockedApi.postAnswer).not.toHaveBeenCalled()
+
+    const submitButton = wrapper
+      .findAll('.question-form button')
+      .find((b) => b.text() === '送出')!
+    await submitButton.trigger('click')
+
+    expect(mockedApi.postAnswer).toHaveBeenCalledWith('q1', '1,3')
+  })
+
+  test('未勾選任何建議就送出時視為不修改並直接通過', async () => {
+    mockedApi.getStageDetail.mockResolvedValue({
+      status: 'running', note: '', fields: {}, log: '',
+    })
+    const question = {
+      id: 'q1', stage: 'review', kind: 'multi_choice' as const,
+      prompt: '請勾選要修改的建議後按送出（未勾選＝不修改）',
+      options: ['1. 抽出重複的路徑組裝', '2. 補上型別註記'],
+      required: false, multiline: false,
+    }
+
+    const wrapper = mount(StageDetail, {
+      props: { changeName: 'feat-login', stage: 'review', question },
+    })
+    await flushPromises()
+
+    const submitButton = wrapper
+      .findAll('.question-form button')
+      .find((b) => b.text() === '送出')!
+    await submitButton.trigger('click')
+
+    expect(mockedApi.postAnswer).toHaveBeenCalledWith('q1', '')
+  })
+
+  test('點擊全選切換時勾選或取消全部建議', async () => {
+    mockedApi.getStageDetail.mockResolvedValue({
+      status: 'running', note: '', fields: {}, log: '',
+    })
+    const question = {
+      id: 'q1', stage: 'review', kind: 'multi_choice' as const,
+      prompt: '請勾選要修改的建議後按送出（未勾選＝不修改）',
+      options: ['1. 抽出重複的路徑組裝', '2. 補上型別註記', '3. 合併重複的測試'],
+      required: false, multiline: false,
+    }
+
+    const wrapper = mount(StageDetail, {
+      props: { changeName: 'feat-login', stage: 'review', question },
+    })
+    await flushPromises()
+
+    const selectAll = wrapper.find('.question-form .select-all-checkbox')
+    await selectAll.setValue(true)
+
+    const suggestionCheckboxes = wrapper.find('.question-form').findAll('.suggestion-checkbox')
+    for (const cb of suggestionCheckboxes) {
+      expect((cb.element as HTMLInputElement).checked).toBe(true)
+    }
+
+    const submitButton = wrapper
+      .findAll('.question-form button')
+      .find((b) => b.text() === '送出')!
+    await submitButton.trigger('click')
+    expect(mockedApi.postAnswer).toHaveBeenCalledWith('q1', '1,2,3')
+
+    await selectAll.setValue(false)
+    for (const cb of suggestionCheckboxes) {
+      expect((cb.element as HTMLInputElement).checked).toBe(false)
+    }
+  })
 })
