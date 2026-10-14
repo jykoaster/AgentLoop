@@ -618,7 +618,7 @@ SUGGESTION 2: [建議內容與理由]
 | **重寫** | 核心邏輯錯誤、架構根本偏差、多個互相關聯的根本性問題、TASK 大量未完成 |
 | **修補** | 小 bug、測試失敗、遺漏文件同步、個別 TASK 未完成、小幅修正            |
 
-其餘不影響功能正確性的問題（風格、可讀性、效能微調等）一律回答 `Yes`，改列在 `SUGGESTION n:` 建議清單中，交由人工決定：`review_node` 會逐條印出建議、在終端機提示輸入要修改的編號（`1,3`／`all`／直接 Enter 表示不修改）；非互動式環境預設不修改任何建議。人工選中至少一條時才視為需要重新規劃（`review_level` 一律標記「修補」，並把選中的建議附加在 `review_result` 末尾的「人工確認：選定修改的建議事項」小節，供 `analyze_plan` 重新規劃時只針對這些點 grill）；未選中任何建議或無建議可選時直接視為通過。
+其餘不影響功能正確性的問題（風格、可讀性、效能微調等）一律回答 `Yes`，改列在 `SUGGESTION n:` 建議清單中，交由人工決定：`review_node` 會逐條印出建議，以 `kind="multi_choice"` 詢問要修改哪些——提問文字依 `interaction.is_web_mode()` 分流：網頁控制台顯示「請勾選要修改的建議後按送出（未勾選＝不修改）」，終端機顯示原字串「請輸入要修改的建議編號（例如 1,3；all=全部；留空＝不修改）」；網頁控制台為每條建議顯示一個勾選框、一個「全選」勾選切換與一個「送出」按鈕，勾選本身不送出，按下「送出」才把已勾選編號依數字遞增排序、以半形逗號串接（未勾選送空字串）交回，與終端機輸入同一字串（例如 `1,3`／`all`／留空）的結果相同；非互動式環境預設不修改任何建議。人工選中至少一條時才視為需要重新規劃（`review_level` 一律標記「修補」，並把選中的建議附加在 `review_result` 末尾的「人工確認：選定修改的建議事項」小節，供 `analyze_plan` 重新規劃時只針對這些點 grill）；未選中任何建議或無建議可選時直接視為通過。
 
 **路由結論：** 以上兩種情況（嚴重問題 / 人工選中建議）都會把 `review_blocking` 設為 `True`，交由 `route_after_review` 讀取決定是否重新規劃；其餘情況 `review_blocking` 為 `False`，直接結束流程。
 
@@ -941,7 +941,10 @@ uvicorn + FastAPI  (AgentLoop/web/app.py)      ← 容器 CMD，監聽 0.0.0.0:8
 ### 互動埠：`lib/interaction.py`
 
 節點內所有提問都改經 `interaction.ask(prompt, *, kind, stage, options=None, required=False,
-multiline=False)` 與 `interaction.is_interactive()`，取代原本各自呼叫
+multiline=False)`（`kind` 為 `"text"`／`"choice"`／`"multi_choice"`／`"confirm"`／`"pause"`
+其中之一；`"multi_choice"` 命令列模式行為與 `"choice"` 相同，網頁模式改以勾選框清單＋「全選」
+切換＋「送出」按鈕呈現，見上方「嚴重程度分流」段 `review` 的建議選擇題）與 `interaction.is_interactive()`，
+取代原本各自呼叫
 `input()` / `sys.stdin.isatty()` / `sys.stdin.readline()`：
 
 - **命令列模式**（未設定 `AGENTLOOP_INTERACTION`）：`ask()` 直接委派給 `input()`（`kind="pause"`

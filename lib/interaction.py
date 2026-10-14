@@ -21,7 +21,7 @@ import time
 import uuid
 from typing import Literal
 
-Kind = Literal["text", "choice", "confirm", "pause"]
+Kind = Literal["text", "choice", "multi_choice", "confirm", "pause"]
 
 _POLL_INTERVAL = 0.5
 
