@@ -96,6 +96,19 @@ class TestActiveChangesListing:
             "review": "pending", "archive": "pending",
         }
 
+    def test_active_change_still_listed_despite_same_suffix_archive_dir(self, client, workspace):
+        """design §7：archive 下剛好有同字尾目錄，但 change 仍在使用中，不應被誤藏"""
+        _write_state(
+            workspace, "feat-login",
+            branch_name="feat/login", task="新增登入頁", iteration=0,
+        )
+        (workspace / "my-project" / "openspec" / "changes" / "feat-login").mkdir(parents=True)
+        archive_dir = workspace / "my-project" / "openspec" / "changes" / "archive" / "2026-09-01-feat-login"
+        archive_dir.mkdir(parents=True)
+
+        data = client.get("/api/changes").json()
+        assert [row["change_name"] for row in data] == ["feat-login"]
+
     def test_legacy_change_without_stages_shows_all_pending(self, client, workspace):
         """沒有階段狀態紀錄的舊任務以尚未開始顯示所有階段（API）"""
         d = workspace / "my-project" / ".agentloop" / "changes" / "legacy-change"

@@ -226,6 +226,9 @@ def run_node(node_name: str, change_name: str | None = None) -> None:
     state = _empty_state("")
     state.update(_load_change(change_name) if change_name else _list_and_select_change())
 
+    if node_name == "analyze_plan":
+        state["start_from"] = "analyze_plan"
+
     print(f"\n{_BOLD}{'═'*60}")
     print(f"  單獨執行 node：{node_name}")
     print(f"  任務：{state['task']}")

@@ -134,6 +134,30 @@ _ARCHIVE_DATE_PREFIX_RE = re.compile(r"^\d{4}-\d{2}-\d{2}-")
 _MAX_ARCHIVE_SUFFIX = 1000
 
 
+def _is_safe_change_name(change_name: str) -> bool:
+    return bool(change_name) and change_name not in (".", "..") and os.sep not in change_name
+
+
+def is_change_archived(project_dir_abs: str, change_name: str) -> bool:
+    """change 是否已封存：active change 資料夾已不存在，且 archive 下有名稱等於
+    `change_name` 或以 `-change_name` 結尾的目錄。`nodes/analyze_plan.py` 與
+    `web/repo_view.py` 共用這份規則，避免網頁看得到的任務與重跑判定已封存的任務不一致。
+    """
+    if not _is_safe_change_name(change_name):
+        return False
+    active_dir = os.path.join(project_dir_abs, "openspec", "changes", change_name)
+    if os.path.isdir(active_dir):
+        return False
+    archive_root = os.path.join(project_dir_abs, "openspec", "changes", "archive")
+    if not os.path.isdir(archive_root):
+        return False
+    suffix = f"-{change_name}"
+    return any(
+        (d == change_name or d.endswith(suffix)) and os.path.isdir(os.path.join(archive_root, d))
+        for d in os.listdir(archive_root)
+    )
+
+
 def archive_destination_name(change_name: str, today: str | None = None) -> str:
     """OpenSpec 寫入 `openspec/changes/archive/` 的目標資料夾名。
 

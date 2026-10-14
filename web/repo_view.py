@@ -8,6 +8,7 @@ import re
 from .runner import get_manager
 from ..core.stages import STAGES
 from ..lib import REPO_ROOT
+from ..lib.openspec_runner import is_change_archived
 
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 _LOG_TAIL_LINES = 500
@@ -62,14 +63,7 @@ def _archive_root(project: str) -> str:
 
 
 def _is_archived(project: str, change_name: str) -> bool:
-    root = _archive_root(project)
-    if not os.path.isdir(root):
-        return False
-    suffix = f"-{change_name}"
-    return any(
-        d.endswith(suffix) and os.path.isdir(os.path.join(root, d))
-        for d in os.listdir(root)
-    )
+    return is_change_archived(os.path.join(REPO_ROOT, project), change_name)
 
 
 def list_active_changes(project: str) -> list[dict]:

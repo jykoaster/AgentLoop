@@ -72,7 +72,8 @@ change/spec-delta 規則；review 通過後由 `archive` 節點呼叫 `openspec 
 
 ```python
 class AgentState(TypedDict):
-    task: str              # 使用者輸入的任務描述（analyze_plan／review 注入；execute 不讀、不注入）
+    task: str              # 使用者輸入的任務描述（analyze_plan／review 注入；execute 不讀、不注入）；
+                           # 重跑已規劃任務輸入調整內容時，analyze_plan 會在原文後附加「調整 N：<內容>」並寫回
     analysis: str          # proposal.md 全文，供 human_confirm 顯示
     plan: list[str]        # tasks.md checkbox 清單，供 human_confirm 顯示（execute／review 自行讀檔，不注入）
     execution_result: str  # 執行節點的文字摘要（除錯／state-file；review 不注入，改讀 git diff 與 OpenSpec）
@@ -81,7 +82,8 @@ class AgentState(TypedDict):
     review_blocking: bool  # review_node 的最終路由結論：True → 重新規劃；False → 通過
     status: str            # "pending" | "needs_revision" | "error" | "confirmed" | "aborted"
     iteration: int         # 重試計數器（上限 3）
-    human_feedback: str    # 使用者在 human_confirm 拒絕計畫時填寫的修改意見
+    human_feedback: str    # 人工確認退回意見，或重跑 analyze_plan 取得的調整內容（兩者走同一條
+                           # 「依人工意見調整」路徑；見下方「調整」模式）
     change_name: str       # OpenSpec change 名稱（由 branch_name 轉 kebab-case）；任務開始時問一次，全程沿用
     branch_name: str       # 使用者指定的 git 分支（必填）；規劃／執行／審查／archive 都切到此分支
     domains: list[str]     # 本次 change 歸屬的 OpenSpec domain；初始規劃問一次後寫入 state.json，同一 change 再規劃時沿用
@@ -199,13 +201,55 @@ domain／`openspec` 的 init／new change／validate 等機械式判斷全部由
 （或之後）處理，不再讓 Claude 自己用 Bash 判斷或執行——這樣既省下對應的 prompt 篇幅，也省下那些
 本可用一次函式呼叫解決、卻要在 agentic session 裡多繞一輪 Bash 工具呼叫的 token。
 
-**模式判斷（依 `AgentState` 欄位）：**
+**模式判斷（依 `AgentState` 欄位，依序判定）：** `is_rerun`（即 `state["start_from"] == "analyze_plan"`）
+只在使用者透過網頁重跑按鈕或命令列 `--node analyze_plan` 主動重跑時為真——`main.py` 的 `run_node()`
+在呼叫這個 node 前才設這個暫態欄位（不寫入 `state.json`），工作流內部因 review 退回自動回到
+`analyze_plan`（走 `increment` 節點）不會觸發。
 
-| 模式                    | 觸發條件                                     | 工具     | 模型 |
-| ----------------------- | -------------------------------------------- | -------- | ---- |
-| 初始規劃                | `review_result` 與 `human_feedback` 皆為空   | `plan`   | opus |
-| 重新規劃（review 觸發） | `review_result` 非空                         | `revise` | opus |
-| 依人工意見調整計畫      | `human_feedback` 非空且 `review_result` 為空 | `revise` | opus |
+| 順序 | 模式                        | 觸發條件                                                                    | 工具     | 模型 |
+| ---- | --------------------------- | ---------------------------------------------------------------------------- | -------- | ---- |
+| 1    | 已封存報錯                  | `is_rerun` 且該 change 已封存（見下方「已封存任務」）                        | 不呼叫 Claude | — |
+| 2    | 依人工意見調整計畫          | `human_feedback` 非空（含被中斷的調整，見下方「調整」模式的接回）             | `revise` | opus |
+| 3    | 重新規劃（review 觸發）     | `review_result` 非空且 `review_blocking` 為 `True`                          | `revise` | opus |
+| 4    | 調整                        | 不屬於以上任何一種，且 `is_rerun` 且 `analysis` 非空（已完成過規劃）          | `revise` | opus |
+| 5    | 已規劃但非重跑入口報錯      | 不屬於以上任何一種，且 `analysis` 非空但 `is_rerun` 為否（舊 `state.json` 或直接呼叫 node；正常路由不會出現） | 不呼叫 Claude | — |
+| 6    | 初始規劃                    | 不屬於以上任何一種（全新任務）                                                | `plan`   | opus |
+
+`is_replan` 因此定義為 `bool(review_result) and review_blocking`——只看 `review_result` 非空已不足夠：
+review 通過後 `review_result` 仍留著最後一份報告，若不檢查 `review_blocking` 會把「調整」誤判成
+「依審查結果重新規劃」。順序 3 命中、且 `is_rerun` 為真、`session_node`／`session_id` 插槽裡沒有屬於
+`analyze_plan` 的中斷 session 時，會先以選擇題問使用者「依審查結果重新規劃」或「輸入調整內容」
+（`_ask_rerun_mode()`，`interaction.ask(kind="choice")`；非互動式環境或使用者中止視為前者，維持
+既有行為）；選「輸入調整內容」就降級成順序 4 的調整模式。工作流內部自動回到 `analyze_plan`
+（`is_rerun` 為否）或已有可接回的 session 時，順序 3 不提問，直接重新規劃——這跟已中斷的調整
+（順序 2）接回不提問是同一個道理：那個答案只用來決定要不要問，問過一次之後的狀態已經記在
+`human_feedback`／`review_blocking` 裡，不需要再問一次。
+
+順序 4 要求 `is_rerun`，否則落入順序 5：已完成規劃但不是使用者主動重跑進來（工作流內部正常路由
+不會走到這裡，只有舊 `state.json` 或直接呼叫 `analyze_plan_node()` 才會遇到）直接
+`_fail("此 change 已完成規劃，請以重跑 analyze_plan 進行調整")`，不提問、不呼叫 Claude——避免掉進
+初始規劃後重問分支／spec／domain 並覆寫整份規格。
+
+**調整模式：** 順序 4 命中時，以必填文字題 `interaction.ask(kind="text", required=True)` 詢問
+「請輸入本次要調整的內容」（`_ask_adjustment()`；命令列空字串重問，`EOFError`/`KeyboardInterrupt`/
+非互動式環境視為 `status: "error"`，不呼叫 Claude、task 與規格皆不變）。取得內容後直接重用「依人工
+意見調整計畫」的 prompt 與工具（不新增第四份 `_SYSTEM`，見下方「三種 Prompt 版本」）：把內容寫進
+`human_feedback`、清空 `review_result`／`review_level`／`review_blocking`，並呼叫 `_append_adjustment()`
+把任務描述保留原文、附加一個空行與下一個編號的「調整 N：<內容>」（`N` 等於既有「調整 k：」行數
+加一）回寫進 `state["task"]`——這個更新後的 `task` 會出現在送給 Claude 的 prompt 裡（取代注入
+`<<HUMAN_FEEDBACK>>` 的那段修改意見本身只放本次新增內容），讓網頁任務列與之後 review 看到的需求
+描述累積全部調整歷史。成功完成後這個模式額外把 `iteration` 重設為 0，審查重試次數重新起算；若
+Claude 呼叫中途被中斷，`_fail()` 回傳的 `task`／`human_feedback`／session id 照常存進
+`state.json`，下次重跑命中順序 2（`human_feedback` 已非空），不再詢問、不再附加，直接以
+`call_resuming()` 接回同一個 session。
+
+**已封存任務：** 順序 1 命中時直接 `_fail("此 change 已封存，請以新任務進行後續修改")`，不呼叫任何
+`interaction.ask()`。判定邏輯 `_is_archived_change()` 委派給 `lib/openspec_runner.is_change_archived()`：
+`openspec/changes/archive/` 底下有名稱為 `<change_name>` 或以 `-<change_name>` 結尾的目錄，且
+`openspec/changes/<change_name>/` 當前不存在，才視為已封存——不能用 `archive_destination_name()`，
+它組出來的名稱前面加的是「今天」的日期，對已經封存在過去日期資料夾下的 change 永遠比對不上。
+這份規則放在 `lib` 層而非寫死在節點裡，是因為網頁任務列（`web/repo_view.py` 的 `_is_archived()`）
+共用同一個函式——否則「網頁看得到的任務」跟「重跑會被判定已封存的任務」容易兜不起來。
 
 `rollback`／`openspec` init／new change／validate 皆已搬到 Python（見下），三種模式都不再需要
 `Bash` 才能完成規劃，`claude_runner.TOOL_PRESETS` 因此新增／調整了兩個 preset：`plan`
@@ -310,13 +354,20 @@ validate 的錯誤修正也接到同一套「有問題就等使用者、否則�
 - **初始規劃 / 依人工意見調整計畫**：完整 grilling 流程——依 grilling 逐一提問，過程中依 domain-modeling 即時更新 `CONTEXT.md` / `docs/adr/`。初始規劃在強制三項還寫不出來時繼續問（三項的內容與「不是任務原句複述」以 skill 為準）；依人工意見調整時只在意見影響這些項時才重問，不重跑完整 Specine 清單
 - **重新規劃（review 觸發）**：**只針對 review 結果 grill**——針對審查標記的每個問題點逐一提出質疑性問題（判斷是否成立、修正方向如何取捨），不要求重新走一遍完整的 grilling 釐清或 Specine 清單，也不強制 domain-modeling 文件同步；更新規格時仍須維持強制三項（寫在哪個欄位以 skill 為準）
 
-**三種 Prompt 版本：**
+**三種 Prompt 版本：**（調整模式刻意不新增第四份 `_SYSTEM`，重用 `_SYSTEM_HUMAN_REVISE`——見上方「調整
+模式」；`<<HUMAN_FEEDBACK>>` 只放本次調整內容，累積的調整歷史靠 `<<PROJECT_CONTEXT>>` 之後注入的
+「任務：」那行帶上附加過的完整 `task`）
 
 | 版本                   | 用途                                                                                                                                                                                                                                                                                                                               |
 | ---------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `_SYSTEM_INITIAL`      | 全新任務規劃：Read/Glob/Grep 探索 → grilling 互動釐清（同步 domain-modeling；grill 結果須含 Specine 強制三項）→ 依「OpenSpec 產出規則」撰寫 proposal.md / specs delta / tasks.md（非小改動時另寫 design.md）於系統已建好的 change 資料夾（目標專案／domain／`openspec init`／`new change` 皆已由 Python 事先確認並附在 prompt 裡） |
 | `_SYSTEM_REPLAN`       | 帶入 `<<REVIEW_CONTEXT>>`（`review_result`，截斷至最後 3000 字）與 `<<REVIEW_LEVEL>>`；依「重寫／修補」分流見上（rollback 已由 Python 事先完成），並用專屬的 `_REVIEW_QUESTION_PROTOCOL` 針對 review 結果逐點 grill；沿用既有 change，不重新 `openspec new change`                                                                 |
-| `_SYSTEM_HUMAN_REVISE` | 帶入 `<<HUMAN_FEEDBACK>>`（`human_confirm` 收到的使用者修改意見）：理解意見（不夠明確則提問）→ 視需要重讀程式碼 → 視需要更新 domain-modeling → 更新既有 change 的規格文件                                                                                                                                                          |
+| `_SYSTEM_HUMAN_REVISE` | 帶入 `<<HUMAN_FEEDBACK>>`（`human_confirm` 收到的使用者修改意見，或重跑 analyze_plan 取得的調整內容）：理解意見（不夠明確則提問）→ 視需要重讀程式碼 → 視需要更新 domain-modeling → 更新既有 change 的規格文件                                                                                                                   |
+
+三份 `_SYSTEM` 共用的 `_ANALYZE_PROHIBITIONS` 區塊裡有一條雙向的勾選限制：**不得變更 `tasks.md`
+任何勾選狀態**——完成標記只由 `execute` node 在實作後即時更新；analyze 階段不論哪個模式都只能新增
+或改寫 `- [ ]`，既有 `- [x]` 維持原文。這條規則只寫在共用區塊一次（遵守「Keep prompts from
+growing」），不在個別 `_SYSTEM` 裡重複描述。
 
 **輸出格式與解析邏輯：**
 
@@ -617,7 +668,8 @@ embedding 模型輸出 L2 正規化後的 384 維向量，存為 `float[384]` bl
 
 每個節點讀取前一個節點填入的欄位，再將自己的輸出寫入對應欄位，例如：
 
-- `analyze_plan` → 填入 `analysis`、`plan`、`change_name`、`branch_name`、`project_dir`、`domains`、`skip_specs`
+- `analyze_plan` → 填入 `analysis`、`plan`、`change_name`、`branch_name`、`project_dir`、`domains`、`skip_specs`；
+  調整模式另外改寫 `task`（附加「調整 N：」）並把 `iteration` 重設為 0
 - `human_confirm` → 填入 `status`（`"confirmed"` / `"needs_revision"` + `human_feedback` / `"aborted"`）
 - `execute` → 填入 `execution_result`、`status`
 - `review` → 填入 `review_result`、`review_level`、`review_blocking`、`status`
