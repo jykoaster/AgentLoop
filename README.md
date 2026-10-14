@@ -138,7 +138,7 @@ python -m AgentLoop.main --node execute --change feat-login
 
 完整工作流跑到 `human_confirm` 時會暫停，在終端機顯示規劃摘要與 TASK 清單，輸入 `y` 才會繼續往下執行。
 
-執行過程中，`analyze_plan` 第一次進行初始規劃時會先在終端機詢問**本次任務要使用的 git 分支名稱（必填）**：已存在則切過去，不存在則從目前 HEAD 新建。OpenSpec change 名稱由此分支轉成 kebab-case（例如 `feature/add-login` → `feature-add-login`），之後規劃、實作、審查、archive 都在這個分支上進行。此值會沿用到同一個任務後續的重新規劃／依人工意見調整，不會重複問。
+執行過程中，`analyze_plan` 第一次進行初始規劃時會先在終端機詢問**本次任務要使用的 git 分支名稱（必填）**：已存在則切過去；不存在則接著列出目標專案全部本地分支，詢問**要從哪個分支建立**（直接 Enter 採用目前分支），選定後會先切到該起點分支、以只快轉方式 `git pull` 同步到遠端最新版本（起點分支沒有追蹤遠端分支時會印出提示並略過這步），同步成功才從它建立並切換到工作分支；若切換或同步失敗（網路／認證錯誤、本地與遠端分岔無法快轉、逾時等），會記為錯誤且不建立工作分支。容器需具備目標專案 remote 的 git 認證（SSH key 或 credential helper）才能完成同步，否則凡是有追蹤遠端分支的起點分支都會同步失敗。OpenSpec change 名稱由工作分支名稱轉成 kebab-case（例如 `feature/add-login` → `feature-add-login`），之後規劃、實作、審查、archive 都在這個分支上進行。此值會沿用到同一個任務後續的重新規劃／依人工意見調整，不會重複問。
 
 接著會問**本次是否需要撰寫 spec**（`y` 寫 `specs/<domain>/spec.md`；`n` 表示純重構／文件／設定，不寫 spec）。答案記在 state 的 `skip_specs`（`n` 為 `true`），同一個 change 之後再規劃、或驗收後再開一輪，都會沿用、不再問。選 `n` 時不會再問 domain 歸屬。
 

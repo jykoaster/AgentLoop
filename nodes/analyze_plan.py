@@ -8,6 +8,7 @@ from ..lib import (
     is_usage_limit_error, LANGUAGE_POLICY, build_skills_block,
     build_project_doc_hint_for, REPO_ROOT,
     ensure_on_branch, rollback_except_openspec,
+    list_local_branches, branch_exists, create_branch_from,
     ensure_initialized, ensure_change_created, validate_change,
     interaction,
 )
@@ -860,6 +861,46 @@ def _ask_branch_name() -> str:
         return answer
 
 
+_NON_INTERACTIVE_BASE_BRANCH = object()
+
+
+def _ask_base_branch(project_dir: str, branch_name: str) -> str:
+    """初始規劃、且工作分支本地不存在時，列出目標專案全部本地分支讓使用者選擇起點分支。
+    直接 Enter 或非互動式環境採用目前分支；目前為 detached HEAD 時，直接 Enter 要重問，
+    非互動式環境則直接回傳空字串（由呼叫端視為錯誤，因為無法重問）。中止回傳空字串。"""
+    branches, current = list_local_branches(project_dir)
+    labels = [f"{b}（目前分支）" if b == current else b for b in branches]
+    options = interaction.numbered(labels)
+
+    question = f"要從哪個分支建立 {branch_name}？"
+    print(f"\n{_YELLOW}  [分析+規劃 Agent] {question}{_RESET}", flush=True)
+    for line in options:
+        print(f"{_YELLOW}  {line}{_RESET}", flush=True)
+
+    while True:
+        answer = _ask_or_default(
+            question, _NON_INTERACTIVE_BASE_BRANCH,
+            interactive_msg=f"{_YELLOW}  非互動式環境，以目前分支為起點{_RESET}\n",
+            abort_msg=f"\n{_YELLOW}  已中止，未選擇起點分支{_RESET}\n",
+            abort_default=None,
+            kind="text", options=options,
+        )
+        if answer is _NON_INTERACTIVE_BASE_BRANCH:
+            return current
+        if answer is None:
+            return ""
+        if not answer:
+            if current:
+                return current
+            print(f"{_YELLOW}  目前為 detached HEAD，請輸入編號選擇起點分支{_RESET}", flush=True)
+            continue
+        if answer.isdigit():
+            idx = int(answer)
+            if 1 <= idx <= len(branches):
+                return branches[idx - 1]
+        print(f"{_YELLOW}  請輸入清單中的編號{_RESET}", flush=True)
+
+
 def analyze_plan_node(state: AgentState) -> dict:
     task = state.get("task", "")
     review_result = state.get("review_result", "")
@@ -983,10 +1024,20 @@ def analyze_plan_node(state: AgentState) -> dict:
         return _fail("缺少 branch_name")
 
     if project_dir:
-        ok, msg = ensure_on_branch(project_dir, branch_name)
-        print(f"{_YELLOW}  [git] {msg}{_RESET}", flush=True)
-        if not ok:
-            return _fail(f"無法切換到分支 {branch_name}：{msg}")
+        is_initial_plan = not is_replan and not is_human_revise
+        if is_initial_plan and not branch_exists(project_dir, branch_name):
+            base_branch = _ask_base_branch(project_dir, branch_name)
+            if not base_branch:
+                return _fail(f"未選擇起點分支，無法建立分支 {branch_name}")
+            ok, msg = create_branch_from(project_dir, branch_name, base_branch)
+            print(f"{_YELLOW}  [git] {msg}{_RESET}", flush=True)
+            if not ok:
+                return _fail(f"無法建立分支 {branch_name}：{msg}")
+        else:
+            ok, msg = ensure_on_branch(project_dir, branch_name)
+            print(f"{_YELLOW}  [git] {msg}{_RESET}", flush=True)
+            if not ok:
+                return _fail(f"無法切換到分支 {branch_name}：{msg}")
 
     if is_replan and review_level == "重寫":
         ok, msg = rollback_except_openspec(project_dir)

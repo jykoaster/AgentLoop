@@ -130,6 +130,7 @@ class TestAnalyzePlanGuards:
         ok_result.ok = True
         ok_result.error_text = ""
         with patch("AgentLoop.nodes.analyze_plan.call_claude", return_value=_mock_claude_result("規劃完成")), \
+             patch("AgentLoop.nodes.analyze_plan.branch_exists", return_value=True), \
              patch("AgentLoop.nodes.analyze_plan.ensure_on_branch", return_value=(True, "ok")), \
              patch("AgentLoop.nodes.analyze_plan.ensure_initialized", return_value=ok_result), \
              patch("AgentLoop.nodes.analyze_plan.ensure_change_created", return_value=ok_result), \
@@ -155,6 +156,7 @@ class TestAnalyzePlanGuards:
         ok_result.ok = True
         ok_result.error_text = ""
         with patch("AgentLoop.nodes.analyze_plan.call_claude", return_value=_mock_claude_result("規劃完成")), \
+             patch("AgentLoop.nodes.analyze_plan.branch_exists", return_value=True), \
              patch("AgentLoop.nodes.analyze_plan.ensure_on_branch", return_value=(True, "ok")), \
              patch("AgentLoop.nodes.analyze_plan.ensure_initialized", return_value=ok_result), \
              patch("AgentLoop.nodes.analyze_plan.ensure_change_created", return_value=ok_result), \
@@ -190,6 +192,7 @@ class TestAnalyzePlanGuards:
             return _mock_claude_result("規劃完成")
 
         with patch("AgentLoop.nodes.analyze_plan.call_claude", side_effect=_capture), \
+             patch("AgentLoop.nodes.analyze_plan.branch_exists", return_value=True), \
              patch("AgentLoop.nodes.analyze_plan.ensure_on_branch", return_value=(True, "ok")), \
              patch("AgentLoop.nodes.analyze_plan.ensure_initialized", return_value=ok_result), \
              patch("AgentLoop.nodes.analyze_plan.ensure_change_created", return_value=ok_result), \
@@ -222,6 +225,7 @@ class TestAnalyzePlanGuards:
         ok_result.ok = True
         ok_result.error_text = ""
         with patch("AgentLoop.nodes.analyze_plan.call_claude", return_value=_mock_claude_result("規劃完成")), \
+             patch("AgentLoop.nodes.analyze_plan.branch_exists", return_value=True), \
              patch("AgentLoop.nodes.analyze_plan.ensure_on_branch", return_value=(True, "ok")), \
              patch("AgentLoop.nodes.analyze_plan.ensure_initialized", return_value=ok_result), \
              patch("AgentLoop.nodes.analyze_plan.ensure_change_created", return_value=ok_result), \
@@ -247,6 +251,7 @@ class TestAnalyzePlanGuards:
         ok_result.ok = True
         ok_result.error_text = ""
         with patch("AgentLoop.nodes.analyze_plan.call_claude") as mock_claude, \
+             patch("AgentLoop.nodes.analyze_plan.branch_exists", return_value=True), \
              patch("AgentLoop.nodes.analyze_plan.ensure_on_branch", return_value=(True, "ok")), \
              patch("AgentLoop.nodes.analyze_plan.ensure_initialized", return_value=ok_result), \
              patch("AgentLoop.nodes.analyze_plan._recover_skip_specs", return_value=None), \
@@ -301,6 +306,7 @@ class TestAnalyzePlanGuards:
         ok_result.error_text = ""
         with patch("AgentLoop.nodes.analyze_plan.REPO_ROOT", str(tmp_path)), \
              patch("AgentLoop.nodes.analyze_plan.call_claude", return_value=_mock_claude_result("規劃完成")), \
+             patch("AgentLoop.nodes.analyze_plan.branch_exists", return_value=True), \
              patch("AgentLoop.nodes.analyze_plan.ensure_on_branch", return_value=(True, "ok")), \
              patch("AgentLoop.nodes.analyze_plan.ensure_initialized", return_value=ok_result), \
              patch("AgentLoop.nodes.analyze_plan.ensure_change_created", return_value=ok_result), \

@@ -22,7 +22,8 @@ AgentLoop/
 │   ├── openspec_runner.py     # OpenSpec CLI 封裝層（唯一跟 `openspec` CLI 對話的地方；目前只有 archive）
 │   ├── skill_loader.py        # Skill 注入器
 │   ├── project_context.py     # 動態偵測工作區內各專案的 CLAUDE.md / AGENT.md；PACKAGE_ROOT／REPO_ROOT 的唯一定義處
-│   ├── git_ops.py             # 在目標專案 checkout／建立 AgentState["branch_name"]
+│   ├── git_ops.py             # 在目標專案 checkout／建立 AgentState["branch_name"]；初始規劃時另外
+│   │                          # 列出本地分支、判斷工作分支是否存在、從使用者選的起點分支只快轉同步後建立
 │   └── interaction.py         # 互動埠：CLI／網頁兩種提問實作的唯一切換點（見下方「網頁控制台」）
 ├── web/                     # 網頁控制台（見下方「網頁控制台」整節）
 │   ├── app.py                  # FastAPI app（前綴 `/api`），同時以 StaticFiles 提供前端
@@ -276,9 +277,30 @@ Claude 呼叫中途被中斷，`_fail()` 回傳的 `task`／`human_feedback`／s
 OpenSpec change 位置，不需要各自重新判斷；`archive_node` 單獨執行（沒有 state 可讀）時也是同樣
 直接採用 `TARGET_PROJECT`，見 `nodes/archive.py` 的 `_resolve_location()`。
 
-確認 `branch_name`／`project_dir` 後，規劃／執行／審查／archive 都會透過 `git_ops.ensure_on_branch()`
-切到該分支（已存在則 `checkout`，不存在則 `checkout -b` 從目前 HEAD 建立）——這一步在呼叫 Claude
-之前就完成，不再讓 Claude 自己 checkout。
+確認 `branch_name`／`project_dir` 後，執行／審查／archive，以及初始規劃時工作分支本地已存在的情況，
+都會透過 `git_ops.ensure_on_branch()` 切到該分支（已存在則 `checkout`，不存在則 `checkout -b` 從目前
+HEAD 建立）——這一步在呼叫 Claude 之前就完成，不再讓 Claude 自己 checkout。
+
+**初始規劃、且工作分支本地不存在時，改為讓使用者選擇起點分支並先同步：** 這一步只發生在初始規劃
+（`execute`／`review`／`archive` 切到既有分支時不會觸發，因為那時工作分支必然已存在）。流程在原本
+呼叫 `ensure_on_branch()` 之前先用 `git_ops.branch_exists()` 判斷工作分支是否已存在，不存在才走這條
+路徑：
+
+1. `_ask_base_branch()` 用 `git_ops.list_local_branches()` 列出目標專案全部本地分支（依名稱排序），
+   以 `interaction.numbered()` 組成「編號. 分支名稱」選項，目前所在分支加註「（目前分支）」，向使用者
+   提問「要從哪個分支建立 `<branch_name>`？」。直接 Enter 或非互動式環境採用目前分支（detached HEAD
+   時直接 Enter 要重問，非互動式環境則直接回傳空字串）；輸入非清單內編號會提示後重問；使用者中止
+   （EOF／Ctrl-C）回傳空字串，呼叫端 `_fail()` 記為錯誤，不建立工作分支、不呼叫 Claude
+2. 取得起點分支後呼叫 `git_ops.create_branch_from(project_dir, branch_name, base_branch)`：
+   `checkout base_branch` → 用 `rev-parse --abbrev-ref --symbolic-full-name @{u}` 判斷有無 upstream
+   →有則 `pull --ff-only`（失敗或逾時都回傳 `(False, 訊息)`，停在 `base_branch` 上，不建立
+   `branch_name`；沒有 upstream 則印出「起點分支 `<base>` 未設定 upstream，略過 git pull」直接略過
+   這步）→ 同步成功（或略過）後 `checkout -b branch_name`
+3. 失敗（切換起點分支失敗、`git pull` 失敗或逾時）時 `_fail(f"無法建立分支 {branch_name}：{msg}")`，
+   錯誤說明包含工作分支名稱與 git 回報的原因，工作分支不會被建立，系統不進入規格撰寫
+
+起點分支只在這次呼叫內使用，不寫進 `AgentState`——後續節點只需要 `branch_name`，不需要知道當初從哪個
+分支建立。
 
 **Domain 歸屬確認、`openspec init`／`new change`（皆已搬到 Python，呼叫 Claude 之前完成）：**
 初始規劃在 `ensure_on_branch()` 之後、組 prompt 之前，依序執行：
@@ -947,8 +969,9 @@ multiline, created_at}`），每 0.5 秒輪詢同目錄的 `answer.json`，讀�
   `session.json` 的邏輯（見下）不受影響，因為那是父行程直接讀 `os.environ`，不經過傳給子行程的
   那份複製。
 
-目前走互動埠的呼叫點：`analyze_plan` 的分支名稱／是否寫 spec／domain 選擇／新 domain 名稱／
-domain Purpose／grilling 提問、`human_confirm` 的 y/N 與修改意見、`review` 的建議事項挑選、
+目前走互動埠的呼叫點：`analyze_plan` 的分支名稱／起點分支選擇（工作分支本地不存在時）／是否寫
+spec／domain 選擇／新 domain 名稱／domain Purpose／grilling 提問、`human_confirm` 的 y/N 與修改意見、
+`review` 的建議事項挑選、
 `archive` 的是否併入 specs、`claude_runner.call_claude()` 的用量上限暫停（`kind="pause"`，
 `stage` 取自 `core/stages.current_stage()`）。**新增任何提問點都必須走這裡**，否則網頁模式下
 會卡住等不到回覆，命令列模式下則可能誤用非互動預設值。
