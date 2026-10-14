@@ -15,6 +15,63 @@ def _git(repo: str, *args: str) -> subprocess.CompletedProcess:
     )
 
 
+def list_local_branches(project_dir: str) -> tuple[list[str], str]:
+    """列出 `<workspace>/<project_dir>` 全部本地分支（依名稱排序）與目前所在分支。
+
+    目前為 detached HEAD 時，第二個值回傳空字串。
+    """
+    repo = os.path.join(REPO_ROOT, project_dir)
+    refs = _git(repo, "for-each-ref", "--format=%(refname:short)", "refs/heads")
+    branches = sorted(line.strip() for line in refs.stdout.splitlines() if line.strip())
+
+    head = _git(repo, "rev-parse", "--abbrev-ref", "HEAD")
+    current = head.stdout.strip()
+    if head.returncode != 0 or current == "HEAD":
+        current = ""
+    return branches, current
+
+
+def branch_exists(project_dir: str, branch_name: str) -> bool:
+    """判斷 `branch_name` 是否為 `<workspace>/<project_dir>` 的本地分支。"""
+    repo = os.path.join(REPO_ROOT, project_dir)
+    result = _git(repo, "show-ref", "--verify", "--quiet", f"refs/heads/{branch_name}")
+    return result.returncode == 0
+
+
+def create_branch_from(project_dir: str, branch_name: str, base_branch: str) -> tuple[bool, str]:
+    """切到 `base_branch`、以只快轉方式同步其追蹤的遠端分支後，從它建立並切換到 `branch_name`。
+
+    回傳 `(成功, 訊息)`。`base_branch` 沒有 upstream 時略過同步，直接以本地版本建立。
+    同步失敗（分岔、無法快轉、網路／認證錯誤、逾時）時停在 `base_branch` 上，不建立 `branch_name`。
+    """
+    repo = os.path.join(REPO_ROOT, project_dir)
+
+    try:
+        checked_out = _git(repo, "checkout", base_branch)
+        if checked_out.returncode != 0:
+            err = (checked_out.stderr or checked_out.stdout).strip()
+            return False, err or f"無法切換到起點分支 {base_branch}"
+
+        skip_note = ""
+        upstream = _git(repo, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}")
+        if upstream.returncode == 0:
+            pulled = _git(repo, "pull", "--ff-only")
+            if pulled.returncode != 0:
+                err = (pulled.stderr or pulled.stdout).strip()
+                return False, f"git pull 失敗：{err}"
+        else:
+            skip_note = f"起點分支 {base_branch} 未設定 upstream，略過 git pull；"
+
+        created = _git(repo, "checkout", "-b", branch_name)
+        if created.returncode != 0:
+            err = (created.stderr or created.stdout).strip()
+            return False, err or f"無法建立分支 {branch_name}"
+
+        return True, f"{skip_note}{project_dir} 已從 {base_branch} 建立並切換到分支 {branch_name}"
+    except subprocess.TimeoutExpired:
+        return False, "git pull 逾時"
+
+
 def ensure_on_branch(project_dir: str, branch_name: str) -> tuple[bool, str]:
     """把 `<workspace>/<project_dir>` 切到 `branch_name`；本地沒有則從目前 HEAD 建立。
 
