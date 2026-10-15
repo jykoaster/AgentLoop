@@ -23,12 +23,16 @@ AgentLoop/
 │   ├── skill_loader.py        # Skill 注入器
 │   ├── project_context.py     # 動態偵測工作區內各專案的 CLAUDE.md / AGENT.md；PACKAGE_ROOT／REPO_ROOT 的唯一定義處
 │   ├── git_ops.py             # 在目標專案 checkout／建立 AgentState["branch_name"]；初始規劃時另外
-│   │                          # 列出本地分支、判斷工作分支是否存在、從使用者選的起點分支只快轉同步後建立
+│   │                          # 列出本地分支、判斷工作分支是否存在、從使用者選的起點分支只快轉同步後建立；
+│   │                          # 另提供 list_branch_files()／read_branch_file() 兩個唯讀查詢（git ls-tree／
+│   │                          # git show），回傳 (結果或 None, git 錯誤訊息)，不 checkout、不動工作樹與
+│   │                          # index，供 web/repo_view.py 讀取其他分支
 │   └── interaction.py         # 互動埠：CLI／網頁兩種提問實作的唯一切換點（見下方「網頁控制台」）
 ├── web/                     # 網頁控制台（見下方「網頁控制台」整節）
 │   ├── app.py                  # FastAPI app（前綴 `/api`），同時以 StaticFiles 提供前端
 │   ├── runner.py               # 單一作用中執行：子行程、日誌、提問/回覆檔、中止、session 回寫
-│   ├── repo_view.py            # 唯讀瀏覽 .agentloop/changes、openspec/changes(/archive)、openspec/specs
+│   ├── repo_view.py            # 唯讀瀏覽 .agentloop/changes、openspec/changes(/archive)、openspec/specs；
+│   │                          # 工作樹找不到 change 資料夾時改讀該任務工作分支最新 commit（git_ops 唯讀查詢）
 │   ├── search_api.py           # 重用 search.py 的索引／檢索／回答函式
 │   ├── settings.py             # `.web/settings.json` 讀寫、合併 .env、secret 遮罩、資料夾邊界檢查
 │   └── frontend/                # Vue 3 + TypeScript + Vite SPA（見下方「前端」）
@@ -1052,7 +1056,7 @@ FastAPI，前綴 `/api`；`repo_view.py` 純讀檔（`.agentloop/changes/*/state
 | -------- | --------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------- |
 | GET      | `/changes`                                                            | 執行中任務列表（排除已封存；舊任務缺 `stages` 時一律視為 `pending`）                           |
 | GET      | `/changes/{name}/stages/{stage}`                                      | 階段詳情：結果欄位、note、日誌最後 500 行（執行中即時切分、其餘讀持久化的 `logs/<stage>.log`） |
-| GET      | `/changes/{name}/files[/{path}]`                                      | 規格文件瀏覽（`proposal.md`/`design.md`/`tasks.md` 排最前，其餘依路徑排序）                    |
+| GET      | `/changes/{name}/files[/{path}]`                                      | 規格文件瀏覽（`proposal.md`/`design.md`/`tasks.md` 排最前，其餘依路徑排序）；工作樹找不到該 change 資料夾時，唯讀改讀該任務工作分支最新 commit 的內容，不 checkout、不動工作樹；該次 git 指令本身失敗時，在 404 的找不到訊息後附上「（git：<git 錯誤訊息>）」 |
 | GET/POST | `/run`、`/runs`、`/changes/{name}/rerun`、`/run/answer`、`/run/abort` | 執行狀態查詢、啟動新任務、重跑、回覆提問、中止                                                 |
 | GET      | `/archive`、`/archive/{dir}/files[/{path}]`                           | 已封存任務瀏覽                                                                                 |
 | GET      | `/specs`、`/specs/{domain}`                                           | 既有 Spec 瀏覽                                                                                 |

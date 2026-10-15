@@ -11,6 +11,7 @@ def _git(repo: str, *args: str) -> subprocess.CompletedProcess:
         ["git", "-C", repo, *args],
         capture_output=True,
         text=True,
+        encoding="utf-8",
         timeout=_GIT_TIMEOUT,
     )
 
@@ -36,6 +37,38 @@ def branch_exists(project_dir: str, branch_name: str) -> bool:
     repo = os.path.join(REPO_ROOT, project_dir)
     result = _git(repo, "show-ref", "--verify", "--quiet", f"refs/heads/{branch_name}")
     return result.returncode == 0
+
+
+def list_branch_files(project_dir: str, branch: str, dir_rel: str) -> tuple[list[str] | None, str]:
+    """唯讀列出 `branch` 最新 commit 中 `dir_rel/` 資料夾下的檔案路徑（相對 `dir_rel`、`/` 分隔）。
+
+    不 checkout、不動工作樹與 index。回傳 `(結果或 None, git 錯誤訊息)`：資料夾在該分支上不存在
+    回傳 `([], "")`；git 指令失敗回傳 `(None, <git 錯誤訊息>)`。
+    """
+    repo = os.path.join(REPO_ROOT, project_dir)
+    prefix = dir_rel.rstrip("/") + "/"
+    result = _git(repo, "ls-tree", "-r", "--name-only", branch, "--", prefix)
+    if result.returncode != 0:
+        return None, (result.stderr or result.stdout).strip()
+    files = [
+        line[len(prefix):]
+        for line in result.stdout.splitlines()
+        if line.strip()
+    ]
+    return files, ""
+
+
+def read_branch_file(project_dir: str, branch: str, path_rel: str) -> tuple[str | None, str]:
+    """唯讀讀出 `branch` 最新 commit 中 `path_rel` 檔案的 UTF-8 內容。
+
+    不 checkout、不動工作樹與 index。回傳 `(結果或 None, git 錯誤訊息)`：成功時錯誤訊息為空字串，
+    檔案不存在或 git 失敗時回傳 `(None, <git 錯誤訊息>)`。
+    """
+    repo = os.path.join(REPO_ROOT, project_dir)
+    result = _git(repo, "show", f"{branch}:{path_rel}")
+    if result.returncode != 0:
+        return None, (result.stderr or result.stdout).strip()
+    return result.stdout, ""
 
 
 def create_branch_from(project_dir: str, branch_name: str, base_branch: str) -> tuple[bool, str]:

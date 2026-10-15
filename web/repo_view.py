@@ -4,10 +4,11 @@
 import json
 import os
 import re
+from dataclasses import dataclass
 
 from .runner import get_manager
 from ..core.stages import STAGES
-from ..lib import REPO_ROOT
+from ..lib import REPO_ROOT, branch_exists, list_branch_files, read_branch_file
 from ..lib.openspec_runner import is_change_archived
 
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
@@ -126,20 +127,23 @@ def get_stage_detail(project: str, change_name: str, stage: str) -> dict:
     }
 
 
+def _markdown_sort_key(rel: str):
+    if rel in _PRIORITY_FILES:
+        return (0, _PRIORITY_FILES.index(rel))
+    return (1, rel)
+
+
+def _sort_markdown_paths(paths: list[str]) -> list[str]:
+    return sorted((p for p in paths if p.endswith(".md")), key=_markdown_sort_key)
+
+
 def _sorted_markdown_files(root: str) -> list[str]:
     found: list[str] = []
     for dirpath, _dirnames, filenames in os.walk(root):
         for fn in filenames:
-            if fn.endswith(".md"):
-                rel = os.path.relpath(os.path.join(dirpath, fn), root).replace(os.sep, "/")
-                found.append(rel)
-
-    def _key(rel: str):
-        if rel in _PRIORITY_FILES:
-            return (0, _PRIORITY_FILES.index(rel))
-        return (1, rel)
-
-    return sorted(found, key=_key)
+            rel = os.path.relpath(os.path.join(dirpath, fn), root).replace(os.sep, "/")
+            found.append(rel)
+    return _sort_markdown_paths(found)
 
 
 def _safe_join(root: str, rel_path: str) -> str:
@@ -164,14 +168,58 @@ def _read_markdown(root: str, rel_path: str) -> str:
         return f.read()
 
 
+def _work_branch_name(project: str, change_name: str) -> str:
+    state = _read_json(os.path.join(_change_dir(project, change_name), "state.json"))
+    return (state or {}).get("branch_name", "")
+
+
+@dataclass
+class _WorktreeSource:
+    root: str
+
+
+@dataclass
+class _BranchSource:
+    branch: str
+    files: list[str]
+
+
+def _resolve_change_source(project: str, change_name: str) -> "_WorktreeSource | _BranchSource":
+    root = _openspec_change_dir(project, change_name)
+    if os.path.isdir(root):
+        return _WorktreeSource(root)
+
+    branch = _work_branch_name(project, change_name)
+    if branch and branch_exists(project, branch):
+        files, err = list_branch_files(project, branch, f"openspec/changes/{change_name}")
+        if files is None:
+            raise NotFound(f"找不到 change：{change_name}（git：{err}）")
+        if files:
+            return _BranchSource(branch, _sort_markdown_paths(files))
+
+    raise NotFound(f"找不到 change：{change_name}")
+
+
 def list_change_files(project: str, change_name: str) -> list[str]:
     _require_safe_name(change_name, "change")
-    return _list_markdown(_openspec_change_dir(project, change_name), f"找不到 change：{change_name}")
+    source = _resolve_change_source(project, change_name)
+    if isinstance(source, _WorktreeSource):
+        return _sorted_markdown_files(source.root)
+    return source.files
 
 
 def read_change_file(project: str, change_name: str, rel_path: str) -> str:
     _require_safe_name(change_name, "change")
-    return _read_markdown(_openspec_change_dir(project, change_name), rel_path)
+    source = _resolve_change_source(project, change_name)
+    if isinstance(source, _WorktreeSource):
+        return _read_markdown(source.root, rel_path)
+
+    if rel_path not in source.files:
+        raise NotFound(f"找不到檔案：{rel_path}")
+    content, err = read_branch_file(project, source.branch, f"openspec/changes/{change_name}/{rel_path}")
+    if content is None:
+        raise NotFound(f"找不到檔案：{rel_path}（git：{err}）")
+    return content
 
 
 def list_archive(project: str) -> list[dict]:
