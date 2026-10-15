@@ -7,6 +7,7 @@ web/app.py（FastAPI）的 HTTP API 測試：TestClient 打 `/api/*`，以 tmp_p
 docstring 在標題後加註「（API）」。
 """
 import json
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -14,6 +15,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
+from AgentLoop.lib import git_ops as git_ops_module
 from AgentLoop.web import app as app_module
 from AgentLoop.web import repo_view as repo_view_module
 from AgentLoop.web import runner as runner_module
@@ -35,7 +37,7 @@ def workspace(tmp_path, monkeypatch):
     monkeypatch.setenv("TARGET_PROJECT", "my-project")
     monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    for mod in (app_module, repo_view_module, runner_module):
+    for mod in (app_module, repo_view_module, runner_module, git_ops_module):
         monkeypatch.setattr(mod, "REPO_ROOT", str(tmp_path))
     monkeypatch.setattr(runner_module, "_manager", runner_module.RunManager())
     (tmp_path / "my-project").mkdir()
@@ -67,6 +69,28 @@ def _write_openspec_change(workspace: Path, change_name: str, files: dict) -> Pa
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content, encoding="utf-8")
     return root
+
+
+def _git(cwd: Path, *args: str) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        ["git", *args], cwd=cwd, capture_output=True, text=True, check=True,
+    )
+
+
+def _current_branch(cwd: Path) -> str:
+    return _git(cwd, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
+
+
+def _init_git_project(workspace: Path) -> Path:
+    """把既有的 `my-project` 目錄初始化成真實 git repo，main 分支有一個初始 commit。"""
+    project = workspace / "my-project"
+    _git(project, "init", "-b", "main")
+    _git(project, "config", "user.email", "test@example.com")
+    _git(project, "config", "user.name", "Test")
+    (project / "README.md").write_text("root", encoding="utf-8")
+    _git(project, "add", "README.md")
+    _git(project, "commit", "-m", "init")
+    return project
 
 
 class TestActiveChangesListing:
@@ -287,6 +311,111 @@ class TestChangeFilesSorting:
 
         content = client.get("/api/changes/feat-login/files/specs/auth/spec.md").json()
         assert content["content"] == "# auth spec"
+
+
+class TestChangeFilesFromOtherBranch:
+    def test_change_files_read_from_work_branch_when_worktree_missing(self, client, workspace):
+        """目前分支沒有該 change 資料夾時從任務的工作分支讀取規格文件（API）"""
+        project = _init_git_project(workspace)
+        _git(project, "checkout", "-b", "feat/login")
+        _write_openspec_change(workspace, "feat-login", {
+            "tasks.md": "# tasks",
+            "proposal.md": "# proposal",
+            "specs/auth/spec.md": "# auth spec",
+        })
+        _git(project, "add", "openspec")
+        _git(project, "commit", "-m", "feat-login change docs")
+
+        _git(project, "checkout", "main")
+        _git(project, "checkout", "-b", "feat/cart")
+
+        _write_state(workspace, "feat-login", branch_name="feat/login")
+        status_before = _git(project, "status", "--porcelain").stdout
+
+        files = client.get("/api/changes/feat-login/files").json()
+        assert files == ["proposal.md", "tasks.md", "specs/auth/spec.md"]
+
+        content = client.get("/api/changes/feat-login/files/specs/auth/spec.md").json()
+        assert content["content"] == "# auth spec"
+
+        assert _current_branch(project) == "feat/cart"
+        status_after = _git(project, "status", "--porcelain").stdout
+        assert status_after == status_before
+
+    def test_change_files_not_found_when_neither_worktree_nor_branch_has_change(self, client, workspace):
+        """工作樹與工作分支都沒有該 change 時顯示找不到 change（API）"""
+        _init_git_project(workspace)
+        _write_state(workspace, "feat-login", branch_name="feat/missing")
+
+        resp = client.get("/api/changes/feat-login/files")
+        assert resp.status_code == 404
+        assert resp.json()["detail"] == "找不到 change：feat-login"
+
+    def test_change_files_prefer_worktree_when_branch_also_has_change(self, client, workspace):
+        """工作樹與工作分支同時有該 change 時回工作樹內容（API）"""
+        project = _init_git_project(workspace)
+        _git(project, "checkout", "-b", "feat/login")
+        _write_openspec_change(workspace, "feat-login", {"proposal.md": "# old proposal"})
+        _git(project, "add", "openspec")
+        _git(project, "commit", "-m", "feat-login change docs")
+
+        (project / "openspec" / "changes" / "feat-login" / "proposal.md").write_text(
+            "# new proposal", encoding="utf-8",
+        )
+
+        _write_state(workspace, "feat-login", branch_name="feat/login")
+
+        content = client.get("/api/changes/feat-login/files/proposal.md").json()
+        assert content["content"] == "# new proposal"
+
+    def test_change_files_branch_source_rejects_path_traversal_and_non_markdown(self, client, workspace):
+        """分支來源下要求 ../ 路徑或非 .md 檔回 404（API）"""
+        project = _init_git_project(workspace)
+        _git(project, "checkout", "-b", "feat/login")
+        _write_openspec_change(workspace, "feat-login", {
+            "proposal.md": "# proposal",
+            "notes.txt": "plain text",
+        })
+        _git(project, "add", "openspec")
+        _git(project, "commit", "-m", "feat-login change docs")
+        _git(project, "checkout", "main")
+        _git(project, "checkout", "-b", "feat/cart")
+
+        _write_state(workspace, "feat-login", branch_name="feat/login")
+
+        resp = client.get("/api/changes/feat-login/files/%2e%2e/%2e%2e/README.md")
+        assert resp.status_code == 404
+
+        resp2 = client.get("/api/changes/feat-login/files/notes.txt")
+        assert resp2.status_code == 404
+
+    def test_change_files_appends_git_error_when_branch_read_fails(self, client, workspace):
+        """讀取工作分支時 git 指令失敗會在找不到訊息後附上 git 錯誤訊息（API）"""
+        project = _init_git_project(workspace)
+        _git(project, "checkout", "-b", "feat/login")
+        _write_openspec_change(workspace, "feat-login", {"proposal.md": "# proposal"})
+        _git(project, "add", "openspec")
+        _git(project, "commit", "-m", "feat-login change docs")
+        _git(project, "checkout", "main")
+        _git(project, "checkout", "-b", "feat/cart")
+
+        _write_state(workspace, "feat-login", branch_name="feat/login")
+
+        blob_sha = _git(
+            project, "rev-parse", "feat/login:openspec/changes/feat-login/proposal.md",
+        ).stdout.strip()
+        object_path = project / ".git" / "objects" / blob_sha[:2] / blob_sha[2:]
+        object_path.unlink()
+
+        files = client.get("/api/changes/feat-login/files").json()
+        assert files == ["proposal.md"]
+
+        resp = client.get("/api/changes/feat-login/files/proposal.md")
+        assert resp.status_code == 404
+        detail = resp.json()["detail"]
+        assert detail.startswith("找不到檔案：proposal.md（git：")
+        assert detail.endswith("）")
+        assert detail != "找不到檔案：proposal.md（git：）"
 
 
 class TestSpecSearch:
