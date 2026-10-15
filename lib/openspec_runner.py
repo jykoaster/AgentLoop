@@ -19,7 +19,10 @@ class OpenSpecResult:
 
 
 def ensure_initialized(project_dir_abs: str, timeout: int = 60) -> OpenSpecResult:
-    """確保目標專案已有 `openspec/`；已存在則直接視為成功，不重複執行 init。"""
+    """確保目標專案已有 `openspec/`；已存在則直接視為成功，不重複執行 init。
+
+    `--tools none`：只建目錄，不把 OpenSpec 的 workflow skill 寫進目標專案。
+    """
     if os.path.isdir(os.path.join(project_dir_abs, "openspec")):
         return OpenSpecResult(ok=True)
     if not shutil.which("openspec"):
@@ -27,7 +30,7 @@ def ensure_initialized(project_dir_abs: str, timeout: int = 60) -> OpenSpecResul
 
     try:
         proc = subprocess.run(
-            ["openspec", "init", "--tools", "claude", "--force"],
+            ["openspec", "init", "--tools", "none", "--force"],
             cwd=project_dir_abs,
             capture_output=True,
             text=True,
@@ -129,6 +132,30 @@ def validate_change(project_dir_abs: str, change_name: str, timeout: int = 60) -
 # 與 OpenSpec `ARCHIVE_DATE_PREFIX_PATTERN` 一致：change 名稱已帶日期前綴時不再疊加。
 _ARCHIVE_DATE_PREFIX_RE = re.compile(r"^\d{4}-\d{2}-\d{2}-")
 _MAX_ARCHIVE_SUFFIX = 1000
+
+
+def _is_safe_change_name(change_name: str) -> bool:
+    return bool(change_name) and change_name not in (".", "..") and os.sep not in change_name
+
+
+def is_change_archived(project_dir_abs: str, change_name: str) -> bool:
+    """change 是否已封存：active change 資料夾已不存在，且 archive 下有名稱等於
+    `change_name` 或以 `-change_name` 結尾的目錄。`nodes/analyze_plan.py` 與
+    `web/repo_view.py` 共用這份規則，避免網頁看得到的任務與重跑判定已封存的任務不一致。
+    """
+    if not _is_safe_change_name(change_name):
+        return False
+    active_dir = os.path.join(project_dir_abs, "openspec", "changes", change_name)
+    if os.path.isdir(active_dir):
+        return False
+    archive_root = os.path.join(project_dir_abs, "openspec", "changes", "archive")
+    if not os.path.isdir(archive_root):
+        return False
+    suffix = f"-{change_name}"
+    return any(
+        (d == change_name or d.endswith(suffix)) and os.path.isdir(os.path.join(archive_root, d))
+        for d in os.listdir(archive_root)
+    )
 
 
 def archive_destination_name(change_name: str, today: str | None = None) -> str:

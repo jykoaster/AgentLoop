@@ -11,8 +11,98 @@ def _git(repo: str, *args: str) -> subprocess.CompletedProcess:
         ["git", "-C", repo, *args],
         capture_output=True,
         text=True,
+        encoding="utf-8",
         timeout=_GIT_TIMEOUT,
     )
+
+
+def list_local_branches(project_dir: str) -> tuple[list[str], str]:
+    """列出 `<workspace>/<project_dir>` 全部本地分支（依名稱排序）與目前所在分支。
+
+    目前為 detached HEAD 時，第二個值回傳空字串。
+    """
+    repo = os.path.join(REPO_ROOT, project_dir)
+    refs = _git(repo, "for-each-ref", "--format=%(refname:short)", "refs/heads")
+    branches = sorted(line.strip() for line in refs.stdout.splitlines() if line.strip())
+
+    head = _git(repo, "rev-parse", "--abbrev-ref", "HEAD")
+    current = head.stdout.strip()
+    if head.returncode != 0 or current == "HEAD":
+        current = ""
+    return branches, current
+
+
+def branch_exists(project_dir: str, branch_name: str) -> bool:
+    """判斷 `branch_name` 是否為 `<workspace>/<project_dir>` 的本地分支。"""
+    repo = os.path.join(REPO_ROOT, project_dir)
+    result = _git(repo, "show-ref", "--verify", "--quiet", f"refs/heads/{branch_name}")
+    return result.returncode == 0
+
+
+def list_branch_files(project_dir: str, branch: str, dir_rel: str) -> tuple[list[str] | None, str]:
+    """唯讀列出 `branch` 最新 commit 中 `dir_rel/` 資料夾下的檔案路徑（相對 `dir_rel`、`/` 分隔）。
+
+    不 checkout、不動工作樹與 index。回傳 `(結果或 None, git 錯誤訊息)`：資料夾在該分支上不存在
+    回傳 `([], "")`；git 指令失敗回傳 `(None, <git 錯誤訊息>)`。
+    """
+    repo = os.path.join(REPO_ROOT, project_dir)
+    prefix = dir_rel.rstrip("/") + "/"
+    result = _git(repo, "ls-tree", "-r", "--name-only", branch, "--", prefix)
+    if result.returncode != 0:
+        return None, (result.stderr or result.stdout).strip()
+    files = [
+        line[len(prefix):]
+        for line in result.stdout.splitlines()
+        if line.strip()
+    ]
+    return files, ""
+
+
+def read_branch_file(project_dir: str, branch: str, path_rel: str) -> tuple[str | None, str]:
+    """唯讀讀出 `branch` 最新 commit 中 `path_rel` 檔案的 UTF-8 內容。
+
+    不 checkout、不動工作樹與 index。回傳 `(結果或 None, git 錯誤訊息)`：成功時錯誤訊息為空字串，
+    檔案不存在或 git 失敗時回傳 `(None, <git 錯誤訊息>)`。
+    """
+    repo = os.path.join(REPO_ROOT, project_dir)
+    result = _git(repo, "show", f"{branch}:{path_rel}")
+    if result.returncode != 0:
+        return None, (result.stderr or result.stdout).strip()
+    return result.stdout, ""
+
+
+def create_branch_from(project_dir: str, branch_name: str, base_branch: str) -> tuple[bool, str]:
+    """切到 `base_branch`、以只快轉方式同步其追蹤的遠端分支後，從它建立並切換到 `branch_name`。
+
+    回傳 `(成功, 訊息)`。`base_branch` 沒有 upstream 時略過同步，直接以本地版本建立。
+    同步失敗（分岔、無法快轉、網路／認證錯誤、逾時）時停在 `base_branch` 上，不建立 `branch_name`。
+    """
+    repo = os.path.join(REPO_ROOT, project_dir)
+
+    try:
+        checked_out = _git(repo, "checkout", base_branch)
+        if checked_out.returncode != 0:
+            err = (checked_out.stderr or checked_out.stdout).strip()
+            return False, err or f"無法切換到起點分支 {base_branch}"
+
+        skip_note = ""
+        upstream = _git(repo, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}")
+        if upstream.returncode == 0:
+            pulled = _git(repo, "pull", "--ff-only")
+            if pulled.returncode != 0:
+                err = (pulled.stderr or pulled.stdout).strip()
+                return False, f"git pull 失敗：{err}"
+        else:
+            skip_note = f"起點分支 {base_branch} 未設定 upstream，略過 git pull；"
+
+        created = _git(repo, "checkout", "-b", branch_name)
+        if created.returncode != 0:
+            err = (created.stderr or created.stdout).strip()
+            return False, err or f"無法建立分支 {branch_name}"
+
+        return True, f"{skip_note}{project_dir} 已從 {base_branch} 建立並切換到分支 {branch_name}"
+    except subprocess.TimeoutExpired:
+        return False, "git pull 逾時"
 
 
 def ensure_on_branch(project_dir: str, branch_name: str) -> tuple[bool, str]:

@@ -1,8 +1,7 @@
 import os
 import re
-import sys
 from ..core import AgentState
-from ..lib import REPO_ROOT, archive_change, ensure_on_branch
+from ..lib import REPO_ROOT, archive_change, ensure_on_branch, interaction
 
 _BANNER = "\033[1;35m"
 _YELLOW = "\033[1;33m"
@@ -68,11 +67,14 @@ def _ask_should_archive(project_dir: str, change_name: str) -> bool:
         end="",
         flush=True,
     )
-    if not sys.stdin.isatty():
+    if not interaction.is_interactive():
         print("N（非互動式環境）", flush=True)
         return False
     try:
-        answer = input().strip().lower()
+        answer = interaction.ask(
+            f"是否要將此 change 併入 {project_dir}/openspec/specs/？",
+            kind="confirm", stage="archive",
+        ).strip().lower()
     except (EOFError, KeyboardInterrupt):
         print(flush=True)
         return False

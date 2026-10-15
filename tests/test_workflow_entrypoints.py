@@ -6,6 +6,7 @@ Mock 所有呼叫 Claude CLI 的 node function（不需要真實 API），
 
 執行：容器內 pytest tests/test_workflow_entrypoints.py
 """
+import json
 import pytest
 from unittest.mock import patch, MagicMock
 from AgentLoop.core.workflow import build_workflow, MAX_ITERATIONS
@@ -280,6 +281,42 @@ class TestEntryFromAnalyzePlan:
         assert visited.count("analyze_plan") == 2
         assert visited.count("human_confirm") == 2
         assert visited[-1] == "archive_change"
+
+
+# ── run_node：重跑入口標記（start_from） ────────────────────────────────────────
+
+class TestRunNodeMarksRerunEntry:
+    def test_analyze_plan_entry_sets_start_from(self, tmp_path, monkeypatch):
+        """main.run_node("analyze_plan", ...) 是使用者主動重跑的唯一入口：
+        傳進 analyze_plan_node 的 state 必須帶 start_from="analyze_plan"，
+        但寫出的 state.json 不得含這個暫態欄位（_save_state 本來就排除）。"""
+        from AgentLoop import main as main_module
+
+        project = tmp_path / "my-project"
+        change_dir = project / ".agentloop" / "changes" / "feat-test"
+        change_dir.mkdir(parents=True)
+        (change_dir / "state.json").write_text(
+            json.dumps({"task": "test task", "change_name": "feat-test", "branch_name": "feat/test"}),
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("TARGET_PROJECT", "my-project")
+
+        captured_state: dict = {}
+
+        def _fake_analyze_plan_node(state):
+            captured_state.update(state)
+            return {"status": "pending"}
+
+        with patch("AgentLoop.main.REPO_ROOT", str(tmp_path)), \
+             patch("AgentLoop.nodes.analyze_plan_node", side_effect=_fake_analyze_plan_node), \
+             patch("AgentLoop.main._stream_and_save", return_value="pending"):
+            main_module.run_node("analyze_plan", change_name="feat-test")
+
+        assert captured_state.get("start_from") == "analyze_plan"
+
+        state_file = change_dir / "state.json"
+        data = json.loads(state_file.read_text())
+        assert "start_from" not in data
 
 
 # ── default entry point ───────────────────────────────────────────────────────

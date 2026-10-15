@@ -15,18 +15,33 @@ AgentLoop/
 ├── core/                    # 系統的核心骨架：狀態契約與 LangGraph 圖組裝
 │   ├── state.py               # AgentState 型別定義
 │   ├── session.py             # 中斷 session 插槽的唯一讀寫處（見下方「跨程序接回：session 插槽」）
+│   ├── stages.py               # 各工作階段狀態追蹤（見下方「網頁控制台」的「階段狀態」）
 │   └── workflow.py            # LangGraph 工作流程定義（`from ..nodes import ...` 組圖）
 ├── lib/                     # 節點共用的工具層（見下方各節點對這些模組的說明）
 │   ├── claude_runner.py       # Claude Code CLI 封裝層
 │   ├── openspec_runner.py     # OpenSpec CLI 封裝層（唯一跟 `openspec` CLI 對話的地方；目前只有 archive）
 │   ├── skill_loader.py        # Skill 注入器
 │   ├── project_context.py     # 動態偵測工作區內各專案的 CLAUDE.md / AGENT.md；PACKAGE_ROOT／REPO_ROOT 的唯一定義處
-│   └── git_ops.py             # 在目標專案 checkout／建立 AgentState["branch_name"]
+│   ├── git_ops.py             # 在目標專案 checkout／建立 AgentState["branch_name"]；初始規劃時另外
+│   │                          # 列出本地分支、判斷工作分支是否存在、從使用者選的起點分支只快轉同步後建立；
+│   │                          # 另提供 list_branch_files()／read_branch_file() 兩個唯讀查詢（git ls-tree／
+│   │                          # git show），回傳 (結果或 None, git 錯誤訊息)，不 checkout、不動工作樹與
+│   │                          # index，供 web/repo_view.py 讀取其他分支
+│   └── interaction.py         # 互動埠：CLI／網頁兩種提問實作的唯一切換點（見下方「網頁控制台」）
+├── web/                     # 網頁控制台（見下方「網頁控制台」整節）
+│   ├── app.py                  # FastAPI app（前綴 `/api`），同時以 StaticFiles 提供前端
+│   ├── runner.py               # 單一作用中執行：子行程、日誌、提問/回覆檔、中止、session 回寫
+│   ├── repo_view.py            # 唯讀瀏覽 .agentloop/changes、openspec/changes(/archive)、openspec/specs；
+│   │                          # 工作樹找不到 change 資料夾時改讀該任務工作分支最新 commit（git_ops 唯讀查詢）
+│   ├── search_api.py           # 重用 search.py 的索引／檢索／回答函式
+│   ├── settings.py             # `.web/settings.json` 讀寫、合併 .env、secret 遮罩、資料夾邊界檢查
+│   └── frontend/                # Vue 3 + TypeScript + Vite SPA（見下方「前端」）
 ├── requirements.txt
 ├── Dockerfile
 ├── docker-compose.yml
 ├── .claude/
 │   └── skills/               # 專案內建 Skill（見下方「Skill 系統作為知識注入」）
+├── .web/                    # 網頁控制台執行期狀態（settings.json、run/ 執行目錄），容器內產生，gitignored
 ├── pytest.ini               # 註冊 `eval` marker，並預設排除（`addopts = -m "not eval"`）
 ├── tests/                   # 單元測試（不需要 Claude CLI）
 │   └── evals/                 # prompt eval：真的呼叫 Claude CLI，標記 `eval`、預設不執行
@@ -62,7 +77,8 @@ change/spec-delta 規則；review 通過後由 `archive` 節點呼叫 `openspec 
 
 ```python
 class AgentState(TypedDict):
-    task: str              # 使用者輸入的任務描述（analyze_plan／review 注入；execute 不讀、不注入）
+    task: str              # 使用者輸入的任務描述（analyze_plan／review 注入；execute 不讀、不注入）；
+                           # 重跑已規劃任務輸入調整內容時，analyze_plan 會在原文後附加「調整 N：<內容>」並寫回
     analysis: str          # proposal.md 全文，供 human_confirm 顯示
     plan: list[str]        # tasks.md checkbox 清單，供 human_confirm 顯示（execute／review 自行讀檔，不注入）
     execution_result: str  # 執行節點的文字摘要（除錯／state-file；review 不注入，改讀 git diff 與 OpenSpec）
@@ -71,7 +87,8 @@ class AgentState(TypedDict):
     review_blocking: bool  # review_node 的最終路由結論：True → 重新規劃；False → 通過
     status: str            # "pending" | "needs_revision" | "error" | "confirmed" | "aborted"
     iteration: int         # 重試計數器（上限 3）
-    human_feedback: str    # 使用者在 human_confirm 拒絕計畫時填寫的修改意見
+    human_feedback: str    # 人工確認退回意見，或重跑 analyze_plan 取得的調整內容（兩者走同一條
+                           # 「依人工意見調整」路徑；見下方「調整」模式）
     change_name: str       # OpenSpec change 名稱（由 branch_name 轉 kebab-case）；任務開始時問一次，全程沿用
     branch_name: str       # 使用者指定的 git 分支（必填）；規劃／執行／審查／archive 都切到此分支
     domains: list[str]     # 本次 change 歸屬的 OpenSpec domain；初始規劃問一次後寫入 state.json，同一 change 再規劃時沿用
@@ -83,6 +100,8 @@ class AgentState(TypedDict):
                            # core/session.py 的 take_session()／store_session() 讀寫
     project_dir: str       # 本次任務對應的目標專案目錄（相對 workspace root）；由 analyze_plan
                            # 初始規劃時在呼叫 Claude 前決定，之後所有節點據此定位 openspec/changes/<change_name>/
+    stages: dict[str, str]        # 各工作階段狀態："pending"|"running"|"done"|"error"；見下方「網頁控制台」的「階段狀態」
+    stage_notes: dict[str, str]   # 階段附註（目前只有 "使用者中止"）
 ```
 
 每個節點讀取需要的欄位、寫入自己負責的欄位，節點之間**不直接呼叫彼此**，全部透過狀態字典溝通。
@@ -150,13 +169,13 @@ START
 
 ### 關鍵函式
 
-| 函式                    | 所在檔案      | 說明                                                                                  |
-| ----------------------- | ------------- | ------------------------------------------------------------------------------------- |
-| `route_after_confirm()` | `workflow.py` | 條件路由：`confirmed` → execute；`needs_revision` → replan；`aborted` / `error` → END |
-| `route_after_review()`  | `workflow.py` | 條件路由：只讀取 `review_node` 已判定好的 `review_blocking`（不再自行解析 review 文字）——`False`（通過）→ `archive_change`；`True` 且已達 iteration 上限 → END（放棄重試，不 archive）；其餘 → replan |
-| `increment_iteration()` | `workflow.py` | 增加重試計數，重設 status 為 `pending`                                                |
+| 函式                    | 所在檔案           | 說明                                                                                                                                                                                                         |
+| ----------------------- | ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `route_after_confirm()` | `workflow.py`      | 條件路由：`confirmed` → execute；`needs_revision` → replan；`aborted` / `error` → END                                                                                                                        |
+| `route_after_review()`  | `workflow.py`      | 條件路由：只讀取 `review_node` 已判定好的 `review_blocking`（不再自行解析 review 文字）——`False`（通過）→ `archive_change`；`True` 且已達 iteration 上限 → END（放棄重試，不 archive）；其餘 → replan        |
+| `increment_iteration()` | `workflow.py`      | 增加重試計數，重設 status 為 `pending`                                                                                                                                                                       |
 | `archive_node()`        | `nodes/archive.py` | review 通過後先問一次是否要 archive（`_ask_should_archive()`），同意才呼叫 `openspec_runner.archive_change()`（目標已存在則先把舊 archive 改名讓出）；純機械式動作，不佔用 Claude 呼叫，略過或失敗都只印警告 |
-| `build_workflow()`      | `workflow.py` | 編譯 `StateGraph`，回傳可執行的 app                                                   |
+| `build_workflow()`      | `workflow.py`      | 編譯 `StateGraph`，回傳可執行的 app                                                                                                                                                                          |
 
 常數 `MAX_ITERATIONS = 3`：超過後強制結束，避免無限迴圈。
 
@@ -187,13 +206,55 @@ domain／`openspec` 的 init／new change／validate 等機械式判斷全部由
 （或之後）處理，不再讓 Claude 自己用 Bash 判斷或執行——這樣既省下對應的 prompt 篇幅，也省下那些
 本可用一次函式呼叫解決、卻要在 agentic session 裡多繞一輪 Bash 工具呼叫的 token。
 
-**模式判斷（依 `AgentState` 欄位）：**
+**模式判斷（依 `AgentState` 欄位，依序判定）：** `is_rerun`（即 `state["start_from"] == "analyze_plan"`）
+只在使用者透過網頁重跑按鈕或命令列 `--node analyze_plan` 主動重跑時為真——`main.py` 的 `run_node()`
+在呼叫這個 node 前才設這個暫態欄位（不寫入 `state.json`），工作流內部因 review 退回自動回到
+`analyze_plan`（走 `increment` 節點）不會觸發。
 
-| 模式                    | 觸發條件                                     | 工具     | 模型 |
-| ----------------------- | -------------------------------------------- | -------- | ---- |
-| 初始規劃                | `review_result` 與 `human_feedback` 皆為空   | `plan`   | opus |
-| 重新規劃（review 觸發） | `review_result` 非空                         | `revise` | opus |
-| 依人工意見調整計畫      | `human_feedback` 非空且 `review_result` 為空 | `revise` | opus |
+| 順序 | 模式                        | 觸發條件                                                                    | 工具     | 模型 |
+| ---- | --------------------------- | ---------------------------------------------------------------------------- | -------- | ---- |
+| 1    | 已封存報錯                  | `is_rerun` 且該 change 已封存（見下方「已封存任務」）                        | 不呼叫 Claude | — |
+| 2    | 依人工意見調整計畫          | `human_feedback` 非空（含被中斷的調整，見下方「調整」模式的接回）             | `revise` | opus |
+| 3    | 重新規劃（review 觸發）     | `review_result` 非空且 `review_blocking` 為 `True`                          | `revise` | opus |
+| 4    | 調整                        | 不屬於以上任何一種，且 `is_rerun` 且 `analysis` 非空（已完成過規劃）          | `revise` | opus |
+| 5    | 已規劃但非重跑入口報錯      | 不屬於以上任何一種，且 `analysis` 非空但 `is_rerun` 為否（舊 `state.json` 或直接呼叫 node；正常路由不會出現） | 不呼叫 Claude | — |
+| 6    | 初始規劃                    | 不屬於以上任何一種（全新任務）                                                | `plan`   | opus |
+
+`is_replan` 因此定義為 `bool(review_result) and review_blocking`——只看 `review_result` 非空已不足夠：
+review 通過後 `review_result` 仍留著最後一份報告，若不檢查 `review_blocking` 會把「調整」誤判成
+「依審查結果重新規劃」。順序 3 命中、且 `is_rerun` 為真、`session_node`／`session_id` 插槽裡沒有屬於
+`analyze_plan` 的中斷 session 時，會先以選擇題問使用者「依審查結果重新規劃」或「輸入調整內容」
+（`_ask_rerun_mode()`，`interaction.ask(kind="choice")`；非互動式環境或使用者中止視為前者，維持
+既有行為）；選「輸入調整內容」就降級成順序 4 的調整模式。工作流內部自動回到 `analyze_plan`
+（`is_rerun` 為否）或已有可接回的 session 時，順序 3 不提問，直接重新規劃——這跟已中斷的調整
+（順序 2）接回不提問是同一個道理：那個答案只用來決定要不要問，問過一次之後的狀態已經記在
+`human_feedback`／`review_blocking` 裡，不需要再問一次。
+
+順序 4 要求 `is_rerun`，否則落入順序 5：已完成規劃但不是使用者主動重跑進來（工作流內部正常路由
+不會走到這裡，只有舊 `state.json` 或直接呼叫 `analyze_plan_node()` 才會遇到）直接
+`_fail("此 change 已完成規劃，請以重跑 analyze_plan 進行調整")`，不提問、不呼叫 Claude——避免掉進
+初始規劃後重問分支／spec／domain 並覆寫整份規格。
+
+**調整模式：** 順序 4 命中時，以必填文字題 `interaction.ask(kind="text", required=True)` 詢問
+「請輸入本次要調整的內容」（`_ask_adjustment()`；命令列空字串重問，`EOFError`/`KeyboardInterrupt`/
+非互動式環境視為 `status: "error"`，不呼叫 Claude、task 與規格皆不變）。取得內容後直接重用「依人工
+意見調整計畫」的 prompt 與工具（不新增第四份 `_SYSTEM`，見下方「三種 Prompt 版本」）：把內容寫進
+`human_feedback`、清空 `review_result`／`review_level`／`review_blocking`，並呼叫 `_append_adjustment()`
+把任務描述保留原文、附加一個空行與下一個編號的「調整 N：<內容>」（`N` 等於既有「調整 k：」行數
+加一）回寫進 `state["task"]`——這個更新後的 `task` 會出現在送給 Claude 的 prompt 裡（取代注入
+`<<HUMAN_FEEDBACK>>` 的那段修改意見本身只放本次新增內容），讓網頁任務列與之後 review 看到的需求
+描述累積全部調整歷史。成功完成後這個模式額外把 `iteration` 重設為 0，審查重試次數重新起算；若
+Claude 呼叫中途被中斷，`_fail()` 回傳的 `task`／`human_feedback`／session id 照常存進
+`state.json`，下次重跑命中順序 2（`human_feedback` 已非空），不再詢問、不再附加，直接以
+`call_resuming()` 接回同一個 session。
+
+**已封存任務：** 順序 1 命中時直接 `_fail("此 change 已封存，請以新任務進行後續修改")`，不呼叫任何
+`interaction.ask()`。判定邏輯 `_is_archived_change()` 委派給 `lib/openspec_runner.is_change_archived()`：
+`openspec/changes/archive/` 底下有名稱為 `<change_name>` 或以 `-<change_name>` 結尾的目錄，且
+`openspec/changes/<change_name>/` 當前不存在，才視為已封存——不能用 `archive_destination_name()`，
+它組出來的名稱前面加的是「今天」的日期，對已經封存在過去日期資料夾下的 change 永遠比對不上。
+這份規則放在 `lib` 層而非寫死在節點裡，是因為網頁任務列（`web/repo_view.py` 的 `_is_archived()`）
+共用同一個函式——否則「網頁看得到的任務」跟「重跑會被判定已封存的任務」容易兜不起來。
 
 `rollback`／`openspec` init／new change／validate 皆已搬到 Python（見下），三種模式都不再需要
 `Bash` 才能完成規劃，`claude_runner.TOOL_PRESETS` 因此新增／調整了兩個 preset：`plan`
@@ -220,15 +281,37 @@ domain／`openspec` 的 init／new change／validate 等機械式判斷全部由
 OpenSpec change 位置，不需要各自重新判斷；`archive_node` 單獨執行（沒有 state 可讀）時也是同樣
 直接採用 `TARGET_PROJECT`，見 `nodes/archive.py` 的 `_resolve_location()`。
 
-確認 `branch_name`／`project_dir` 後，規劃／執行／審查／archive 都會透過 `git_ops.ensure_on_branch()`
-切到該分支（已存在則 `checkout`，不存在則 `checkout -b` 從目前 HEAD 建立）——這一步在呼叫 Claude
-之前就完成，不再讓 Claude 自己 checkout。
+確認 `branch_name`／`project_dir` 後，執行／審查／archive，以及初始規劃時工作分支本地已存在的情況，
+都會透過 `git_ops.ensure_on_branch()` 切到該分支（已存在則 `checkout`，不存在則 `checkout -b` 從目前
+HEAD 建立）——這一步在呼叫 Claude 之前就完成，不再讓 Claude 自己 checkout。
+
+**初始規劃、且工作分支本地不存在時，改為讓使用者選擇起點分支並先同步：** 這一步只發生在初始規劃
+（`execute`／`review`／`archive` 切到既有分支時不會觸發，因為那時工作分支必然已存在）。流程在原本
+呼叫 `ensure_on_branch()` 之前先用 `git_ops.branch_exists()` 判斷工作分支是否已存在，不存在才走這條
+路徑：
+
+1. `_ask_base_branch()` 用 `git_ops.list_local_branches()` 列出目標專案全部本地分支（依名稱排序），
+   以 `interaction.numbered()` 組成「編號. 分支名稱」選項，目前所在分支加註「（目前分支）」，以選項題
+   （`kind="choice"`）提問「要從哪個分支建立 `<branch_name>`？」——網頁上每個本地分支各顯示為一顆
+   按鈕，另保留自訂輸入框。直接 Enter／自訂輸入框留空送出或非互動式環境採用目前分支（detached HEAD
+   時直接 Enter 要重問，非互動式環境則直接回傳空字串）；輸入非清單內編號會提示後重問；使用者中止
+   （EOF／Ctrl-C）回傳空字串，呼叫端 `_fail()` 記為錯誤，不建立工作分支、不呼叫 Claude
+2. 取得起點分支後呼叫 `git_ops.create_branch_from(project_dir, branch_name, base_branch)`：
+   `checkout base_branch` → 用 `rev-parse --abbrev-ref --symbolic-full-name @{u}` 判斷有無 upstream
+   →有則 `pull --ff-only`（失敗或逾時都回傳 `(False, 訊息)`，停在 `base_branch` 上，不建立
+   `branch_name`；沒有 upstream 則印出「起點分支 `<base>` 未設定 upstream，略過 git pull」直接略過
+   這步）→ 同步成功（或略過）後 `checkout -b branch_name`
+3. 失敗（切換起點分支失敗、`git pull` 失敗或逾時）時 `_fail(f"無法建立分支 {branch_name}：{msg}")`，
+   錯誤說明包含工作分支名稱與 git 回報的原因，工作分支不會被建立，系統不進入規格撰寫
+
+起點分支只在這次呼叫內使用，不寫進 `AgentState`——後續節點只需要 `branch_name`，不需要知道當初從哪個
+分支建立。
 
 **Domain 歸屬確認、`openspec init`／`new change`（皆已搬到 Python，呼叫 Claude 之前完成）：**
 初始規劃在 `ensure_on_branch()` 之後、組 prompt 之前，依序執行：
 
 1. `openspec_runner.ensure_initialized()`：`<目標專案>/openspec/` 不存在才執行一次性
-   `openspec init --tools claude --force`，已存在則直接略過
+   `openspec init --tools none --force`（只建目錄，不安裝 workflow skill），已存在則直接略過
 2. Domain 歸屬：先 `_recover_domains()`——依序看當前 `AgentState["domains"]`、同 change 的
    `.agentloop/changes/<change_name>/state.json`、`openspec/changes/<change_name>/specs/`、
    以及（change 已被 archive 時）`openspec/changes/archive/<YYYY-MM-DD-name>/specs/`。
@@ -238,7 +321,9 @@ OpenSpec change 位置，不需要各自重新判斷；`archive_node` 單獨執�
    `<目標專案>/openspec/specs/` 底下既有的 domain（資料夾名稱）；沒有既有 domain 時不提問，直接
    視為新建 domain。有既有 domain 時在終端機列出清單 + 一個「以上皆非，建立新 domain」選項，讓
    使用者輸入編號選擇本次規格 delta 歸屬哪個（可用逗號輸入多個編號，對應「同一任務涉及多個既有
-   domain」的情況）；非互動式環境預設視為新建 domain。選定的既有 domain 名稱清單會組進 system
+   domain」的情況）；非互動式環境預設視為新建 domain。送給 `interaction.ask()` 的 `options` 一律是
+   「編號. 文字」格式（例如「1. web-gui」「2. 以上皆非，建立新 domain」），讓網頁模式的選項按鈕能把
+   編號交給工作流，效果與終端輸入同一編號相同。選定的既有 domain 名稱清單會組進 system
    prompt 的 `_DOMAIN_CONTEXT_EXISTING` 區塊（只給名稱；`## Purpose` 的寫法在 `openspec-authoring` skill）。回傳空清單（確定是
    純粹新建 domain：沒有既有 domain，或使用者選了「建立新 domain」）時，額外呼叫
    `_ask_domain_purpose()` 讓使用者選填這個新 domain 的 Purpose 文字；有填就用
@@ -249,7 +334,7 @@ OpenSpec change 位置，不需要各自重新判斷；`archive_node` 單獨執�
    「確定會建立新 domain」時才問。規劃成功後把名稱寫進 `AgentState["domains"]`；若當次是「新
    domain 且名稱由 Claude 自訂」，改從 change 資料夾的 `specs/` 回填
 3. `openspec_runner.ensure_change_created()`：change 資料夾不存在才執行 `openspec new change
-   <name>`，已存在則直接略過
+<name>`，已存在則直接略過
 
 這三步都不再透過 Claude 的 Bash 呼叫執行，Claude 收到的 system prompt 直接是已確定的結果
 （「目標專案與 Domain」區塊），不需要再探索或提問。domain 提問只在初始規劃且還原不出上次歸屬
@@ -296,13 +381,20 @@ validate 的錯誤修正也接到同一套「有問題就等使用者、否則�
 - **初始規劃 / 依人工意見調整計畫**：完整 grilling 流程——依 grilling 逐一提問，過程中依 domain-modeling 即時更新 `CONTEXT.md` / `docs/adr/`。初始規劃在強制三項還寫不出來時繼續問（三項的內容與「不是任務原句複述」以 skill 為準）；依人工意見調整時只在意見影響這些項時才重問，不重跑完整 Specine 清單
 - **重新規劃（review 觸發）**：**只針對 review 結果 grill**——針對審查標記的每個問題點逐一提出質疑性問題（判斷是否成立、修正方向如何取捨），不要求重新走一遍完整的 grilling 釐清或 Specine 清單，也不強制 domain-modeling 文件同步；更新規格時仍須維持強制三項（寫在哪個欄位以 skill 為準）
 
-**三種 Prompt 版本：**
+**三種 Prompt 版本：**（調整模式刻意不新增第四份 `_SYSTEM`，重用 `_SYSTEM_HUMAN_REVISE`——見上方「調整
+模式」；`<<HUMAN_FEEDBACK>>` 只放本次調整內容，累積的調整歷史靠 `<<PROJECT_CONTEXT>>` 之後注入的
+「任務：」那行帶上附加過的完整 `task`）
 
-| 版本                   | 用途                                                                                                                                                                               |
-| ---------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 版本                   | 用途                                                                                                                                                                                                                                                                                                                               |
+| ---------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `_SYSTEM_INITIAL`      | 全新任務規劃：Read/Glob/Grep 探索 → grilling 互動釐清（同步 domain-modeling；grill 結果須含 Specine 強制三項）→ 依「OpenSpec 產出規則」撰寫 proposal.md / specs delta / tasks.md（非小改動時另寫 design.md）於系統已建好的 change 資料夾（目標專案／domain／`openspec init`／`new change` 皆已由 Python 事先確認並附在 prompt 裡） |
-| `_SYSTEM_REPLAN`       | 帶入 `<<REVIEW_CONTEXT>>`（`review_result`，截斷至最後 3000 字）與 `<<REVIEW_LEVEL>>`；依「重寫／修補」分流見上（rollback 已由 Python 事先完成），並用專屬的 `_REVIEW_QUESTION_PROTOCOL` 針對 review 結果逐點 grill；沿用既有 change，不重新 `openspec new change` |
-| `_SYSTEM_HUMAN_REVISE` | 帶入 `<<HUMAN_FEEDBACK>>`（`human_confirm` 收到的使用者修改意見）：理解意見（不夠明確則提問）→ 視需要重讀程式碼 → 視需要更新 domain-modeling → 更新既有 change 的規格文件            |
+| `_SYSTEM_REPLAN`       | 帶入 `<<REVIEW_CONTEXT>>`（`review_result`，截斷至最後 3000 字）與 `<<REVIEW_LEVEL>>`；依「重寫／修補」分流見上（rollback 已由 Python 事先完成），並用專屬的 `_REVIEW_QUESTION_PROTOCOL` 針對 review 結果逐點 grill；沿用既有 change，不重新 `openspec new change`                                                                 |
+| `_SYSTEM_HUMAN_REVISE` | 帶入 `<<HUMAN_FEEDBACK>>`（`human_confirm` 收到的使用者修改意見，或重跑 analyze_plan 取得的調整內容）：理解意見（不夠明確則提問）→ 視需要重讀程式碼 → 視需要更新 domain-modeling → 更新既有 change 的規格文件                                                                                                                   |
+
+三份 `_SYSTEM` 共用的 `_ANALYZE_PROHIBITIONS` 區塊裡有一條雙向的勾選限制：**不得變更 `tasks.md`
+任何勾選狀態**——完成標記只由 `execute` node 在實作後即時更新；analyze 階段不論哪個模式都只能新增
+或改寫 `- [ ]`，既有 `- [x]` 維持原文。這條規則只寫在共用區塊一次（遵守「Keep prompts from
+growing」），不在個別 `_SYSTEM` 裡重複描述。
 
 **輸出格式與解析邏輯：**
 
@@ -353,7 +445,7 @@ validate 的錯誤修正也接到同一套「有問題就等使用者、否則�
     - **Scenario 對應行為分支，不列舉資料變體**：每個 Scenario 必須對應一個不同的行為結果、政策或約束（通常是不同的 GIVEN 或 WHEN）；同一條規則套不同輸入資料不另開 Scenario，合進範例或 GIVEN 前提。同一 Requirement 底下第一個 GIVEN＋WHEN 都相同的 Scenario 必須合併——列出同一個集合的成員（tab 列有哪些標籤、表格有哪些欄）是一條「初始化組成」規則，不是不同分支。集合變大時改寫既有初始化 Scenario（含寫死「單一／僅含一個」的舊標題），禁止留下舊條再並列一條「同時包含 Y」。真正不同分支才另開（例如點擊切換 tab、切換語系）
     - **API 欄位名稱分前後端**：前端消費端禁止把 endpoint path、request/response 欄位名稱寫進 spec（改用業務描述，欄位名稱留給 `design.md`）；但當本次交付物本身就是 API 合約（`backend-api` 類型專案，或任務明確指出要定義 endpoint／改 response schema）時，這些就是對外承諾、屬於可觀察輸出，可直接寫進 SHALL/MUST 與 Scenario 的 THEN
   - `tasks.md`：`## N. <群組>` + `- [ ] N.M <任務>` checkbox、階層編號——這份檔案本身就是任務清單；`execute` 與 `review` 都自行 Read 完整 change 資料夾（不從 `state["plan"]` 注入扁平清單），`execute` 逐項勾選、`review` 核對完成度
-    - **測試刪除任務必須明確列出**：`MODIFIED` 後某些 Scenario 標題不再出現於新版本，要排「移除 `<消失的 Scenario 標題>` 測試」；`REMOVED` 整條 Requirement，要排 Requirement 層級的「移除相關測試」，**並**為其下每個 Scenario 各排一個「移除 `<Scenario 標題>` 測試」。因為 Scenario 標題就是測試函式名稱，`execute` 完全依賴 tasks.md 定位該刪哪些測試；沒列出來的測試會殘留，而殘留的舊測試會讓 `review` 的 Spec 追溯誤判
+    - **測試刪除任務必須明確列出**：`MODIFIED` 後某些 Scenario 標題不再出現於新版本，要排「移除 `<消失的 Scenario 標題>` 測試」；`REMOVED` 整條 Requirement，要排 Requirement 層級的「移除相關測試」，**並**為其下每個 Scenario 各排一個「移除 `<Scenario 標題>` 測試」。`execute` 依 tasks.md 裡的 Scenario 標題原字串，在該測試本體裡定位該刪的測試；沒列出來的測試會殘留，而殘留的舊測試會讓 `review` 的 Spec 追溯誤判
   - Claude 完成撰寫、`_run_with_grilling()` 的問答迴圈結束後，`_run_with_validate()` 呼叫
     `openspec_runner.validate_change()` 執行 `openspec validate <change-name> --json --strict`：
     只有 `ERROR` 等級的 issue 會擋下（`WARNING` 不阻擋），有的話把訊息組進一則新 prompt、用
@@ -369,7 +461,7 @@ validate 的錯誤修正也接到同一套「有問題就等使用者、否則�
 
 **行為：**
 
-- 列印分析摘要、TASK 清單（含數量）、OpenSpec change 路徑與工作分支
+- 列印分析摘要、執行計畫（含數量；逐行印出 tasks.md checkbox 原文，沿用其 1.1、2.1 階層編號，不另加序號）、OpenSpec change 路徑與工作分支
 - 偵測到非互動式 stdin（如管道重導向）時自動中止，避免無限等待
 - 輸入 `y`（不區分大小寫、忽略空白；`yes` 亦可）→ 返回 `status: "confirmed"` → 工作流程繼續至 `execute`
 - 輸入非 `y` 後，再輸入修改意見（非空白）→ 返回 `status: "needs_revision"` + `human_feedback` → 回到 `analyze_plan` 重新規劃
@@ -389,7 +481,7 @@ validate 的錯誤修正也接到同一套「有問題就等使用者、否則�
 **執行前準備（必須完成）：**
 
 1. Python 先用 `git_ops.ensure_on_branch()` 把目標專案切到 `state["branch_name"]`（已存在則 checkout，不存在則建立）；失敗則 `status: "error"`，不呼叫 Claude
-2. Read `openspec/changes/<change_name>/` 下的 proposal.md、specs/**/*.md、tasks.md（若有 design.md 一併讀取）。規格、驗收條件與任務清單以這些檔案為準，**不**把 `state["plan"]` 扁平清單貼進 prompt，也 **不**注入 `state["task"]`（原始使用者描述只給規劃用；execute 的工作範圍就是 change 資料夾，再貼一次會讓它重新診斷原始問題、略過 tasks.md 已收斂的剩餘項）
+2. Read `openspec/changes/<change_name>/` 下的 proposal.md、specs/**/\*.md、tasks.md（若有 design.md 一併讀取）。規格、驗收條件與任務清單以這些檔案為準，**不**把 `state["plan"]` 扁平清單貼進 prompt，也 **不\*\*注入 `state["task"]`（原始使用者描述只給規劃用；execute 的工作範圍就是 change 資料夾，再貼一次會讓它重新診斷原始問題、略過 tasks.md 已收斂的剩餘項）
 3. 依 `project_context.build_project_doc_hint_for(project_dir)` 指名的目標專案，Read 讀取其 `CLAUDE.md` / `AGENT.md`，了解架構、指令（測試、lint、build 等）、目錄慣例、程式碼規範與技術棧；找不到說明檔則自行 Read/Glob/Grep 探索並比對現有風格
 4. 依偵測到的技術棧，**自行**從可用的 skills 中挑選並使用適合的其他 skill（例如 Vue 專案適用 `vue-best-practices`、Nuxt + Vitest 專案適用 `nuxt-vitest-msw`）——不寫死任何特定技術棧的 skill 清單。這些完全不經過 `skill_loader.py`，靠 Claude Code 自己原生的 skill 探索機制（只認執行者 `$HOME/.claude/skills/`，見下方「Skill 系統作為知識注入」）；`tdd` 已固定完整注入（見下方「注入的 Skills」），不需要另外挑選
 5. 若該專案 `docs/` 目錄存在，讀取其下所有現有文件，了解商業邏輯說明；`docs/` 目錄不存在時不需自行建立
@@ -429,8 +521,8 @@ validate 的錯誤修正也接到同一套「有問題就等使用者、否則�
 **Timeout：** 600 秒（每次嘗試）
 
 **Spec ↔ 測試追溯：由 Python 在呼叫 Claude 之前跑完（`_run_spec_trace_check()`）。** 抽出該 change
-`specs/**/*.md` 裡所有 `#### Scenario:` 標題，逐一 `grep -r` 目標專案原始碼找有無名稱完全相同的
-`describe`／`test`（限常見測試語言的副檔名，排除 `node_modules`／`dist`／`build`／`.next`）。這件事
+`specs/**/*.md` 裡所有 `#### Scenario:` 標題，逐一 `grep -r` 目標專案原始碼找完全相同的文字
+（限常見原始碼副檔名，排除 `node_modules`／`dist`／`build`／`.next`）。這件事
 原本是 `_SYSTEM` 的一條指示，要 Claude 自己列標題、自己 grep、自己把缺漏當成阻塞性問題——身為自然
 語言指示，它完全依賴 Claude 真的照做，實測出現過「有 Scenario 根本沒有對應測試，卻仍回報
 `Ready to merge? Yes`」的情況。搬到 Python 之後，結果是算出來的而不是請求來的。
@@ -482,7 +574,7 @@ skill 全文、兩輪 sub-agent 往返、額外驗證步驟之後的深層決策
 異動與規格都以檔案為準，prompt **不**注入 `state["plan"]` 扁平清單，也 **不**注入 `execution_result`。fixed point（固定為 `HEAD`）與 spec 來源（OpenSpec change 資料夾）由本節點參數提供給 `code-review` skill，不經由 skill 自己詢問使用者或找 issue tracker——這兩步在 `AgentLoop/.claude/skills/code-review/SKILL.md` 這份專案內建副本裡已經直接拿掉（見下方「Skill 系統作為知識注入」的說明）。
 
 - **Fixed point**：本次修改尚未 commit，固定為 `HEAD`（`git diff HEAD` 取得完整異動，不用三點 diff）
-- **Spec 來源**：`<project_dir>/openspec/changes/<change_name>/`（`AgentState["project_dir"]`/`["change_name"]` 組成的路徑）——Read 讀取其下 proposal.md / tasks.md / specs/**/*.md（若有 design.md 一併讀取；小改動可能沒有此檔，不視為缺漏），也可用 `openspec show <change_name> --json` 快速確認結構；若該 change 已被前一輪迭代 archive，改讀 `<project_dir>/openspec/specs/` 下對應 domain 的 spec.md
+- **Spec 來源**：`<project_dir>/openspec/changes/<change_name>/`（`AgentState["project_dir"]`/`["change_name"]` 組成的路徑）——Read 讀取其下 proposal.md / tasks.md / specs/\*_/_.md（若有 design.md 一併讀取；小改動可能沒有此檔，不視為缺漏），也可用 `openspec show <change_name> --json` 快速確認結構；若該 change 已被前一輪迭代 archive，改讀 `<project_dir>/openspec/specs/` 下對應 domain 的 spec.md
 - **Standards 來源**：依 `project_context.build_project_doc_hint_for(project_dir)` 指名的目標專案，讀取其 `CLAUDE.md` / `AGENT.md`，以及其中提及或專案根目錄下的 `CODING_STANDARDS.md` / `CONTRIBUTING.md`（若有）
 - 其餘仍依 skill：Fowler smell baseline、平行 sub-agent、以 `## Standards` / `## Spec` 並陳報告
 
@@ -531,7 +623,7 @@ SUGGESTION 2: [建議內容與理由]
 | **重寫** | 核心邏輯錯誤、架構根本偏差、多個互相關聯的根本性問題、TASK 大量未完成 |
 | **修補** | 小 bug、測試失敗、遺漏文件同步、個別 TASK 未完成、小幅修正            |
 
-其餘不影響功能正確性的問題（風格、可讀性、效能微調等）一律回答 `Yes`，改列在 `SUGGESTION n:` 建議清單中，交由人工決定：`review_node` 會逐條印出建議、在終端機提示輸入要修改的編號（`1,3`／`all`／直接 Enter 表示不修改）；非互動式環境預設不修改任何建議。人工選中至少一條時才視為需要重新規劃（`review_level` 一律標記「修補」，並把選中的建議附加在 `review_result` 末尾的「人工確認：選定修改的建議事項」小節，供 `analyze_plan` 重新規劃時只針對這些點 grill）；未選中任何建議或無建議可選時直接視為通過。
+其餘不影響功能正確性的問題（風格、可讀性、效能微調等）一律回答 `Yes`，改列在 `SUGGESTION n:` 建議清單中，交由人工決定：`review_node` 會逐條印出建議，以 `kind="multi_choice"` 詢問要修改哪些——提問文字依 `interaction.is_web_mode()` 分流：網頁控制台顯示「請勾選要修改的建議後按送出（未勾選＝不修改）」，終端機顯示原字串「請輸入要修改的建議編號（例如 1,3；all=全部；留空＝不修改）」；網頁控制台為每條建議顯示一個勾選框、一個「全選」勾選切換與一個「送出」按鈕，勾選本身不送出，按下「送出」才把已勾選編號依數字遞增排序、以半形逗號串接（未勾選送空字串）交回，與終端機輸入同一字串（例如 `1,3`／`all`／留空）的結果相同；非互動式環境預設不修改任何建議。人工選中至少一條時才視為需要重新規劃（`review_level` 一律標記「修補」，並把選中的建議附加在 `review_result` 末尾的「人工確認：選定修改的建議事項」小節，供 `analyze_plan` 重新規劃時只針對這些點 grill）；未選中任何建議或無建議可選時直接視為通過。
 
 **路由結論：** 以上兩種情況（嚴重問題 / 人工選中建議）都會把 `review_blocking` 設為 `True`，交由 `route_after_review` 讀取決定是否重新規劃；其餘情況 `review_blocking` 為 `False`，直接結束流程。
 
@@ -566,7 +658,7 @@ python -m AgentLoop.search "advanced protection 的規格是什麼？"
 python -m AgentLoop.search --reindex "query"   # 強制重建索引後再搜尋
 ```
 
-**所需 env var：** `TARGET_PROJECT`（同主流程）；`ANTHROPIC_API_KEY` 設定時用 Python SDK，未設定時 fallback 到容器 OAuth (`claude` CLI)。可用 `SEARCH_MODEL` 覆蓋模型（`haiku`/`sonnet`/`opus`/`fable`，解析同 `claude_runner.MODEL_IDS`），預設 `haiku`。
+**所需 env var：** `TARGET_PROJECT`（同主流程）；`ANTHROPIC_API_KEY` 設定時用 Python SDK，未設定時 fallback 到容器 OAuth (`claude` CLI)。模型固定使用 `claude_runner.MODEL_IDS["haiku"]`，不再支援 `SEARCH_MODEL` 覆蓋。
 
 **索引生命週期：**
 
@@ -603,7 +695,8 @@ embedding 模型輸出 L2 正規化後的 384 維向量，存為 `float[384]` bl
 
 每個節點讀取前一個節點填入的欄位，再將自己的輸出寫入對應欄位，例如：
 
-- `analyze_plan` → 填入 `analysis`、`plan`、`change_name`、`branch_name`、`project_dir`、`domains`、`skip_specs`
+- `analyze_plan` → 填入 `analysis`、`plan`、`change_name`、`branch_name`、`project_dir`、`domains`、`skip_specs`；
+  調整模式另外改寫 `task`（附加「調整 N：」）並把 `iteration` 重設為 0
 - `human_confirm` → 填入 `status`（`"confirmed"` / `"needs_revision"` + `human_feedback` / `"aborted"`）
 - `execute` → 填入 `execution_result`、`status`
 - `review` → 填入 `review_result`、`review_level`、`review_blocking`、`status`
@@ -618,13 +711,13 @@ embedding 模型輸出 L2 正規化後的 384 維向量，存為 `float[384]` bl
 
 ### 3. 檔案系統作為共享記憶
 
-| 產出物   | 路徑                                     | 讀寫者                                      |
-| -------- | ---------------------------------------- | ------------------------------------------- |
+| 產出物          | 路徑                                                                                                                                                                              | 讀寫者                                                                                                                                            |
+| --------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
 | OpenSpec Change | `<project_dir>/openspec/changes/<change_name>/`（`proposal.md`/`tasks.md`/`specs/**/*.md`，非小改動時另有 `design.md`；`<project_dir>`/`<change_name>` 為 `AgentState` 對應欄位） | `analyze_plan` 寫；`human_confirm` 讀 proposal.md + tasks.md 供顯示；`execute` 讀完整 change 後實作並勾選 tasks.md；`review`、`archive_change` 讀 |
-| 持久規格 | `<project_dir>/openspec/specs/<domain>/spec.md` | `archive_change` 呼叫 `openspec archive` 合併寫入，跨任務累積 |
-| 審查結果 | `<project_dir>/.agentloop/changes/<change_name>/state.json` 的 `review_result` 欄位 | `review` 執行後由 `_save_state()` 寫入；`analyze_plan` 重新規劃時從 `AgentState` 讀取 |
-| AgentLoop State | `<project_dir>/.agentloop/changes/<change_name>/state.json`（`AgentState` 去除 `project_dir` 的 JSON 序列化；每個 node 結束後自動覆蓋） | `main.py` 寫（`_save_state()`）；`--node` 模式下作為入口 state 載入，`project_dir` 在載入時由 `TARGET_PROJECT` 環境變數補回 |
-| 業務文件 | 各偵測到專案的 `docs/` 目錄              | `execute` 寫，`review` 驗證                 |
+| 持久規格        | `<project_dir>/openspec/specs/<domain>/spec.md`                                                                                                                                   | `archive_change` 呼叫 `openspec archive` 合併寫入，跨任務累積                                                                                     |
+| 審查結果        | `<project_dir>/.agentloop/changes/<change_name>/state.json` 的 `review_result` 欄位                                                                                               | `review` 執行後由 `_save_state()` 寫入；`analyze_plan` 重新規劃時從 `AgentState` 讀取                                                             |
+| AgentLoop State | `<project_dir>/.agentloop/changes/<change_name>/state.json`（`AgentState` 去除 `project_dir` 的 JSON 序列化；每個 node 結束後自動覆蓋）                                           | `main.py` 寫（`_save_state()`）；`--node` 模式下作為入口 state 載入，`project_dir` 在載入時由 `TARGET_PROJECT` 環境變數補回                       |
+| 業務文件        | 各偵測到專案的 `docs/` 目錄                                                                                                                                                       | `execute` 寫，`review` 驗證                                                                                                                       |
 
 ### 4. Git Diff 作為稽核媒介
 
@@ -669,7 +762,7 @@ Iteration 2:
 | 名稱       | 工具                                | 用途                                                                       |
 | ---------- | ----------------------------------- | -------------------------------------------------------------------------- |
 | `readonly` | Read, Glob, Grep                    | 安全探索                                                                   |
-| `plan`     | Read, Write, Glob, Grep             | 建立文件（`analyze_plan` 初始規劃，只新增檔案）                           |
+| `plan`     | Read, Write, Glob, Grep             | 建立文件（`analyze_plan` 初始規劃，只新增檔案）                            |
 | `revise`   | Read, Write, Edit, Glob, Grep       | 編輯既有文件（`analyze_plan` 重新規劃／依人工意見調整，不需要 `Bash`）     |
 | `full`     | Read, Write, Edit, Bash, Glob, Grep | 完整程式碼修改（`execute`）                                                |
 | `check`    | Read, Glob, Grep, Bash              | 驗證，不修改檔案                                                           |
@@ -755,23 +848,26 @@ MODEL_IDS = {
 
 ### Python 層
 
-| 技術              | 版本    | 用途                                        |
-| ----------------- | ------- | ------------------------------------------- |
-| **LangGraph**     | ≥0.2.0  | StateGraph 工作流程編排、條件路由、節點串接 |
-| **python-dotenv** | ≥1.0.0  | 讀取 `.env` 環境變數                        |
-| **fastembed**     | ≥0.2.6  | 本地 ONNX embedding 推論（`search.py` 用）  |
-| **sqlite-vec**    | ≥0.1.0  | SQLite 向量搜尋擴充（`search.py` 用）       |
-| **anthropic**     | ≥0.40.0 | Anthropic Python SDK（`search.py` RAG 用）  |
-| **Python**        | 3.11    | 執行環境                                    |
+| 技術              | 版本     | 用途                                        |
+| ----------------- | -------- | ------------------------------------------- |
+| **LangGraph**     | ≥0.2.0   | StateGraph 工作流程編排、條件路由、節點串接 |
+| **python-dotenv** | ≥1.0.0   | 讀取 `.env` 環境變數                        |
+| **fastembed**     | ≥0.2.6   | 本地 ONNX embedding 推論（`search.py` 用）  |
+| **sqlite-vec**    | ≥0.1.0   | SQLite 向量搜尋擴充（`search.py` 用）       |
+| **anthropic**     | ≥0.40.0  | Anthropic Python SDK（`search.py` RAG 用）  |
+| **fastapi**       | ≥0.115.0 | 網頁控制台 HTTP API（`web/app.py`）         |
+| **uvicorn**       | ≥0.30.0  | ASGI 伺服器，容器 CMD 直接啟動              |
+| **httpx**         | ≥0.27.0  | FastAPI `TestClient` 依賴                   |
+| **Python**        | 3.11     | 執行環境                                    |
 
 ### Claude Code CLI 層
 
-| 技術                                              | 說明                                                                           |
-| ------------------------------------------------- | ------------------------------------------------------------------------------ |
-| **Claude Code CLI** (`@anthropic-ai/claude-code`) | 以 `claude -p` 啟動 Agent，使用本地身份驗證（不需要 API Key）；容器內有獨立於 host 的登入狀態，見下方「Claude 設定掛載」 |
-| **stream-json output**                            | 即時串流 JSON 事件，支援 `assistant`、`tool_use`、`tool_result`、`result` 類型 |
-| **Built-in Tools**                                | Read、Write、Edit、Bash、Glob、Grep、Task（Claude Code 原生工具）              |
-| **Skill System**                                  | `AgentLoop/.claude/skills/`（專案內建，優先）或 `~/.claude/skills/`（fallback）中的 Markdown 文件，動態注入 Agent 系統提示 |
+| 技術                                              | 說明                                                                                                                                                                                                                                                                     |
+| ------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **Claude Code CLI** (`@anthropic-ai/claude-code`) | 以 `claude -p` 啟動 Agent，使用本地身份驗證（不需要 API Key）；容器內有獨立於 host 的登入狀態，見下方「Claude 設定掛載」                                                                                                                                                 |
+| **stream-json output**                            | 即時串流 JSON 事件，支援 `assistant`、`tool_use`、`tool_result`、`result` 類型                                                                                                                                                                                           |
+| **Built-in Tools**                                | Read、Write、Edit、Bash、Glob、Grep、Task（Claude Code 原生工具）                                                                                                                                                                                                        |
+| **Skill System**                                  | `AgentLoop/.claude/skills/`（專案內建，優先）或 `~/.claude/skills/`（fallback）中的 Markdown 文件，動態注入 Agent 系統提示                                                                                                                                               |
 | **OpenSpec CLI** (`@fission-ai/openspec`)         | 規格文件遵照的 change/spec-delta 規則來源；`openspec_runner.py` 是唯一跟這個 CLI 對話的模組，`analyze_plan` 用它 `init`/`new change`/`validate`，`archive_change` 節點用它 `archive`——皆由 Python 直接呼叫，不透過 Claude 的 Bash 工具。同樣透過容器內的 Node.js 22 安裝 |
 
 ### 目標專案技術棧
@@ -782,13 +878,14 @@ MODEL_IDS = {
 
 AgentLoop 容器本身不跑 Docker daemon，而是讓容器內的 Docker CLI 透過掛載進來的 host `docker.sock` 直接操控**宿主**的 Docker engine——因此容器內執行的 `docker` / `docker compose` 指令，實際上是宿主 daemon 在執行，其建立的所有 bind mount 也以宿主上的路徑為準。這讓 Agent 能在容器內對任一目標專案執行 `docker compose up / exec` 等指令來啟動服務、跑測試，而不需要在 AgentLoop 容器內重新起一顆 daemon（DinD）。
 
-| 技術                            | 說明                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
-| ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Docker**                      | 以 `python:3.11-slim` 為基底，加裝 Node.js 22 執行 Claude Code CLI（`@anthropic-ai/claude-code@2.1.285`；`claude-opus-5-5` 等新模型要求 CLI ≥ 2.1.280，該版宣告 Node ≥ 22），並加裝 `docker-ce-cli` + `docker-compose-plugin`（僅 CLI，不含 daemon）                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
-| **Docker Compose 路徑掛載**     | AgentLoop 與目標專案一律以「與 host 相同的絕對路徑」掛載（`${HOST_WORKSPACE_ROOT}/AgentLoop:${HOST_WORKSPACE_ROOT}/AgentLoop`、`${HOST_WORKSPACE_ROOT}/${TARGET_PROJECT}:${HOST_WORKSPACE_ROOT}/${TARGET_PROJECT}`），而非重新映射到 `/workspace/...`。原因：宿主 daemon 幫目標專案建立 bind mount 時，用的是掛載路徑「字串本身」，該字串必須在宿主上真實存在，否則會掛到空目錄。目標專案資料夾名稱由 `.env` 的 `TARGET_PROJECT` 決定（目前範例值為 `cdn_frontend_vue`）；`project_context.py` 的動態偵測邏輯本身不寫死任何專案名稱。只支援單一目標專案，不提供多專案掛載的擴充方式 |
-| **`/var/run/docker.sock` 掛載** | `- /var/run/docker.sock:/var/run/docker.sock`，讓容器內 Docker CLI 連上宿主 daemon（DooD 的核心）                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
-| **Claude 設定掛載** | 分兩塊，刻意分開：(1) 登入狀態（`.claude/` 其餘內容、`.claude.json`）掛在容器專屬的 `agent_home` named volume（`- agent_home:/home/agent`），**不**與 host 共用——原因是若直接掛載 host 的 `~/.claude`，host 與容器內的 `claude` subprocess 會共用同一份 OAuth 憑證檔，兩邊同時使用時 token refresh 互搶，會導致容器內 node 執行到一半認證失效、或剛啟動時讀到寫入中的檔案顯示未登入；因此改為另外設定認證——首選在 host 執行 `claude setup-token`，將產出的 token 寫入 `.env` 的 `CLAUDE_CODE_OAUTH_TOKEN`（或改設 `ANTHROPIC_API_KEY`）；容器內互動式 `claude login` 仍可用但非首選，因為 `docker exec -it` 的嵌套 TTY 貼授權碼常因 paste 截斷或過期顯示 `Invalid code`。登入狀態隨 volume 持久化，容器重建不會遺失。(2) skills 內容：本專案用到的 skill 已直接複製進 `AgentLoop/.claude/skills/` 隨專案版控、不再依賴掛載即可運作；host 的 `${HOME}/.claude/skills:/home/agent/.claude/skills:ro` 與 `${HOME}/.agents:/home/agent/.agents:ro`（純靜態、無寫入需求）仍保留唯讀掛載，作為 `skill_loader.py` 的 fallback 來源，供 Agent 依偵測到的技術棧動態選用專案未內建的其他 skill（`~/.claude/skills` 底下多為指向 `~/.agents/skills` 的符號連結，需一併掛載才能解析）。`working_dir: ${HOST_WORKSPACE_ROOT}` |
-| **非 root 使用者**              | `agent` 使用者執行 `claude --dangerously-skip-permissions`（Claude Code 安全要求，禁止 root 下執行），並設定 `NOPASSWD` sudo 僅限執行 `/usr/bin/docker`——因為宿主掛入的 `docker.sock` 擁有者/群組由宿主環境決定，非 root 使用者常無法單靠 group 權限連線，故一律透過 sudo 執行 docker 指令                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| 技術                            | 說明                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| ------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Docker**                      | 以 `python:3.11-slim` 為基底，加裝 Node.js 22 執行 Claude Code CLI（`@anthropic-ai/claude-code@2.1.285`；`claude-opus-5-5` 等新模型要求 CLI ≥ 2.1.280，該版宣告 Node ≥ 22），並加裝 `docker-ce-cli` + `docker-compose-plugin`（僅 CLI，不含 daemon）                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| **Docker Compose 路徑掛載**     | 自 v0.5.0 起改掛載**整個工作區根目錄**（`${HOST_WORKSPACE_ROOT}:${HOST_WORKSPACE_ROOT}`），而非只掛 `AgentLoop/` 與單一 `TARGET_PROJECT`，讓網頁控制台能切換目標專案、用資料夾選擇器看到其他專案，不需要為此重建容器；路徑同樣用「與 host 相同的絕對路徑」，原因不變：宿主 daemon 幫目標專案建立 bind mount 時，用的是掛載路徑「字串本身」，該字串必須在宿主上真實存在，否則會掛到空目錄。目標專案改由網頁設定（`web/settings.py`，優先於 `.env` 的 `TARGET_PROJECT`）決定，`project_context.py` 的動態偵測邏輯本身不寫死任何專案名稱。仍只支援單一目標專案同時執行，不提供多專案並行的擴充方式                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| **`/var/run/docker.sock` 掛載** | `- /var/run/docker.sock:/var/run/docker.sock`，讓容器內 Docker CLI 連上宿主 daemon（DooD 的核心）                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| **對外埠**                      | `ports: ["127.0.0.1:8000:8000"]`：網頁控制台只綁 host 的 `127.0.0.1`，不對外開放；容器內 `command` 為 `python -m uvicorn AgentLoop.web.app:app --host 0.0.0.0 --port 8000`，前端由映像的 `WEB_DIST_DIR` 建置產物提供                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| **Claude 設定掛載**             | 分兩塊，刻意分開：(1) 登入狀態（`.claude/` 其餘內容、`.claude.json`）掛在容器專屬的 `agent_home` named volume（`- agent_home:/home/agent`），**不**與 host 共用——原因是若直接掛載 host 的 `~/.claude`，host 與容器內的 `claude` subprocess 會共用同一份 OAuth 憑證檔，兩邊同時使用時 token refresh 互搶，會導致容器內 node 執行到一半認證失效、或剛啟動時讀到寫入中的檔案顯示未登入；因此改為另外設定認證——首選在 host 執行 `claude setup-token`，將產出的 token 寫入 `.env` 的 `CLAUDE_CODE_OAUTH_TOKEN`（或改設 `ANTHROPIC_API_KEY`）；容器內互動式 `claude login` 仍可用但非首選，因為 `docker exec -it` 的嵌套 TTY 貼授權碼常因 paste 截斷或過期顯示 `Invalid code`。登入狀態隨 volume 持久化，容器重建不會遺失。(2) skills 內容：本專案用到的 skill 已直接複製進 `AgentLoop/.claude/skills/` 隨專案版控、不再依賴掛載即可運作；host 的 `${HOME}/.claude/skills:/home/agent/.claude/skills:ro` 與 `${HOME}/.agents:/home/agent/.agents:ro`（純靜態、無寫入需求）仍保留唯讀掛載，作為 `skill_loader.py` 的 fallback 來源，供 Agent 依偵測到的技術棧動態選用專案未內建的其他 skill（`~/.claude/skills` 底下多為指向 `~/.agents/skills` 的符號連結，需一併掛載才能解析）。`working_dir: ${HOST_WORKSPACE_ROOT}` |
+| **非 root 使用者**              | `agent` 使用者執行 `claude --dangerously-skip-permissions`（Claude Code 安全要求，禁止 root 下執行），並設定 `NOPASSWD` sudo 僅限執行 `/usr/bin/docker`——因為宿主掛入的 `docker.sock` 擁有者/群組由宿主環境決定，非 root 使用者常無法單靠 group 權限連線，故一律透過 sudo 執行 docker 指令                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 
 ---
 
@@ -811,6 +908,11 @@ python -m AgentLoop.main --node review
 
 # archive 是終點，跑完即止
 python -m AgentLoop.main --node archive
+
+# 搭配 --change <name>：直接載入指定 change 的 state.json，不顯示終端選單；
+# 找不到該 change 就以錯誤結束（exit 1）。網頁控制台的重跑功能即透過這個組合呼叫，
+# 讓 web/runner.py 的子行程不需要經過終端選單互動
+python -m AgentLoop.main --node execute --change feat-login
 ```
 
 `--node X` 的語意是「從 X 開始跑剩下的完整工作流程」：指定 node 跑完並存 state 後，透過 `_stream_and_save()` 以 `config={"configurable": {"start_from": <next_node>}}` 繼續執行剩餘 node（`workflow.py` 的 `_route_start` 讀取此 config 決定 entry point）。`review` 的 next_node 由 `_route_after_review()` 決定（通過 → `archive_change`；可重試 → `increment`；error/超限 → 直接結束），`analyze_plan` → `human_confirm`，`execute` → `review`。State 一律從 `<project_dir>/.agentloop/changes/<change_name>/state.json` 載入（列出已有 state.json 的 changes 供選擇），`project_dir` 由 `TARGET_PROJECT` 環境變數補回。`human_confirm` 不在 `--node` 可選清單中，只能作為完整工作流程的一部分執行。`--state-file` 已移除，state 只能來自 `.agentloop/`。
@@ -819,18 +921,213 @@ python -m AgentLoop.main --node archive
 
 ---
 
+## 網頁控制台（v0.5.0）
+
+在不改變任何節點提示詞、路由與判定規則的前提下，容器內另外跑一個網頁服務，取代原本只能
+`docker exec` 進容器下指令、以終端 `input()` 回覆提問的操作方式。架構決策見
+`docs/adr/0001-web-gui-interaction-port-and-subprocess-run.md`。
+
+### 架構圖
+
+```
+瀏覽器 (Vue 3 SPA, 每 2 秒輪詢)
+   │  HTTP JSON
+   ▼
+uvicorn + FastAPI  (AgentLoop/web/app.py)      ← 容器 CMD，監聽 0.0.0.0:8000，compose 只綁 host 127.0.0.1:8000；靜態檔來自 WEB_DIST_DIR
+   │  ├─ web/settings.py   設定檔讀寫、合併 .env、遮罩 secret、資料夾瀏覽
+   │  ├─ web/runner.py     單一作用中執行（子行程、日誌、提問/回覆檔、中止、session 回寫）
+   │  ├─ web/repo_view.py  讀 .agentloop/changes/*/state.json、openspec/changes(/archive)、openspec/specs
+   │  └─ web/search_api.py 重用 search.py 的索引／檢索／回答函式
+   ▼
+子行程：python -m AgentLoop.main ...   (start_new_session=True，env 帶 AGENTLOOP_INTERACTION=web、AGENTLOOP_RUN_DIR、設定值)
+   └─ nodes → lib/interaction.py（網頁實作）→ question.json / answer.json
+```
+
+### 互動埠：`lib/interaction.py`
+
+節點內所有提問都改經 `interaction.ask(prompt, *, kind, stage, options=None, required=False,
+multiline=False)`（`kind` 為 `"text"`／`"choice"`／`"multi_choice"`／`"confirm"`／`"pause"`
+其中之一；`"multi_choice"` 命令列模式行為與 `"choice"` 相同，網頁模式改以勾選框清單＋「全選」
+切換＋「送出」按鈕呈現，見上方「嚴重程度分流」段 `review` 的建議選擇題）與 `interaction.is_interactive()`，
+取代原本各自呼叫
+`input()` / `sys.stdin.isatty()` / `sys.stdin.readline()`：
+
+- **命令列模式**（未設定 `AGENTLOOP_INTERACTION`）：`ask()` 直接委派給 `input()`（`kind="pause"`
+  委派 `sys.stdin.readline()`，`multiline=True` 委派一個連續兩個空行或 EOF 結束的多行讀取迴圈），
+  `is_interactive()` 直接委派 `sys.stdin.isatty()`——既有測試對 `builtins.input` / `sys.stdin.isatty`
+  的 patch 之所以依然有效，靠的是 `tests/conftest.py` 的 autouse fixture 在每個測試開始前清掉
+  `AGENTLOOP_INTERACTION`／`AGENTLOOP_RUN_DIR`，確保測試套件不受外部 shell 殘留的網頁模式環境
+  影響；而 `claude_runner._run_claude_once()` 啟動 `claude` 子行程時不把這兩個變數傳進去（見下方
+  「用量上限暫停」段落後的說明），所以 agent 在 execute／review 中執行的 `pytest` 也不會誤入網頁
+  模式。提示文字與分支邏輯不受影響：呼叫端照舊自己 `print()` 提示，`ask()` 的 `prompt` 參數在這個
+  模式下不使用。
+- **網頁模式**（`AGENTLOOP_INTERACTION=web`）：`is_interactive()` 一律回傳 `True`；`ask()` 把
+  提問寫成 `$AGENTLOOP_RUN_DIR/question.json`（`{id, stage, kind, prompt, options, required,
+multiline, created_at}`），每 0.5 秒輪詢同目錄的 `answer.json`，讀到 `id` 相符的回覆後刪除
+  兩檔並回傳答案文字。必填檢查與「提問已結束」判斷在寫入 `answer.json` 的那一端
+  （`web/runner.py` 的 `answer()`），`interaction.ask()` 本身只管問與等。
+  用量上限暫停（`claude_runner.call_claude()`）有一個額外陷阱：網頁模式的「繼續」就是回傳空
+  字串，跟命令列用空字串代表 stdin 已關閉（EOF）是同一個值、不同語意，`claude_runner.py` 因此
+  用 `interaction.is_web_mode()` 把「空字串＝中止」這條判斷限定在命令列模式才生效。
+  `claude_runner._run_claude_once()` 啟動 `claude` 子行程時，以 `os.environ` 複製一份、
+  移除 `AGENTLOOP_INTERACTION`／`AGENTLOOP_RUN_DIR` 後才傳給 `subprocess.Popen` 的 `env=`：
+  這兩個變數是「工作流行程↔web 控制台」之間的互動埠，`claude` 子行程及它執行的工具指令（例如
+  execute／review 節點呼叫的 `pytest`）都不是提問方，繼承到的話會讓 `is_interactive()` 誤判為
+  網頁模式、卡在輪詢一個不存在的 `answer.json`。父行程自己讀取 `AGENTLOOP_RUN_DIR` 寫
+  `session.json` 的邏輯（見下）不受影響，因為那是父行程直接讀 `os.environ`，不經過傳給子行程的
+  那份複製。
+
+目前走互動埠的呼叫點：`analyze_plan` 的分支名稱／起點分支選擇（工作分支本地不存在時）／是否寫
+spec／domain 選擇／新 domain 名稱／domain Purpose／grilling 提問、`human_confirm` 的 y/N 與修改意見、
+`review` 的建議事項挑選、
+`archive` 的是否併入 specs、`claude_runner.call_claude()` 的用量上限暫停（`kind="pause"`，
+`stage` 取自 `core/stages.current_stage()`）。**新增任何提問點都必須走這裡**，否則網頁模式下
+會卡住等不到回覆，命令列模式下則可能誤用非互動預設值。
+
+選項題的「編號. 文字」清單統一由 `interaction.numbered(items)` 產生（回傳 `["1. a", "2.
+b", ...]`，編號從 1 起算），`analyze_plan` 的 domain 歸屬提問與 `review` 的建議選擇題共用這份
+清單餵給終端 `print()` 與 `ask(..., options=...)`，因此終端清單與網頁選項按鈕看到的編號永遠一致。
+
+### 階段狀態：`core/stages.py` + `AgentState["stages"]`
+
+`AgentState` 新增兩個欄位：`stages`（`analyze_plan`／`human_confirm`／`execute`／`review`／
+`archive` 各自的狀態，值只有 `pending`／`running`／`done`／`error`）與 `stage_notes`（目前只有
+`"使用者中止"`）。`core/stages.py` 提供：
+
+- `start(state, stage)`：該階段記為 `running`，其後各階段重設為 `pending`、清掉該階段的
+  note，印一行 `@@AGENTLOOP_STAGE <stage>@@`（供 `web/runner.py` 切分日誌），並通知已註冊的
+  listener（見下）。「階段開始即把其後各階段重設為尚未開始」這一條規則同時涵蓋重跑與 review
+  退回重新規劃兩種情境，不需要分別處理。
+- `finish(state, stage, status, note=None)`：依 `status == "error"` 記為 `error`，否則記為 `done`；
+  `note` 有值時一併寫入 `stage_notes[stage]`、回傳也含 `stage_notes`，不傳時回傳只有 `stages`，
+  既有呼叫端（`_tracked()`、`run_node()`）不受影響。`stages`／`stage_notes` 的寫入一律經
+  `start()`／`finish()`，`web/runner.py` 中止時也呼叫 `finish(state, stage, "error",
+note="使用者中止")`（見下方「執行管理」），不在其他模組另外手刻一份複製改寫的邏輯。
+- `current_stage()`：目前正在跑的階段名稱，供 `claude_runner` 的用量上限暫停提問標記 `stage`。
+- `set_listener(cb)`：`main.py` 在 `run()` / `run_node()` 一開始註冊 `_save_state`，讓
+  `start()` 在階段真正開始執行**之前**就能把「執行中」立即寫進 `state.json`——節點本身可能跑
+  好幾分鐘，不能等它整個執行完、回傳後才讓使用者在網頁上看到階段已經開始。
+
+`build_workflow()` 用 `_tracked(stage, fn)` 包裝五個節點（`archive_change` 對應 stage
+`archive`）；`main.py` 的 `run_node()`（`--node` 直呼節點的路徑）呼叫同一組 `start()`/`finish()`，
+行為跟走完整 LangGraph 一致。`_tracked()` 有一個例外：**上游已經是 `error` 時完全不記錄狀態
+轉換**，直接呼叫原始節點函式——`human_confirm_node`／`review_node` 在上游錯誤時都會沿著既有
+的無條件邊被呼叫一次、內部立刻短路回傳，並沒有真的執行這個階段的工作，所以該階段要維持
+`pending` 而不是被標成 `running`/`error`。
+
+### 執行管理：`web/runner.py`
+
+同一目標專案同時只允許一個執行（模組層 `RunManager` + `threading.Lock`，`RunConflict` 例外
+對應 API 的 409）：各節點會 `git checkout` 共用的工作目錄，兩個執行並行會互相切走分支，因此
+不做排隊、只簡單拒絕。
+
+- **啟動**：`subprocess.Popen([sys.executable, "-m", "AgentLoop.main", ...], cwd=REPO_ROOT,
+start_new_session=True, env=合併設定＋AGENTLOOP_INTERACTION=web＋AGENTLOOP_RUN_DIR)`。新增
+  任務帶 `"<task>"`；重跑帶 `--node <stage> --change <name>`（`stage` 限
+  `analyze_plan`／`execute`／`review`／`archive`，`human_confirm` 不可單獨重跑，跟命令列
+  `--node` 的限制一致）。
+- **執行目錄**：`$AGENTLOOP_WEB_STATE_DIR/run/`（預設 `AgentLoop/.web/run/`），內含
+  `meta.json`（run_id、kind、task、change_name、stage、started_at、pid）、`output.log`、
+  `question.json`、`answer.json`、`session.json`。
+- **change 名稱偵測**：新增任務時分支名稱決定前，`change_name` 還不知道——查詢執行狀態時用
+  `task` 字串＋`state.json` 的 mtime（晚於 `started_at`）掃描 `<target>/.agentloop/changes/*/`，
+  找到就寫回 `meta.json`，往後直接採用，不再重複掃描。
+- **session 回寫**：`claude_runner._run_claude_once()` 讀到第一個 `session_id` 時，若設定了
+  `AGENTLOOP_RUN_DIR` 就寫 `session.json`（`{stage, session_id}`）。
+- **中止**：對 process group 送 `SIGTERM`，5 秒後仍存活再送 `SIGKILL`；之後讀該 change 的
+  `state.json`，把目前執行中的階段（先看 `stages` 裡誰是 `running`，找不到才退回 `meta.json`
+  的 `stage`）經 `stages.finish(state, stage, "error", note="使用者中止")` 記為 `error`＋
+  附註，`session.json` 存在的話依 `core.session.store_session()` 覆寫 session 插槽，最後清空
+  執行目錄——重跑該階段時會接回同一個 session，跟命令列 `q` 中止再 `--node` 重跑的行為一致。
+  沒有 change 名稱（分支名稱尚未決定）或偵測不到 `state.json` 時，只結束 process group、清空
+  執行目錄，不回寫狀態——新增任務後仍以暫時列呈現的執行走的就是這條路徑。
+- **日誌**：執行結束時依 `@@AGENTLOOP_STAGE x@@` 標記切分 `output.log`、去 ANSI，覆寫到
+  `<target>/.agentloop/changes/<name>/logs/<stage>.log`；執行中查詢日誌則直接即時切分
+  `output.log`（`live_stage_log()`），不等執行結束。
+
+### HTTP API：`web/app.py` + `web/repo_view.py` + `web/search_api.py`
+
+FastAPI，前綴 `/api`；`repo_view.py` 純讀檔（`.agentloop/changes/*/state.json`、
+`openspec/changes(/archive)/`、`openspec/specs/`），`search_api.py` 重用 `search.py` 的索引／
+檢索／回答函式（呼叫前用 context manager 暫時覆寫 `os.environ` 套用網頁設定的有效值，並用一把
+鎖序列化，因為暫時覆寫行程全域的 `os.environ` 不是執行緒安全的操作）。主要端點：
+
+| Method   | Path                                                                  | 用途                                                                                           |
+| -------- | --------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------- |
+| GET      | `/changes`                                                            | 執行中任務列表（排除已封存；舊任務缺 `stages` 時一律視為 `pending`）                           |
+| GET      | `/changes/{name}/stages/{stage}`                                      | 階段詳情：結果欄位、note、日誌最後 500 行（執行中即時切分、其餘讀持久化的 `logs/<stage>.log`） |
+| GET      | `/changes/{name}/files[/{path}]`                                      | 規格文件瀏覽（`proposal.md`/`design.md`/`tasks.md` 排最前，其餘依路徑排序）；工作樹找不到該 change 資料夾時，唯讀改讀該任務工作分支最新 commit 的內容，不 checkout、不動工作樹；該次 git 指令本身失敗時，在 404 的找不到訊息後附上「（git：<git 錯誤訊息>）」 |
+| GET/POST | `/run`、`/runs`、`/changes/{name}/rerun`、`/run/answer`、`/run/abort` | 執行狀態查詢、啟動新任務、重跑、回覆提問、中止                                                 |
+| GET      | `/archive`、`/archive/{dir}/files[/{path}]`                           | 已封存任務瀏覽                                                                                 |
+| GET      | `/specs`、`/specs/{domain}`                                           | 既有 Spec 瀏覽                                                                                 |
+| POST     | `/specs/search`                                                       | 語意搜尋（查無結果回固定訊息；失敗回 502）                                                     |
+| GET/PUT  | `/settings`                                                           | 讀寫網頁設定；執行中禁止變更目標專案（409）                                                    |
+| GET      | `/fs?path=`                                                           | 資料夾選擇器用的子資料夾列舉                                                                   |
+
+所有「目標專案」相關路徑都以 `os.path.realpath()` 後比對是否仍在 workspace root 底下，防止
+路徑穿越；`StaticFiles` 以 `html=True` 掛在 `/`（最後掛載，不蓋過 `/api/*`），`WEB_DIST_DIR`
+未設定或目錄不存在時只提供 API，方便本機開發時前端另外用 Vite dev server。
+
+### 前端：`web/frontend/`
+
+Vue 3 + TypeScript + `<script setup>` + Vite，測試用 Vitest + `@vue/test-utils` + jsdom；不
+引入 UI 元件庫，Markdown 以 `<pre>` 純文字呈現。階段詳情（`StageDetail`）與待回覆提問
+（`QuestionForm`）顯示的使用者可讀輸出一律套用 `style.css` 的 `output-text` utility，保留原文
+換行與空白、長字串在區塊寬度內強制折行。`src/api.ts` 集中封裝所有對 `/api/*` 的
+`fetch`，元件測試用 `vi.mock('../api')` 取代；`composables/usePolling.ts` 提供 2 秒輪詢。
+`src/components/` 依頁面分資料夾：`active-changes/`（`ActiveChanges`／`ChangeRow`／`StageCard`／
+`StageDetail`／`QuestionForm`／`NewTaskDialog`）、`archived-changes/`（`ArchivedChanges`）、
+`existing-specs/`（`ExistingSpecs`／`SpecSearch`）、`settings/`（`SettingsPanel`）、`utils/`
+（跨頁共用的 `FileBrowser`／`FolderPicker`）；四個主分頁對應的元件都掛在 `App.vue` 底下，相對
+import 路徑隨資料夾深度調整（例如 `../../api`）。
+
+圖示使用 `@fortawesome/vue-fontawesome`（SVG 版，非 webfont）：`src/icons.ts` 匯出用到的
+`free-solid-svg-icons` 清單，`main.ts` 以 `library.add(...)` 註冊並全域掛載
+`FontAwesomeIcon`；測試另以 `src/__tests__/setup.ts`（由 `vite.config.ts` 的
+`test.setupFiles` 載入）註冊同一份清單，確保 jsdom 掛載時能渲染出帶 `data-icon` 屬性的
+`<svg>`，測試可據以斷言圖示種類。「關閉」「重跑」「檢視規格文件」「上一層」「收合／展開」五
+個按鈕是純圖示（不顯示文字），以 `aria-label` 承載原文字供測試定位與無障礙朗讀、`title` 提供
+滑鼠停留提示（「重跑」停用時 `title` 改顯示停用原因，`aria-label` 仍為「重跑」；「收合／展
+開」依 `collapsed` 狀態切換文字與 `chevron-up`／`chevron-down` 圖示）；其餘主要操作、主分
+頁、階段狀態徽章與清單項目則是圖示＋文字並存，文字不變，既有以 `.text()` 斷言這些文字的測
+試不受影響。
+
+樣式採 Tailwind CSS v4（`@tailwindcss/vite`，不寫 `tailwind.config.js` 或 PostCSS 設定檔），
+整體為深色主題（不提供淺色／切換）：`vite.config.ts` 的 `plugins` 加入 `tailwindcss()`，
+`src/style.css` 以 `@import "tailwindcss";` 後接 `@theme { --color-... }` 集中定義整個前端用到
+的色彩 token，由 `main.ts` 匯入；三層底色由暗到亮遞增：`bg`（頁面背景）／`surface`（卡片、面
+板、對話框）／`surface-muted`（卡片內嵌區塊：日誌、規格內文、`<pre>`、hover 底色），另有
+`header`（頂部導覽列）、`line`（邊框）、`fg`／`fg-muted`（前景文字）、`on-accent`（主要／危
+險按鈕與狀態徽章上的文字）、`overlay`（對話框遮罩）、`primary`／`primary-hover`、
+`danger`／`warning`／`success`，以及四個階段狀態色 `stage-pending`／`stage-running`／
+`stage-done`／`stage-error`（色碼固定）。`@theme` 另定義 `--animate-breathe`（搭配
+`@keyframes breathe`，以 `stage-running` 色呼吸擴散的 `box-shadow`），供執行中的階段卡片套用
+`animate-breathe motion-reduce:animate-none`。元件一律只引用這些 token 與動畫 utility（例如
+`bg-stage-done`、`text-fg-muted`、`animate-breathe`），不寫任意色碼也不寫 `<style>` 區塊，換色
+只需改 `style.css` 一處。`StageCard.vue` 以一張「狀態 → `{ bar, badge }`」對照表分別套用卡片
+左側色條 `border-l-stage-*` 與狀態徽章 `bg-stage-*`，未知狀態退回 `stage-pending`；jsdom 不會
+計算 Tailwind 產生的 CSS，相關測試因此斷言 class 名稱（色條、徽章、`animate-breathe`）而非實
+際顏色，色碼本身以 `style.css` 的 `@theme` 為準。次要按鈕的外觀（邊框、底色、hover、disabled）
+同樣集中在 `style.css`，以 Tailwind v4 的 `@utility btn-secondary` 定義一次，元件呼叫點只加尺
+寸與版面 class（如 `px-2 py-1 text-sm`、`self-start`）與測試用語意 class（`view-files-button`、
+`rerun-button`——後者的警示黃與 hover 色改直接寫在元件上，不再透過 `btn-secondary`），調整
+`btn-secondary` 外觀只需改一處；純圖示的「關閉」按鈕不再有固定語意 class，測試一律以
+`[aria-label="關閉"]` 定位；主要按鈕未收斂，仍各自重複寫 `rounded-md bg-primary ...`。
+
+---
+
 ## 總結
 
-| 面向         | 細節                                                                     |
-| ------------ | ------------------------------------------------------------------------ |
-| 架構模式     | LangGraph StateGraph + 3 個 Claude Agent 節點 + 人工確認閘 + 審查驅動的反饋迴圈 + 純 Python 收尾節點 |
-| 節點數量     | 5（規劃、人工確認、執行、審查、收尾 archive）                            |
-| 最大重試次數 | 3 次迭代後強制結束                                                       |
-| 執行模型     | 序列執行 + 迭代精修（審查驅動，重新規劃時只針對 review 結果 grill）      |
-| 語言         | Python 協調層 + 繁體中文提示（Claude 過程敘述為英文，見「語言政策」）    |
-| 目標架構     | 動態偵測，不假設固定技術棧（目前範例：Vue + Ant Design Vue）             |
-| 驅動方式     | Claude Code CLI（本地認證，非 API Key）+ OpenSpec CLI（規格文件格式與 archive） |
-| 狀態傳遞     | 不可變 TypedDict 流經整個工作流程                                        |
+| 面向         | 細節                                                                                                                        |
+| ------------ | --------------------------------------------------------------------------------------------------------------------------- |
+| 架構模式     | LangGraph StateGraph + 3 個 Claude Agent 節點 + 人工確認閘 + 審查驅動的反饋迴圈 + 純 Python 收尾節點                        |
+| 節點數量     | 5（規劃、人工確認、執行、審查、收尾 archive）                                                                               |
+| 最大重試次數 | 3 次迭代後強制結束                                                                                                          |
+| 執行模型     | 序列執行 + 迭代精修（審查驅動，重新規劃時只針對 review 結果 grill）                                                         |
+| 語言         | Python 協調層 + 繁體中文提示（Claude 過程敘述為英文，見「語言政策」）                                                       |
+| 目標架構     | 動態偵測，不假設固定技術棧（目前範例：Vue + Ant Design Vue）                                                                |
+| 驅動方式     | Claude Code CLI（本地認證，非 API Key）+ OpenSpec CLI（規格文件格式與 archive）                                             |
+| 狀態傳遞     | 不可變 TypedDict 流經整個工作流程                                                                                           |
 | 產出物       | 目標專案下的 OpenSpec change（規格文件）、執行摘要、審查報告、程式碼變更、review 通過後合併進目標專案持久的 openspec/specs/ |
 
 </content>

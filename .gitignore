@@ -4,3 +4,9 @@ __pycache__/
 !.claude/skills/
 docs/nodes/
 tests/evals/outputs/
+.web/
+web/frontend/node_modules/
+web/frontend/dist/
+web/frontend/*.tsbuildinfo
+.agentloop/
+openspec/.vector_index/

@@ -1,14 +1,13 @@
 import glob
 import re
 import subprocess
-import sys
 import time
 import os
 from ..core import AgentState, take_session, store_session
 from ..lib import (
     call_claude, call_resuming, format_usage_stats, build_skills_block,
     build_project_doc_hint_for, ensure_on_branch, is_usage_limit_error,
-    LANGUAGE_POLICY, REPO_ROOT,
+    LANGUAGE_POLICY, REPO_ROOT, interaction,
 )
 
 # 使用的模型（"haiku" | "sonnet" | "opus" | "fable"，見 claude_runner.MODEL_IDS；
@@ -181,6 +180,9 @@ _RED    = "\033[1;31m"
 _RESET  = "\033[0m"
 
 _MAX_REVIEW_ATTEMPTS = 3
+
+_SUGGESTION_PROMPT_WEB = "請勾選要修改的建議後按送出（未勾選＝不修改）"
+_SUGGESTION_PROMPT_CLI = "請輸入要修改的建議編號（例如 1,3；all=全部；留空＝不修改）"
 
 _REVIEW_CONTINUE_PROMPT = (
     "你上一輪的回應在還沒完成前就結束了（缺少完整的 `## Standards` / `## Spec` 報告，"
@@ -403,20 +405,24 @@ def review_node(state: AgentState) -> dict:
             **store_session(_SESSION_KEY, ""),
         }
 
+    numbered_suggestions = interaction.numbered(suggestions)
     print(f"\n{_BANNER}{'─'*50}", flush=True)
     print("  [Review Agent] 無嚴重影響功能的問題，但有以下修改建議：", flush=True)
     print(f"{'─'*50}{_RESET}", flush=True)
-    for i, s in enumerate(suggestions, 1):
-        print(f"  {i}. {s}", flush=True)
+    for line in numbered_suggestions:
+        print(f"  {line}", flush=True)
     print(f"{_BANNER}{'─'*50}{_RESET}\n", flush=True)
 
-    if not sys.stdin.isatty():
+    if not interaction.is_interactive():
         print(f"{_YELLOW}  [Review Agent] 非互動式環境，預設不修改任何建議，直接前往 Check{_RESET}\n", flush=True)
         selected = []
     else:
         try:
-            answer = input(
-                f"{_YELLOW}  請輸入要修改的建議編號（例如 1,3；all=全部；直接 Enter=不修改）：{_RESET}"
+            prompt = _SUGGESTION_PROMPT_WEB if interaction.is_web_mode() else _SUGGESTION_PROMPT_CLI
+            answer = interaction.ask(
+                prompt,
+                kind="multi_choice", stage="review",
+                options=numbered_suggestions,
             ).strip()
         except (EOFError, KeyboardInterrupt):
             print(f"\n{_YELLOW}  [Review Agent] 已取消，預設不修改任何建議{_RESET}\n", flush=True)

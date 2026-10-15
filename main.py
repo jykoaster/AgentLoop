@@ -21,7 +21,7 @@ from dotenv import load_dotenv
 
 load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
 
-from .core import app, AgentState, MAX_ITERATIONS
+from .core import app, AgentState, MAX_ITERATIONS, stages
 from .lib import REPO_ROOT
 
 _BOLD  = "\033[1m"
@@ -100,6 +100,28 @@ def _list_and_select_change() -> dict:
     return state_data
 
 
+def _load_change(change_name: str) -> dict:
+    """直接載入指定 change 的 state.json（`--node --change` 用），不顯示終端選單。
+    找不到就以錯誤結束——跟 `_list_and_select_change()` 一樣，`--node` 不收任務描述，
+    沒有既有 state 可載入就無事可做。
+    """
+    target = os.environ.get("TARGET_PROJECT", "").strip()
+    if not target:
+        print("\033[1;31m  錯誤：TARGET_PROJECT 環境變數未設定\033[0m")
+        sys.exit(1)
+
+    state_path = Path(REPO_ROOT) / target / ".agentloop" / "changes" / change_name / "state.json"
+    if not state_path.is_file():
+        print(f"\033[1;31m  找不到 change「{change_name}」的 state（{state_path}）\033[0m")
+        sys.exit(1)
+
+    with state_path.open(encoding="utf-8") as f:
+        state_data = json.load(f)
+    state_data["project_dir"] = target
+    print(f"\n  已載入 change：{change_name}\n")
+    return state_data
+
+
 def _empty_state(task: str) -> AgentState:
     return {
         "task": task,
@@ -120,6 +142,8 @@ def _empty_state(task: str) -> AgentState:
         "session_node": "",
         "session_id": "",
         "start_from": "",
+        "stages": {},
+        "stage_notes": {},
     }
 
 
@@ -145,6 +169,8 @@ def _stream_and_save(initial_state: dict, start_from: str | None = None) -> str:
 
 
 def run(task: str) -> None:
+    stages.set_listener(_save_state)
+
     print(f"\n{_BOLD}{'═'*60}")
     print(f"  任務：{task}")
     print(f"{'═'*60}{_RESET}\n")
@@ -183,7 +209,7 @@ def _route_after_review(state: dict) -> str | None:
     return "increment"
 
 
-def run_node(node_name: str) -> None:
+def run_node(node_name: str, change_name: str | None = None) -> None:
     from .nodes import analyze_plan_node, execute_node, review_node, archive_node
 
     node_fn = {
@@ -193,18 +219,30 @@ def run_node(node_name: str) -> None:
         "archive": archive_node,
     }[node_name]
 
+    stages.set_listener(_save_state)
+
     # 任務描述與其餘欄位全部來自選定 change 的 state；_empty_state 只負責補上
     # 舊版 state.json 可能缺少的欄位預設值（例如後來才加的 session 插槽）。
     state = _empty_state("")
-    state.update(_list_and_select_change())
+    state.update(_load_change(change_name) if change_name else _list_and_select_change())
+
+    if node_name == "analyze_plan":
+        state["start_from"] = "analyze_plan"
 
     print(f"\n{_BOLD}{'═'*60}")
     print(f"  單獨執行 node：{node_name}")
     print(f"  任務：{state['task']}")
     print(f"{'═'*60}{_RESET}\n")
 
+    stage = "archive" if node_name == "archive" else node_name
+    start_update = stages.start(state, stage)
+    state.update(start_update)
+
     result = node_fn(state)
     state.update(result)
+
+    finish_update = stages.finish(state, stage, result.get("status"))
+    state.update(finish_update)
     _save_state(state)
 
     print(f"\n{_BOLD}{'═'*60}")
@@ -262,7 +300,15 @@ def main() -> None:
         metavar="NODE",
         help=f"從指定 node 開始執行（{', '.join(_NODES)}）；state 從目標專案的 .agentloop/changes/ 載入",
     )
+    parser.add_argument(
+        "--change",
+        metavar="NAME",
+        help="搭配 --node：直接載入指定 change 的 state.json，不顯示終端選單；不存在則錯誤結束",
+    )
     args = parser.parse_args()
+
+    if args.change and not args.node:
+        parser.error("--change 必須搭配 --node 使用")
 
     if args.node:
         if args.task:
@@ -270,7 +316,7 @@ def main() -> None:
                 "--node 模式不接受任務描述：任務描述取自選定 change 的 state.json。"
                 "傳入佔位字串會覆蓋掉原本的任務並寫回 state"
             )
-        run_node(args.node)
+        run_node(args.node, change_name=args.change)
     else:
         if not args.task:
             parser.error("缺少任務描述")

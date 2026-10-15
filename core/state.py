@@ -11,7 +11,7 @@ class AgentState(TypedDict):
     review_blocking: bool  # set by review_node: True → replan (severe issue, or human-selected suggestions); False → pass
     status: str          # "pending" | "needs_revision" | "error" | "confirmed" | "aborted"
     iteration: int
-    human_feedback: str  # user revision comments when rejecting the plan with N
+    human_feedback: str  # 人工確認退回意見，或重跑 analyze_plan 取得的調整內容
     change_name: str     # OpenSpec change 名稱（由 branch_name 轉 kebab-case）；任務開始時問一次，全程沿用
     branch_name: str     # 使用者指定的 git 分支（必填）；規劃／執行／審查都在此分支上進行
     project_dir: str     # target project directory (relative to workspace root) this task's OpenSpec change lives in; resolved by analyze_plan before its initial-plan call, unchanged across replan/human-revise
@@ -20,3 +20,5 @@ class AgentState(TypedDict):
     session_node: str    # 中斷中的 Claude session 屬於哪個 node（""＝沒有）；每個 change 同時只有一個，見 core/session.py
     session_id: str      # 該 session 的 id，撞到用量上限後可 --resume 接回；只透過 core/session.py 讀寫
     start_from: str      # transient routing hint: which node to enter first (read by _route_start in workflow.py); not persisted to state.json
+    stages: dict[str, str]        # 各工作階段狀態："pending" | "running" | "done" | "error"；見 core/stages.py
+    stage_notes: dict[str, str]   # 階段附註（目前只有 "使用者中止"）；見 core/stages.py

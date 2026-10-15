@@ -1,7 +1,6 @@
 import json
 import os
 import re
-import sys
 import time
 from ..core import AgentState, take_session, store_session
 from ..lib import (
@@ -9,7 +8,9 @@ from ..lib import (
     is_usage_limit_error, LANGUAGE_POLICY, build_skills_block,
     build_project_doc_hint_for, REPO_ROOT,
     ensure_on_branch, rollback_except_openspec,
+    list_local_branches, branch_exists, create_branch_from,
     ensure_initialized, ensure_change_created, validate_change,
+    interaction,
 )
 
 # 初始規劃／依人工意見調整：完整 grilling + domain-modeling（人工意見可能牽涉詞彙或架構決策）
@@ -100,8 +101,8 @@ _ANALYZE_PROHIBITIONS = """## 嚴格禁止事項
 
 - **不得修改任何應用程式原始碼**（`.py`、`.ts`、`.vue`、`.go` 等實作檔案）——程式碼修改由 execute node 負責；
   此階段僅允許讀取程式碼（Read/Glob/Grep），以及寫入 OpenSpec change 資料夾下的規格文件
-- **不得將 `tasks.md` 中的 `- [ ]` 改為 `- [x]`**——task 完成標記由 execute node 在實作後即時更新；
-  analyze 階段只寫或改 task 的文字描述，不能標記完成"""
+- **不得變更 `tasks.md` 任何勾選狀態**——完成標記由 execute node 在實作後即時更新；
+  既有 `- [x]` 維持原文，所需工作以新增或改寫 `- [ ]` 呈現"""
 
 _SYSTEM_INITIAL = f"""你是一位資深全端工程師，負責「分析與規劃」階段。
 
@@ -175,7 +176,7 @@ _SYSTEM_HUMAN_REVISE = f"""你是一位資深全端工程師，負責「根據�
 
 ## 背景
 
-你先前已提出一份規格與計畫，但使用者在審閱後提出了以下修改意見：
+使用者對先前的規格與計畫提出以下修改意見（可能在執行前或執行後）：
 
 <<HUMAN_FEEDBACK>>
 
@@ -216,6 +217,12 @@ _SESSION_KEY = "analyze_plan"
 
 _QUESTION_LINE_RE = re.compile(r"^\s*" + re.escape(QUESTION_MARKER), re.MULTILINE)
 _TASK_CHECKBOX_RE = re.compile(r"^-\s\[[ xX]\]\s*(.+)$", re.MULTILINE)
+_OPTION_LINE_RE = re.compile(r"^\s*\d+\.\s*(.+)$", re.MULTILINE)
+
+
+def _parse_question_options(text: str) -> list[str]:
+    """抽出 QUESTION 區塊裡 `數字. 選項內容` 的選項清單，供網頁模式顯示按鈕用。"""
+    return [m.strip() for m in _OPTION_LINE_RE.findall(text)]
 
 _KEBAB_INVALID_RE = re.compile(r"[^a-z0-9-]+")
 _MULTI_HYPHEN_RE = re.compile(r"-{2,}")
@@ -299,7 +306,7 @@ def _run_with_grilling(prompt: str, tools: str, model: str, timeout: int, resume
             )
             return result
 
-        if not sys.stdin.isatty():
+        if not interaction.is_interactive():
             print(
                 f"{_YELLOW}  [分析+規劃 Agent] 非互動式環境，無法提問，採用建議答案繼續{_RESET}\n",
                 flush=True,
@@ -308,7 +315,10 @@ def _run_with_grilling(prompt: str, tools: str, model: str, timeout: int, resume
             continue
 
         try:
-            answer = input(f"{_YELLOW}  > {_RESET}").strip()
+            answer = interaction.ask(
+                result.text, kind="choice", stage="analyze_plan",
+                options=_parse_question_options(result.text),
+            ).strip()
         except (EOFError, KeyboardInterrupt):
             print(f"\n{_YELLOW}  [分析+規劃 Agent] 已中止提問，採用建議答案繼續{_RESET}\n", flush=True)
             answer = ""
@@ -556,6 +566,32 @@ def _recover_skip_specs(state: AgentState, project_dir: str, change_name: str) -
     return _load_skip_specs_from_disk(project_dir, change_name)
 
 
+_UNSET = object()
+
+
+def _ask_or_default(
+    question: str, default, *, interactive_msg: str | None, abort_msg: str,
+    abort_default=_UNSET, **ask_kwargs,
+):
+    """提問樣板，給全部 `_ask_*` 共用：非互動式環境或使用者中止（`EOFError`／
+    `KeyboardInterrupt`）時印出對應訊息並回傳預設值，否則呼叫 `interaction.ask()` 並
+    `.strip()`。提示文字、選項列印、空值重問與答案解析留給呼叫端處理；呼叫端若以
+    非 `str` 的預設值（`None`／`False`）判斷走了這兩種分支，必須在解析前直接回傳，
+    避免非互動式環境下無限重問。
+    """
+    if abort_default is _UNSET:
+        abort_default = default
+    if not interaction.is_interactive():
+        if interactive_msg is not None:
+            print(interactive_msg, flush=True)
+        return default
+    try:
+        return interaction.ask(question, stage="analyze_plan", **ask_kwargs).strip()
+    except (EOFError, KeyboardInterrupt):
+        print(abort_msg, flush=True)
+        return abort_default
+
+
 def _ask_skip_specs() -> bool | None:
     """初始規劃、且還原不出上次決定時，詢問本次是否需要撰寫 specs。
 
@@ -572,15 +608,18 @@ def _ask_skip_specs() -> bool | None:
         f"{_YELLOW}    n — 不需要（純重構／文件／設定；.openspec.yaml 設 skip_specs: true，略過 specs）{_RESET}",
         flush=True,
     )
-    if not sys.stdin.isatty():
-        print(f"{_YELLOW}  非互動式環境，預設為需要寫 spec{_RESET}\n", flush=True)
-        return False
     while True:
-        try:
-            answer = input(f"{_YELLOW}  > {_RESET}").strip().lower()
-        except (EOFError, KeyboardInterrupt):
-            print(f"\n{_RED}  已取消，請明確選擇是否需要撰寫 spec{_RESET}\n", flush=True)
-            return None
+        answer = _ask_or_default(
+            "本次任務是否需要撰寫 OpenSpec spec（specs/<domain>/spec.md）？",
+            False,
+            interactive_msg=f"{_YELLOW}  非互動式環境，預設為需要寫 spec{_RESET}\n",
+            abort_msg=f"\n{_RED}  已取消，請明確選擇是否需要撰寫 spec{_RESET}\n",
+            abort_default=None,
+            kind="confirm",
+        )
+        if not isinstance(answer, str):
+            return answer
+        answer = answer.lower()
         if answer in ("y", "yes", "是"):
             return False
         if answer in ("n", "no", "否"):
@@ -601,11 +640,13 @@ def _ask_new_domain_name() -> str:
         f"（選填，建議英文 kebab-case；直接 Enter 由 Agent 依任務語意自行命名）：{_RESET}",
         flush=True,
     )
-    try:
-        return input(f"{_YELLOW}  > {_RESET}").strip()
-    except (EOFError, KeyboardInterrupt):
-        print(f"\n{_YELLOW}  已中止，由 Agent 依任務語意自行命名{_RESET}\n", flush=True)
-        return ""
+    return _ask_or_default(
+        "新 domain 名稱為何？（選填，建議英文 kebab-case；留空由 Agent 依任務語意自行命名）",
+        "",
+        interactive_msg=None,
+        abort_msg=f"\n{_YELLOW}  已中止，由 Agent 依任務語意自行命名{_RESET}\n",
+        kind="text",
+    )
 
 
 def _ask_domain_selection(project_dir: str) -> tuple[list[str], str]:
@@ -622,21 +663,21 @@ def _ask_domain_selection(project_dir: str) -> tuple[list[str], str]:
         return [], ""
 
     new_idx = len(domains) + 1
+    options = interaction.numbered(domains + ["以上皆非，建立新 domain"])
     print(f"\n{_YELLOW}  [分析+規劃 Agent] 本次需求歸屬於哪一個既有 domain？{_RESET}", flush=True)
-    for i, d in enumerate(domains, 1):
-        print(f"{_YELLOW}  {i}. {d}{_RESET}", flush=True)
-    print(f"{_YELLOW}  {new_idx}. 以上皆非，建立新 domain{_RESET}", flush=True)
+    for line in options:
+        print(f"{_YELLOW}  {line}{_RESET}", flush=True)
     print(f"{_YELLOW}  （同時涉及多個既有 domain 可用逗號輸入多個編號，例如 1,3）{_RESET}", flush=True)
 
-    if not sys.stdin.isatty():
-        print(f"{_YELLOW}  非互動式環境，預設建立新 domain{_RESET}\n", flush=True)
-        return [], ""
-
     while True:
-        try:
-            answer = input(f"{_YELLOW}  > {_RESET}").strip()
-        except (EOFError, KeyboardInterrupt):
-            print(f"\n{_YELLOW}  已中止，預設建立新 domain{_RESET}\n", flush=True)
+        answer = _ask_or_default(
+            "本次需求歸屬於哪一個既有 domain？（可用逗號輸入多個編號，例如 1,3）",
+            None,
+            interactive_msg=f"{_YELLOW}  非互動式環境，預設建立新 domain{_RESET}\n",
+            abort_msg=f"\n{_YELLOW}  已中止，預設建立新 domain{_RESET}\n",
+            kind="choice", options=options,
+        )
+        if answer is None:
             return [], ""
         if not answer:
             continue
@@ -678,56 +719,26 @@ def _ask_domain_selection(project_dir: str) -> tuple[list[str], str]:
         return selected, ""
 
 
-def _drain_stdin() -> None:
-    """清除 stdin buffer 中剩餘的輸入，防止使用者貼上多行文字時，
-    未被消耗的行混入後續的 input() 呼叫。"""
-    try:
-        import termios
-        termios.tcflush(sys.stdin, termios.TCIFLUSH)
-    except Exception:
-        pass
-
-
 def _ask_domain_purpose() -> str:
     """本次確定會建立新 domain 時（僅初始規劃）詢問使用者這個 domain 的 Purpose，選填——
     留白（含非互動式環境、使用者中止）就交由 Claude 依當次任務語意自行撰寫，不視為錯誤。
 
-    支援多行貼上：連續兩個空行（Enter Enter）或 Ctrl+D 結束輸入。
-    使用「雙空行」而非「單空行」為終止符，允許 Purpose 本文內含有 markdown 段落分隔（單空行）。
-    結束後一律 drain stdin，防止剩餘 buffer 行污染後續 grilling 的 input()。
+    命令列支援多行貼上：連續兩個空行（Enter Enter）或 Ctrl+D 結束輸入，結束後 drain
+    stdin，防止剩餘 buffer 行污染後續 grilling 的 input()；網頁模式一次送出全文，
+    不需要這個終止符與 drain（見 interaction.ask 的 multiline 實作）。
     """
     print(
         f"\n{_YELLOW}  [分析+規劃 Agent] 這是新建立的 domain，若要指定它的 Purpose 請輸入"
         f"（選填；支援多行，貼上後連按兩次 Enter 結束；直接 Enter 由 Agent 依本次任務自行撰寫）：{_RESET}",
         flush=True,
     )
-    if not sys.stdin.isatty():
-        return ""
-    lines: list[str] = []
-    consecutive_empty = 0
-    try:
-        while True:
-            line = input(f"{_YELLOW}  > {_RESET}")
-            if not line:
-                if not lines:
-                    # 第一行就是空行 → 使用者選擇略過
-                    break
-                consecutive_empty += 1
-                if consecutive_empty >= 2:
-                    break
-                lines.append(line)  # 保留單一空行（markdown 段落分隔）
-            else:
-                consecutive_empty = 0
-                lines.append(line)
-    except (EOFError, KeyboardInterrupt):
-        if not lines:
-            print(f"\n{_YELLOW}  已略過，由 Agent 自行撰寫 Purpose{_RESET}\n", flush=True)
-    finally:
-        _drain_stdin()
-    # 去除結尾空行
-    while lines and not lines[-1]:
-        lines.pop()
-    return "\n".join(lines).strip()
+    return _ask_or_default(
+        "這是新建立的 domain，若要指定它的 Purpose 請輸入（選填，留空由 Agent 自行撰寫）",
+        "",
+        interactive_msg=None,
+        abort_msg=f"\n{_YELLOW}  已略過，由 Agent 自行撰寫 Purpose{_RESET}\n",
+        kind="text", multiline=True,
+    )
 
 
 def _build_new_domain_context(name: str, purpose: str) -> str:
@@ -763,6 +774,63 @@ def _resolve_project_dir() -> str:
     return target
 
 
+_ADJUSTMENT_LINE_RE = re.compile(r"(?m)^調整 \d+：")
+
+
+def _append_adjustment(task: str, content: str) -> str:
+    """保留任務描述原文，附加一個空行與下一個編號的「調整 N：<內容>」。"""
+    n = len(_ADJUSTMENT_LINE_RE.findall(task))
+    return f"{task.rstrip()}\n\n調整 {n + 1}：{content}"
+
+
+def _ask_adjustment() -> str | None:
+    """重跑已規劃任務時詢問本次調整內容（必填）。非互動式環境或使用者中止回傳 None。"""
+    print(f"\n{_YELLOW}  [分析+規劃 Agent] 請輸入本次要調整的內容：{_RESET}", flush=True)
+    while True:
+        answer = _ask_or_default(
+            "請輸入本次要調整的內容", None,
+            interactive_msg=f"{_RED}  非互動式環境，無法輸入調整內容{_RESET}\n",
+            abort_msg=f"\n{_RED}  已取消，調整內容為必填{_RESET}\n",
+            kind="text", required=True, multiline=True,
+        )
+        if answer is None:
+            return None
+        if answer:
+            return answer
+        print(f"{_YELLOW}  不可為空，請重新輸入{_RESET}", flush=True)
+
+
+def _ask_rerun_mode() -> str:
+    """有尚未處理的審查退回時，詢問要「依審查結果重新規劃」還是「輸入調整內容」。
+    回傳 "replan" 或 "adjust"；非互動式環境或使用者中止視為 "replan"（維持既有行為）。
+    """
+    options = interaction.numbered(["依審查結果重新規劃", "輸入調整內容"])
+    print(
+        f"\n{_YELLOW}  [分析+規劃 Agent] 此任務有尚未處理的審查退回，要如何重新規劃？{_RESET}",
+        flush=True,
+    )
+    for line in options:
+        print(f"{_YELLOW}  {line}{_RESET}", flush=True)
+    answer = _ask_or_default(
+        "此任務有尚未處理的審查退回，要如何重新規劃？",
+        None,
+        interactive_msg=f"{_YELLOW}  非互動式環境，預設依審查結果重新規劃{_RESET}\n",
+        abort_msg=f"\n{_YELLOW}  已中止，預設依審查結果重新規劃{_RESET}\n",
+        kind="choice", options=options,
+    )
+    if answer in ("2", "輸入調整內容"):
+        return "adjust"
+    return "replan"
+
+
+def _is_archived_change(project_dir: str, change_name: str) -> bool:
+    """委派給 `lib/openspec_runner.is_change_archived()`，與網頁任務列共用同一規則。"""
+    if not project_dir:
+        return False
+    from ..lib.openspec_runner import is_change_archived
+    return is_change_archived(os.path.join(REPO_ROOT, project_dir), change_name)
+
+
 def _ask_branch_name() -> str:
     """任務開始時（僅初始規劃）詢問使用者本次要使用的 git 分支名稱，不可為空。
     非互動式環境或使用者中止時回傳空字串，由呼叫端視為錯誤。"""
@@ -771,14 +839,15 @@ def _ask_branch_name() -> str:
         f"（必填，例如 feature/add-login；已存在則切過去，不存在則新建）：{_RESET}",
         flush=True,
     )
-    if not sys.stdin.isatty():
-        print(f"{_RED}  非互動式環境，無法輸入分支名稱{_RESET}\n", flush=True)
-        return ""
     while True:
-        try:
-            answer = input(f"{_YELLOW}  > {_RESET}").strip()
-        except (EOFError, KeyboardInterrupt):
-            print(f"\n{_RED}  已取消，分支名稱為必填{_RESET}\n", flush=True)
+        answer = _ask_or_default(
+            "請輸入本次任務要使用的 git 分支名稱（必填，例如 feature/add-login；已存在則切過去，不存在則新建）",
+            None,
+            interactive_msg=f"{_RED}  非互動式環境，無法輸入分支名稱{_RESET}\n",
+            abort_msg=f"\n{_RED}  已取消，分支名稱為必填{_RESET}\n",
+            kind="text", required=True,
+        )
+        if answer is None:
             return ""
         if not answer:
             print(f"{_YELLOW}  不可為空，請重新輸入{_RESET}", flush=True)
@@ -792,12 +861,54 @@ def _ask_branch_name() -> str:
         return answer
 
 
+_NON_INTERACTIVE_BASE_BRANCH = object()
+
+
+def _ask_base_branch(project_dir: str, branch_name: str) -> str:
+    """初始規劃、且工作分支本地不存在時，列出目標專案全部本地分支讓使用者選擇起點分支。
+    直接 Enter 或非互動式環境採用目前分支；目前為 detached HEAD 時，直接 Enter 要重問，
+    非互動式環境則直接回傳空字串（由呼叫端視為錯誤，因為無法重問）。中止回傳空字串。"""
+    branches, current = list_local_branches(project_dir)
+    labels = [f"{b}（目前分支）" if b == current else b for b in branches]
+    options = interaction.numbered(labels)
+
+    question = f"要從哪個分支建立 {branch_name}？"
+    print(f"\n{_YELLOW}  [分析+規劃 Agent] {question}{_RESET}", flush=True)
+    for line in options:
+        print(f"{_YELLOW}  {line}{_RESET}", flush=True)
+
+    while True:
+        answer = _ask_or_default(
+            question, _NON_INTERACTIVE_BASE_BRANCH,
+            interactive_msg=f"{_YELLOW}  非互動式環境，以目前分支為起點{_RESET}\n",
+            abort_msg=f"\n{_YELLOW}  已中止，未選擇起點分支{_RESET}\n",
+            abort_default=None,
+            kind="choice", options=options,
+        )
+        if answer is _NON_INTERACTIVE_BASE_BRANCH:
+            return current
+        if answer is None:
+            return ""
+        if not answer:
+            if current:
+                return current
+            print(f"{_YELLOW}  目前為 detached HEAD，請輸入編號選擇起點分支{_RESET}", flush=True)
+            continue
+        if answer.isdigit():
+            idx = int(answer)
+            if 1 <= idx <= len(branches):
+                return branches[idx - 1]
+        print(f"{_YELLOW}  請輸入清單中的編號{_RESET}", flush=True)
+
+
 def analyze_plan_node(state: AgentState) -> dict:
+    task = state.get("task", "")
     review_result = state.get("review_result", "")
-    review_level = state.get("review_level", "") or "修補"
+    review_level_raw = state.get("review_level", "")
     human_feedback = state.get("human_feedback", "")
-    is_replan = bool(review_result)
-    is_human_revise = bool(human_feedback) and not is_replan
+    review_blocking = bool(state.get("review_blocking"))
+    analysis_state = state.get("analysis", "")
+    is_rerun = state.get("start_from") == "analyze_plan"
 
     change_name = state.get("change_name", "")
     branch_name = state.get("branch_name", "")
@@ -810,11 +921,18 @@ def analyze_plan_node(state: AgentState) -> dict:
 
     def _fail(analysis: str, session_id: str | None = None) -> dict:
         """session_id 省略時沿用插槽裡原本的值：guard 與前置步驟（切分支、openspec init）
-        失敗時還沒產生新的 session，不該把先前中斷留下的 id 清掉。"""
+        失敗時還沒產生新的 session，不該把先前中斷留下的 id 清掉。task／human_feedback／
+        review 相關欄位一併帶出目前值，讓調整中途失敗時附加後的 task 與調整內容仍寫進
+        state.json（見 _fail 呼叫端如何更新這些區域變數）。"""
         return {
             "status": "error",
             "analysis": analysis,
             "plan": [],
+            "task": task,
+            "human_feedback": human_feedback,
+            "review_result": review_result,
+            "review_level": review_level_raw,
+            "review_blocking": review_blocking,
             "change_name": change_name,
             "branch_name": branch_name,
             "project_dir": project_dir,
@@ -823,18 +941,20 @@ def analyze_plan_node(state: AgentState) -> dict:
             **store_session(_SESSION_KEY, prior_session if session_id is None else session_id),
         }
 
-    # Guard: 初始規劃已完成，不可再次執行初始規劃（只允許重新規劃或修補）
-    if not is_replan and not is_human_revise and state.get("analysis"):
+    # Guard: 已封存的任務不能調整，須在任何提問之前判定
+    if is_rerun and _is_archived_change(project_dir, change_name):
         print(
-            f"{_RED}  [分析+規劃 Agent] 此 change 已完成初始規劃，"
-            f"不可重複執行初始規劃（僅允許重新規劃或修補）{_RESET}\n",
+            f"{_RED}  [分析+規劃 Agent] 此 change 已封存，請以新任務進行後續修改{_RESET}\n",
             flush=True,
         )
-        return _fail("此 change 已完成初始規劃，不可重複執行初始規劃")
+        return _fail("此 change 已封存，請以新任務進行後續修改")
+
+    is_human_revise = bool(human_feedback)
+    is_replan = False if is_human_revise else bool(review_result) and review_blocking
 
     # Guard: review_blocking=True 但 review_result 為空 → 狀態不一致，無法重新規劃
     # human_feedback 提供的人工修補不依賴 review_result，不受此 guard 限制
-    if not is_human_revise and state.get("review_blocking") and not review_result:
+    if not is_human_revise and review_blocking and not review_result:
         print(
             f"{_RED}  [分析+規劃 Agent] review_blocking=True 但 review_result 為空，"
             f"無法執行重新規劃{_RESET}\n",
@@ -842,6 +962,38 @@ def analyze_plan_node(state: AgentState) -> dict:
         )
         return _fail("review_result 為空，無法重新規劃")
 
+    # 有尚未處理的審查退回時，讓使用者選擇「依審查結果重新規劃」或「輸入調整內容」；
+    # 工作流內部自動重新規劃（非重跑入口）或已有可接回的 session 時直接走重新規劃，不提問
+    is_adjust = False
+    if is_replan:
+        if is_rerun and not prior_session and _ask_rerun_mode() == "adjust":
+            is_replan = False
+            is_adjust = True
+    elif is_rerun and not is_human_revise and analysis_state:
+        # 已完成規劃、沒有尚未處理的審查退回、且為使用者主動重跑 → 視為調整，
+        # 不再是「不可重複初始規劃」的錯誤
+        is_adjust = True
+    elif not is_human_revise and analysis_state:
+        # 已完成規劃但非重跑入口（舊 state.json 或直接呼叫 node）→ 報錯，避免掉進初始
+        # 規劃後重問分支／spec／domain 並覆寫整份規格
+        return _fail("此 change 已完成規劃，請以重跑 analyze_plan 進行調整")
+
+    if is_adjust:
+        content = _ask_adjustment()
+        if content is None:
+            print(
+                f"{_RED}  [分析+規劃 Agent] 未提供調整內容，無法調整規劃{_RESET}\n",
+                flush=True,
+            )
+            return _fail("未提供調整內容，無法調整規劃")
+        task = _append_adjustment(task, content)
+        human_feedback = content
+        review_result = ""
+        review_blocking = False
+        review_level_raw = ""
+        is_human_revise = True
+
+    review_level = review_level_raw or "修補"
     model = _MODEL
     domain_context_value = ""
 
@@ -872,10 +1024,20 @@ def analyze_plan_node(state: AgentState) -> dict:
         return _fail("缺少 branch_name")
 
     if project_dir:
-        ok, msg = ensure_on_branch(project_dir, branch_name)
-        print(f"{_YELLOW}  [git] {msg}{_RESET}", flush=True)
-        if not ok:
-            return _fail(f"無法切換到分支 {branch_name}：{msg}")
+        is_initial_plan = not is_replan and not is_human_revise
+        if is_initial_plan and not branch_exists(project_dir, branch_name):
+            base_branch = _ask_base_branch(project_dir, branch_name)
+            if not base_branch:
+                return _fail(f"未選擇起點分支，無法建立分支 {branch_name}")
+            ok, msg = create_branch_from(project_dir, branch_name, base_branch)
+            print(f"{_YELLOW}  [git] {msg}{_RESET}", flush=True)
+            if not ok:
+                return _fail(f"無法建立分支 {branch_name}：{msg}")
+        else:
+            ok, msg = ensure_on_branch(project_dir, branch_name)
+            print(f"{_YELLOW}  [git] {msg}{_RESET}", flush=True)
+            if not ok:
+                return _fail(f"無法切換到分支 {branch_name}：{msg}")
 
     if is_replan and review_level == "重寫":
         ok, msg = rollback_except_openspec(project_dir)
@@ -1014,7 +1176,7 @@ def analyze_plan_node(state: AgentState) -> dict:
                 .replace("<<SKIP_SPECS_CONTEXT>>", _skip_specs_context(bool(skip_specs)))
             )
 
-        prompt = f"{system}\n\n{skills_block}\n\n任務：{state['task']}"
+        prompt = f"{system}\n\n{skills_block}\n\n任務：{task}"
 
         last_session = prior_session
 
@@ -1065,7 +1227,7 @@ def analyze_plan_node(state: AgentState) -> dict:
     if not domains:
         domains = _list_change_domains(project_dir, change_name)
 
-    return {
+    success = {
         "analysis": analysis,
         "plan": plan,
         "status": "pending",
@@ -1073,6 +1235,7 @@ def analyze_plan_node(state: AgentState) -> dict:
         "review_level": "",
         "review_blocking": False,
         "human_feedback": "",
+        "task": task,
         "change_name": change_name,
         "branch_name": branch_name,
         "project_dir": project_dir,
@@ -1080,3 +1243,7 @@ def analyze_plan_node(state: AgentState) -> dict:
         "skip_specs": skip_specs,
         **store_session(_SESSION_KEY, ""),
     }
+    if is_adjust:
+        # 調整視為新一輪規劃，審查重試次數重新起算
+        success["iteration"] = 0
+    return success

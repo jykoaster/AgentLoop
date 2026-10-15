@@ -1,0 +1,68 @@
+@import "tailwindcss";
+
+@theme {
+  --color-primary: #3b82f6;
+  --color-primary-hover: #2563eb;
+
+  --color-fg: #f1f5f9;
+  --color-fg-muted: #94a3b8;
+
+  --color-bg: #0b1120;
+  --color-surface: #1e293b;
+  --color-surface-muted: #334155;
+  --color-header: #020617;
+
+  --color-line: #475569;
+
+  --color-on-accent: #ffffff;
+  --color-overlay: rgb(2 6 23 / 0.7);
+
+  --color-danger: #f87171;
+  --color-warning: #fbbf24;
+  --color-success: #4ade80;
+
+  --color-stage-pending: #64748b;
+  --color-stage-running: #3b82f6;
+  --color-stage-done: #22c55e;
+  --color-stage-error: #ef4444;
+
+  --animate-breathe: breathe 2s ease-in-out infinite;
+  --animate-breathe-warning: breathe-warning 2s ease-in-out infinite;
+
+  @keyframes breathe {
+    0%,
+    100% {
+      box-shadow: 0 0 0 0 var(--color-stage-running);
+    }
+    50% {
+      box-shadow: 0 0 12px 2px var(--color-stage-running);
+    }
+  }
+
+  @keyframes breathe-warning {
+    0%,
+    100% {
+      box-shadow: 0 0 0 0 var(--color-warning);
+    }
+    50% {
+      box-shadow: 0 0 12px 2px var(--color-warning);
+    }
+  }
+}
+
+html,
+body {
+  background-color: var(--color-bg);
+  color: var(--color-fg);
+  color-scheme: dark;
+}
+
+@utility btn-secondary {
+  @apply rounded-md border border-line text-fg transition-colors hover:bg-surface-muted disabled:cursor-not-allowed disabled:opacity-50 cursor-pointer;
+}
+
+@utility output-text {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  min-width: 0;
+}

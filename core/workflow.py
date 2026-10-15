@@ -1,8 +1,29 @@
 from langgraph.graph import StateGraph, START, END
 from .state import AgentState
+from . import stages
 from ..nodes import analyze_plan_node, execute_node, review_node, human_confirm_node, archive_node
 
 MAX_ITERATIONS = 3
+
+
+def _tracked(stage: str, fn):
+    """包裝節點函式：開始時記為 running（其後各階段重設 pending），結束時依回傳的
+    status 記為 done／error。只碰 stages／stage_notes，不改節點回傳的其他欄位。
+
+    上游已經是 error 時，這個節點只是沿著既有的無條件邊被呼叫一次、內部立刻短路
+    回傳（例如 review_node／human_confirm_node 各自的 `status == "error"` guard），
+    並沒有真的執行這個階段的工作，所以不記錄狀態轉換，讓它維持尚未開始。
+    """
+    def wrapped(state: AgentState) -> dict:
+        if state.get("status") == "error":
+            return fn(state)
+        start_update = stages.start(state, stage)
+        working_state = {**state, **start_update}
+        result = fn(working_state)
+        status = result.get("status", state.get("status"))
+        finish_update = stages.finish({**working_state, **result}, stage, status)
+        return {**start_update, **result, **finish_update}
+    return wrapped
 
 
 def _route_start(state: AgentState) -> str:
@@ -46,12 +67,12 @@ def route_after_confirm(state: AgentState) -> str:
 def build_workflow() -> StateGraph:
     graph = StateGraph(AgentState)
 
-    graph.add_node("analyze_plan", analyze_plan_node)
-    graph.add_node("human_confirm", human_confirm_node)
-    graph.add_node("execute", execute_node)
-    graph.add_node("review", review_node)
+    graph.add_node("analyze_plan", _tracked("analyze_plan", analyze_plan_node))
+    graph.add_node("human_confirm", _tracked("human_confirm", human_confirm_node))
+    graph.add_node("execute", _tracked("execute", execute_node))
+    graph.add_node("review", _tracked("review", review_node))
     graph.add_node("increment", increment_iteration)
-    graph.add_node("archive_change", archive_node)
+    graph.add_node("archive_change", _tracked("archive", archive_node))
 
     # 流程：
     #   analyze_plan → human_confirm → [y] → execute → review → [pass] → archive_change → END

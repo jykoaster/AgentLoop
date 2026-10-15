@@ -1,12 +1,13 @@
 """呼叫本機 `claude -p` CLI，不需要 Anthropic API 額度。"""
 import json
+import os
 import re
 import shutil
 import subprocess
-import sys
 from dataclasses import dataclass
 from typing import Callable
 from .project_context import REPO_ROOT
+from . import interaction
 
 TOOL_PRESETS = {
     "readonly": "Read,Glob,Grep",
@@ -222,6 +223,23 @@ def format_usage_stats(result: ClaudeResult, elapsed: float) -> str:
     return "\n".join(lines)
 
 
+def _write_run_session_file(session_id: str) -> None:
+    """網頁模式下，第一次拿到 session_id 就寫進 `$AGENTLOOP_RUN_DIR/session.json`，
+    供使用者中止執行時，runner 能把它存回 state.json 的 session 插槽、供重跑接回。"""
+    run_dir = os.environ.get("AGENTLOOP_RUN_DIR", "")
+    if not run_dir:
+        return
+    from ..core.stages import current_stage
+    try:
+        path = os.path.join(run_dir, "session.json")
+        tmp = f"{path}.tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump({"stage": current_stage(), "session_id": session_id}, f)
+        os.replace(tmp, path)
+    except OSError:
+        pass
+
+
 def _run_claude_once(
     timeout: int,
     cmd: list[str],
@@ -230,6 +248,10 @@ def _run_claude_once(
     lines: list[str] = []
     stderr_out = ""
     session_id = ""
+    child_env = {
+        k: v for k, v in os.environ.items()
+        if k not in ("AGENTLOOP_INTERACTION", "AGENTLOOP_RUN_DIR")
+    }
     with subprocess.Popen(
         cmd,
         stdin=subprocess.DEVNULL,
@@ -238,6 +260,7 @@ def _run_claude_once(
         text=True,
         bufsize=1,
         cwd=REPO_ROOT,
+        env=child_env,
     ) as process:
         try:
             for line in process.stdout:
@@ -248,7 +271,10 @@ def _run_claude_once(
                         event = json.loads(stripped)
                     except json.JSONDecodeError:
                         continue
-                    session_id = event.get("session_id") or session_id
+                    new_session_id = event.get("session_id") or ""
+                    if new_session_id and new_session_id != session_id:
+                        _write_run_session_file(new_session_id)
+                    session_id = new_session_id or session_id
                     _log_event(event)
             process.wait(timeout=timeout)
             # 在 with 結束前讀取 stderr，避免 pipe 關閉後 I/O error
@@ -353,12 +379,17 @@ def call_claude(
             print(f"  請等到訊息中的 resets 時間、用量重置後，按 Enter 繼續；", flush=True)
             print(f"  或輸入 q 後按 Enter 中止程序（session id 會存進 state，之後可再接回）。{_RESET}", flush=True)
             print(f"{_YELLOW}  > {_RESET}", end="", flush=True)
+            from ..core.stages import current_stage
             try:
-                user_input = sys.stdin.readline()
+                user_input = interaction.ask(
+                    result.text[:300], kind="pause", stage=current_stage(),
+                )
             except (KeyboardInterrupt, EOFError):
                 print(f"\n{_YELLOW}  已中止{_RESET}\n", flush=True)
                 return result
-            if not user_input:  # stdin 已關閉（非 TTY / pipe EOF）
+            # 網頁模式的「繼續」就是回傳空字串，跟命令列用空字串代表 stdin 已關閉（EOF）
+            # 是同一個值、不同語意，不能共用同一條判斷式——只有命令列才會把空字串當成中止。
+            if not interaction.is_web_mode() and not user_input:
                 print(f"\n{_YELLOW}  stdin 已關閉，中止{_RESET}\n", flush=True)
                 return result
             if user_input.strip().lower() == "q":

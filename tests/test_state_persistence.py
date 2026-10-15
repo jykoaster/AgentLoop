@@ -222,7 +222,17 @@ class TestCliArgs:
     def test_node_without_task_runs(self):
         with patch("AgentLoop.main.run_node") as mock_run_node:
             self._main(["--node", "execute"])
-        mock_run_node.assert_called_once_with("execute")
+        mock_run_node.assert_called_once_with("execute", change_name=None)
+
+    def test_node_with_change_runs(self):
+        with patch("AgentLoop.main.run_node") as mock_run_node:
+            self._main(["--node", "execute", "--change", "feat-login"])
+        mock_run_node.assert_called_once_with("execute", change_name="feat-login")
+
+    def test_change_without_node_rejected(self):
+        with pytest.raises(SystemExit) as exc:
+            self._main(["--change", "feat-login"])
+        assert exc.value.code == 2
 
     def test_full_workflow_requires_task_description(self):
         with pytest.raises(SystemExit) as exc:
@@ -298,8 +308,36 @@ class TestAskDomainSelection:
         assert result == (["articles"], "")
 
     def test_select_multiple_existing_domains(self):
+        """Scenario: 以自訂文字輸入多個編號同時選擇多個既有 domain"""
         result = self._call(["articles", "users", "auth"], ["1,3"])
         assert result == (["articles", "auth"], "")
+
+    def test_web_click_create_new_domain_then_asks_new_domain_name(self):
+        """Scenario: 點擊建立新 domain 選項後接著詢問新 domain 名稱"""
+        from AgentLoop.nodes.analyze_plan import _ask_domain_selection
+        with patch("AgentLoop.nodes.analyze_plan._list_existing_domains", return_value=["web-gui"]), \
+             patch("AgentLoop.nodes.analyze_plan.interaction.is_interactive", return_value=True), \
+             patch("AgentLoop.nodes.analyze_plan.interaction.ask", side_effect=["2", "billing"]) as mock_ask:
+            result = _ask_domain_selection("my-project")
+
+        assert result == ([], "billing")
+        first_call, second_call = mock_ask.call_args_list
+        assert first_call.kwargs["options"] == ["1. web-gui", "2. 以上皆非，建立新 domain"]
+        assert second_call.kwargs["kind"] == "text"
+
+    def test_web_click_existing_domain_continues_with_that_domain(self):
+        """Scenario: 點擊既有 domain 選項後以該 domain 繼續規劃"""
+        from AgentLoop.nodes.analyze_plan import _ask_domain_selection
+        with patch("AgentLoop.nodes.analyze_plan._list_existing_domains", return_value=["auth", "billing"]), \
+             patch("AgentLoop.nodes.analyze_plan.interaction.is_interactive", return_value=True), \
+             patch("AgentLoop.nodes.analyze_plan.interaction.ask", side_effect=["2"]) as mock_ask:
+            result = _ask_domain_selection("my-project")
+
+        assert result == (["billing"], "")
+        mock_ask.assert_called_once()
+        assert mock_ask.call_args.kwargs["options"] == [
+            "1. auth", "2. billing", "3. 以上皆非，建立新 domain",
+        ]
 
     def test_select_new_domain_with_name(self):
         # domains=["articles","users"] → new_idx=3; user enters "3" then domain name

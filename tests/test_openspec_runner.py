@@ -6,6 +6,7 @@ from unittest.mock import patch
 from AgentLoop.lib.openspec_runner import (
     archive_change,
     archive_destination_name,
+    is_change_archived,
     vacate_existing_archive,
 )
 
@@ -98,3 +99,25 @@ class TestArchiveChangeVacatesFirst:
         assert not result.ok
         assert result.error_text == "無法改名"
         mock_run.assert_not_called()
+
+
+class TestIsChangeArchived:
+    def test_dated_archive_dir_and_no_active_dir_is_true(self, tmp_path):
+        (tmp_path / "openspec" / "changes" / "archive" / "2026-10-13-feat-login").mkdir(parents=True)
+        assert is_change_archived(str(tmp_path), "feat-login") is True
+
+    def test_undated_archive_dir_same_name_is_true(self, tmp_path):
+        (tmp_path / "openspec" / "changes" / "archive" / "feat-login").mkdir(parents=True)
+        assert is_change_archived(str(tmp_path), "feat-login") is True
+
+    def test_active_change_dir_still_exists_is_false(self, tmp_path):
+        (tmp_path / "openspec" / "changes" / "archive" / "2026-10-13-feat-login").mkdir(parents=True)
+        (tmp_path / "openspec" / "changes" / "feat-login").mkdir(parents=True)
+        assert is_change_archived(str(tmp_path), "feat-login") is False
+
+    def test_no_archive_dir_is_false(self, tmp_path):
+        assert is_change_archived(str(tmp_path), "feat-login") is False
+
+    def test_unsafe_change_name_is_false(self, tmp_path):
+        (tmp_path / "openspec" / "changes" / "archive" / "escape").mkdir(parents=True)
+        assert is_change_archived(str(tmp_path), "../escape") is False

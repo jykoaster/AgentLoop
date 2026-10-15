@@ -26,12 +26,13 @@
    ```bash
    # AgentLoop 與目標專案的共同上層目錄（host 上的真實絕對路徑）
    HOST_WORKSPACE_ROOT=/Users/<you>/workspace
-
-   # 目標專案的資料夾名稱（相對於 HOST_WORKSPACE_ROOT）
-   TARGET_PROJECT=my-project
    ```
 
-   `docker-compose.yml` 會依 `TARGET_PROJECT` 掛載 `${HOST_WORKSPACE_ROOT}/${TARGET_PROJECT}`，不需要再手動改 `docker-compose.yml`。只支援單一目標專案，不提供多專案掛載的擴充方式。
+   `.env` 只**必填**這一個變數——`docker-compose.yml` 會掛載整個 `${HOST_WORKSPACE_ROOT}`（而不
+   是只掛單一目標專案），讓網頁控制台能用資料夾選擇器切換目標專案，不需要為此重建容器。
+   `TARGET_PROJECT`、`CLAUDE_CODE_OAUTH_TOKEN`、`ANTHROPIC_API_KEY` 這幾項仍可
+   寫在 `.env` 裡當作預設值，但也可以改到網頁的「設定」分頁設定（見下方「網頁控制台」）——網頁
+   設定的值優先於 `.env`。只支援單一目標專案同時執行。
 
 2. 確認目標專案內已放好 [`CLAUDE.md` / `AGENT.md`](#目標專案文件需求)——這是系統判斷架構與慣例的主要依據。
 
@@ -42,11 +43,39 @@ docker compose build
 docker compose up -d
 ```
 
-容器啟動後會保持存活（`tail -f /dev/null`），透過 `docker exec` 進入下指令：
+容器啟動後會自動跑起網頁控制台（`uvicorn` 監聽容器內 `0.0.0.0:8000`，compose 只對外綁
+`127.0.0.1:8000`），前端是映像裡的建置產物。在瀏覽器開啟：
+
+```
+http://127.0.0.1:8000
+```
+
+CLI 用法仍然可用，透過 `docker exec` 進容器下指令：
 
 ```bash
 docker exec -it agent_loop bash
 ```
+
+### 網頁控制台
+
+最外層四個分頁：
+
+- **執行中任務**：每個未封存的任務一列，依序顯示五個工作階段（`analyze_plan`／
+  `human_confirm`／`execute`／`review`／`archive`）各自的卡片，以顏色區分尚未開始（灰）／
+  執行中（藍）／完成（綠）／錯誤（紅）；等待回覆時卡片顯示驚嘆號，點卡片後詳情展開在該任務列
+  卡片下方（不影響其他任務列，可同時展開多列各自的詳情）進行回覆（選項題／是非題／文字題／
+  用量上限暫停都在這裡處理，效果等同在終端機輸入同一內容）或中止該階段；
+  `analyze_plan`／`execute`／`review`／`archive` 四張卡片可單獨重跑。標題列最右側的純圖示按鈕
+  可收合／展開該任務列（收合後只留標題列，任務多時可把不關心的任務收起來）。「新增任務」等同
+  命令列的完整工作流程模式。同一時間只允許一個執行進行中，進行中時其他啟動動作會停用並顯示
+  原因
+- **已封存任務**：唯讀瀏覽目標專案 `openspec/changes/archive/` 底下每個已封存的 change
+- **既有 Spec**：唯讀瀏覽目標專案 `openspec/specs/` 底下每個 domain，並提供語意搜尋（等同
+  `python -m AgentLoop.search`）
+- **設定**：目標專案、Claude OAuth token、Anthropic API key；尚未指定目標專案時
+  自動開啟資料夾選擇器（只能選工作區根目錄底下的資料夾）。這裡存的值優先於 `.env`
+
+未設定目標專案前，「執行中任務」「已封存任務」「既有 Spec」三個分頁會提示先到「設定」選擇。
 
 ### 首次使用：容器內登入 Claude Code
 
@@ -99,15 +128,29 @@ python -m AgentLoop.main --node analyze_plan
 python -m AgentLoop.main --node execute
 python -m AgentLoop.main --node review
 python -m AgentLoop.main --node archive
+
+# 搭配 --change <name> 直接指定 change，不顯示終端選單（找不到就報錯結束）；
+# 網頁控制台的重跑功能在背後就是呼叫這個組合
+python -m AgentLoop.main --node execute --change feat-login
 ```
 
 `--node` 模式刻意不接受任務描述（傳了會直接報錯）：state 裡已經有當初的任務，再傳一份只會覆蓋掉原值並寫回 `state.json`。也因此 `--node` 一定要選到一個既有的 change，找不到任何 `state.json` 時會中止——全新任務請用上面完整工作流的形式。
 
 完整工作流跑到 `human_confirm` 時會暫停，在終端機顯示規劃摘要與 TASK 清單，輸入 `y` 才會繼續往下執行。
 
-執行過程中，`analyze_plan` 第一次進行初始規劃時會先在終端機詢問**本次任務要使用的 git 分支名稱（必填）**：已存在則切過去，不存在則從目前 HEAD 新建。OpenSpec change 名稱由此分支轉成 kebab-case（例如 `feature/add-login` → `feature-add-login`），之後規劃、實作、審查、archive 都在這個分支上進行。此值會沿用到同一個任務後續的重新規劃／依人工意見調整，不會重複問。
+執行過程中，`analyze_plan` 第一次進行初始規劃時會先在終端機詢問**本次任務要使用的 git 分支名稱（必填）**：已存在則切過去；不存在則接著列出目標專案全部本地分支，詢問**要從哪個分支建立**（直接 Enter 採用目前分支），選定後會先切到該起點分支、以只快轉方式 `git pull` 同步到遠端最新版本（起點分支沒有追蹤遠端分支時會印出提示並略過這步），同步成功才從它建立並切換到工作分支；若切換或同步失敗（網路／認證錯誤、本地與遠端分岔無法快轉、逾時等），會記為錯誤且不建立工作分支。容器需具備目標專案 remote 的 git 認證（SSH key 或 credential helper）才能完成同步，否則凡是有追蹤遠端分支的起點分支都會同步失敗。OpenSpec change 名稱由工作分支名稱轉成 kebab-case（例如 `feature/add-login` → `feature-add-login`），之後規劃、實作、審查、archive 都在這個分支上進行。此值會沿用到同一個任務後續的重新規劃／依人工意見調整，不會重複問。
 
 接著會問**本次是否需要撰寫 spec**（`y` 寫 `specs/<domain>/spec.md`；`n` 表示純重構／文件／設定，不寫 spec）。答案記在 state 的 `skip_specs`（`n` 為 `true`），同一個 change 之後再規劃、或驗收後再開一輪，都會沿用、不再問。選 `n` 時不會再問 domain 歸屬。
+
+### 對同一個任務進行調整
+
+對一個已完成規劃（甚至已執行、已通過審查）的任務，不需要手動改 `state.json`，直接重跑它的 `analyze_plan` 即可——網頁控制台任務列的「重跑」按鈕，或命令列：
+
+```bash
+python -m AgentLoop.main --node analyze_plan --change feat-login
+```
+
+都會先以必填文字題詢問**本次要調整的內容**，不會再問一次分支名稱、是否撰寫 spec、domain 歸屬（這些沿用原本的決定）。調整內容會保留任務描述原文，附加成「調整 N：<內容>」，依調整內容更新同一個 `openspec/changes/<name>/`；已勾選完成的 `tasks.md` 項目維持不動，只新增或改寫尚未完成的項目，接著照原工作流進入人工確認、`execute`、`review`，審查重試次數重新從 0 起算。若該任務有尚未處理的審查退回，會先讓你選「依審查結果重新規劃」或「輸入調整內容」。已封存的任務（`openspec/changes/archive/` 底下）不能用這個方式調整，會直接報錯，請改開新任務。
 
 ### 撞到 Claude 用量上限時
 
@@ -139,7 +182,7 @@ python -m AgentLoop.search --reindex "query"   # 強制重建索引後再搜尋
 
 對目標專案的整個 `openspec/`（`specs/` + `changes/`）做向量語意搜尋，然後由 Claude 依搜尋結果合成自然語言答案（RAG）。索引儲存於目標專案的 `openspec/.vector_index/vector.db`，每次查詢前自動偵測是否有新的規格檔案，有則重建；第一次執行會下載 embedding 模型（約 100 MB，快取於容器的 `~/.cache/fastembed/`）。
 
-**認證**：優先使用 `.env` 的 `ANTHROPIC_API_KEY`；未設定時自動 fallback 到 `claude` CLI（使用容器現有的 OAuth 登入狀態）。可用 `SEARCH_MODEL` 覆蓋模型（`haiku`/`sonnet`/`opus`/`fable`），預設為 `haiku`。
+**認證**：優先使用 `.env` 的 `ANTHROPIC_API_KEY`；未設定時自動 fallback 到 `claude` CLI（使用容器現有的 OAuth 登入狀態）。搜尋一律使用 `haiku`；`SEARCH_MODEL` 已不再支援。
 
 ---
 

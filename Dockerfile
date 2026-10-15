@@ -27,6 +27,14 @@ RUN npm install -g @anthropic-ai/claude-code@2.1.285
 # review 通過後由 archive 節點呼叫 `openspec archive` 合併進目標專案的 openspec/specs/）
 RUN npm install -g @fission-ai/openspec
 
+# 建置網頁控制台前端（Vue 3 SPA）。產物放在 /opt 而非 AgentLoop/ 底下，因為執行時
+# AgentLoop/ 會被 host 的 bind mount 整個蓋掉，build 在映像裡的檔案會跟著消失不見。
+COPY web/frontend /opt/agentloop-web-src
+RUN cd /opt/agentloop-web-src && npm ci && npm run build && \
+    mkdir -p /opt/agentloop-web && mv /opt/agentloop-web-src/dist /opt/agentloop-web/dist && \
+    rm -rf /opt/agentloop-web-src
+ENV WEB_DIST_DIR=/opt/agentloop-web/dist
+
 # 安裝 Python 依賴（先複製 requirements 利用 layer cache）
 COPY requirements.txt /tmp/requirements.txt
 RUN pip install --no-cache-dir -r /tmp/requirements.txt

@@ -8,7 +8,6 @@ Usage (inside container):
 Env vars:
   TARGET_PROJECT    required: target project name (same as main workflow)
   ANTHROPIC_API_KEY required: for RAG answer generation
-  SEARCH_MODEL      optional: short model name (haiku/sonnet/opus/fable, default: haiku)
 """
 import os
 import sys
@@ -218,8 +217,7 @@ def _build_rag_prompt(query: str, results: list[dict], project_name: str) -> str
 def _ask_claude(query: str, results: list[dict], project_name: str) -> str:
     import subprocess
 
-    model_key = os.environ.get("SEARCH_MODEL", _DEFAULT_MODEL)
-    model = MODEL_IDS.get(model_key, model_key)
+    model = MODEL_IDS[_DEFAULT_MODEL]
     prompt = _build_rag_prompt(query, results, project_name)
 
     # Try Anthropic SDK first (when ANTHROPIC_API_KEY is set)
