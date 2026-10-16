@@ -12,11 +12,11 @@ from unittest.mock import patch, MagicMock
 import AgentLoop.core.workflow  # noqa: F401 強制正確的 import 順序（見 test_node_guards.py 說明）
 
 
-def _mock_claude_result(text: str = "完成") -> MagicMock:
+def _mock_claude_result(text: str = "完成", *, is_error: bool = False, session_id=None) -> MagicMock:
     r = MagicMock()
-    r.is_error = False
+    r.is_error = is_error
     r.text = text
-    r.session_id = None
+    r.session_id = session_id
     r.input_tokens = 0
     r.output_tokens = 0
     r.cache_read_tokens = 0
