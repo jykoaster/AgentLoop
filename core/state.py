@@ -20,5 +20,7 @@ class AgentState(TypedDict):
     session_node: str    # 中斷中的 Claude session 屬於哪個 node（""＝沒有）；每個 change 同時只有一個，見 core/session.py
     session_id: str      # 該 session 的 id，撞到用量上限後可 --resume 接回；只透過 core/session.py 讀寫
     start_from: str      # transient routing hint: which node to enter first (read by _route_start in workflow.py); not persisted to state.json
+    planned: bool         # 這個 change 的 analyze_plan 是否至少成功完成過一次規劃；只在 analyze_plan 成功時寫 True
+    replan_failed: bool   # 最近一次 analyze_plan 是否在「依審查結果重新規劃」途中失敗；成功時寫 False
     stages: dict[str, str]        # 各工作階段狀態："pending" | "running" | "done" | "error"；見 core/stages.py
     stage_notes: dict[str, str]   # 階段附註（目前只有 "使用者中止"）；見 core/stages.py

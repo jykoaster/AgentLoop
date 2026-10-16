@@ -102,6 +102,10 @@ class AgentState(TypedDict):
                            # 初始規劃時在呼叫 Claude 前決定，之後所有節點據此定位 openspec/changes/<change_name>/
     stages: dict[str, str]        # 各工作階段狀態："pending"|"running"|"done"|"error"；見下方「網頁控制台」的「階段狀態」
     stage_notes: dict[str, str]   # 階段附註（目前只有 "使用者中止"）
+    planned: bool          # 這個 change 的 analyze_plan 是否至少成功完成過一次規劃；只在
+                           # analyze_plan 成功時寫 True，用來判定重跑 analyze_plan 要走初始規劃還是調整
+    replan_failed: bool    # 最近一次 analyze_plan 是否在「依審查結果重新規劃」途中失敗；成功時寫 False，
+                           # 用來判定重跑時是否要略過「依審查結果重新規劃／輸入調整內容」選擇題
 ```
 
 每個節點讀取需要的欄位、寫入自己負責的欄位，節點之間**不直接呼叫彼此**，全部透過狀態字典溝通。
@@ -216,19 +220,30 @@ domain／`openspec` 的 init／new change／validate 等機械式判斷全部由
 | 1    | 已封存報錯                  | `is_rerun` 且該 change 已封存（見下方「已封存任務」）                        | 不呼叫 Claude | — |
 | 2    | 依人工意見調整計畫          | `human_feedback` 非空（含被中斷的調整，見下方「調整」模式的接回）             | `revise` | opus |
 | 3    | 重新規劃（review 觸發）     | `review_result` 非空且 `review_blocking` 為 `True`                          | `revise` | opus |
-| 4    | 調整                        | 不屬於以上任何一種，且 `is_rerun` 且 `analysis` 非空（已完成過規劃）          | `revise` | opus |
-| 5    | 已規劃但非重跑入口報錯      | 不屬於以上任何一種，且 `analysis` 非空但 `is_rerun` 為否（舊 `state.json` 或直接呼叫 node；正常路由不會出現） | 不呼叫 Claude | — |
-| 6    | 初始規劃                    | 不屬於以上任何一種（全新任務）                                                | `plan`   | opus |
+| 4    | 調整                        | 不屬於以上任何一種，且 `is_rerun` 且已完成過規劃（`planned` 為 `True`）       | `revise` | opus |
+| 5    | 已規劃但非重跑入口報錯      | 不屬於以上任何一種，且已完成過規劃（`planned` 為 `True`）但 `is_rerun` 為否（舊 `state.json` 或直接呼叫 node；正常路由不會出現） | 不呼叫 Claude | — |
+| 6    | 初始規劃                    | 不屬於以上任何一種（全新任務，或上次初始規劃失敗後重跑）                      | `plan`   | opus |
 
 `is_replan` 因此定義為 `bool(review_result) and review_blocking`——只看 `review_result` 非空已不足夠：
 review 通過後 `review_result` 仍留著最後一份報告，若不檢查 `review_blocking` 會把「調整」誤判成
 「依審查結果重新規劃」。順序 3 命中、且 `is_rerun` 為真、`session_node`／`session_id` 插槽裡沒有屬於
-`analyze_plan` 的中斷 session 時，會先以選擇題問使用者「依審查結果重新規劃」或「輸入調整內容」
-（`_ask_rerun_mode()`，`interaction.ask(kind="choice")`；非互動式環境或使用者中止視為前者，維持
-既有行為）；選「輸入調整內容」就降級成順序 4 的調整模式。工作流內部自動回到 `analyze_plan`
-（`is_rerun` 為否）或已有可接回的 session 時，順序 3 不提問，直接重新規劃——這跟已中斷的調整
-（順序 2）接回不提問是同一個道理：那個答案只用來決定要不要問，問過一次之後的狀態已經記在
-`human_feedback`／`review_blocking` 裡，不需要再問一次。
+`analyze_plan` 的中斷 session、且 `replan_failed` 不為 `True` 時，會先以選擇題問使用者「依審查結果
+重新規劃」或「輸入調整內容」（`_ask_rerun_mode()`，`interaction.ask(kind="choice")`；非互動式環境或
+使用者中止視為前者，維持既有行為）；選「輸入調整內容」就降級成順序 4 的調整模式，並把 `replan_failed`
+寫為 `False`。工作流內部自動回到 `analyze_plan`（`is_rerun` 為否）、已有可接回的 session、或
+`replan_failed` 為 `True`（上次就是依審查結果重新規劃失敗，例如 Claude 執行失敗且沒有留下可接回的
+session）時，順序 3 不提問，直接重新規劃——這跟已中斷的調整（順序 2）接回不提問是同一個道理：那個
+答案只用來決定要不要問，問過一次之後的狀態已經記在 `human_feedback`／`review_blocking`／
+`replan_failed` 裡，不需要再問一次。
+
+順序 4／5 是否「已完成過規劃」一律看 `planned` 欄位，**不能看 `analysis` 是否非空**：`_fail()`
+固定把錯誤訊息寫進 `analysis` 供階段詳情顯示，所以初始規劃失敗時 `analysis` 也會非空；
+若拿它判定已完成規劃，初始規劃失敗後重跑會被誤判成順序 4 的調整。`planned` 只在 analyze_plan
+成功時寫 `True`（見 `_is_planned()`），因此初始規劃失敗後重跑會維持 `planned=False`，命中順序 6
+重新執行初始規劃——此時 `branch_name`／`project_dir`／`change_name`／`skip_specs`／`domains` 已由
+上次 `_fail()` 存進 state，不會重問；若上次因中斷留下屬於 analyze_plan 的 session，也會透過
+`call_resuming()` 接回續作。舊 `state.json` 沒有 `planned` 欄位時，`_is_planned()` 以 `plan` 非空
+或 change 資料夾下已有 `tasks.md` 推定。
 
 順序 4 要求 `is_rerun`，否則落入順序 5：已完成規劃但不是使用者主動重跑進來（工作流內部正常路由
 不會走到這裡，只有舊 `state.json` 或直接呼叫 `analyze_plan_node()` 才會遇到）直接

@@ -271,6 +271,19 @@ def _read_change_artifacts(project_dir: str, change_name: str) -> tuple[str, lis
     return analysis, plan
 
 
+def _is_planned(state: AgentState, project_dir: str, change_name: str) -> bool:
+    """判斷這個 change 是否至少成功完成過一次規劃：優先看 `state["planned"]`（只由
+    analyze_plan 成功路徑寫入）；缺欄位（舊 state.json）時以 `plan` 非空或 change
+    資料夾下已有 `tasks.md` 推定——`_fail()` 永遠把 `plan` 設為空清單，不會誤判成已規劃。"""
+    raw = state.get("planned")
+    if isinstance(raw, bool):
+        return raw
+    if state.get("plan"):
+        return True
+    tasks_path = os.path.join(REPO_ROOT, project_dir, "openspec", "changes", change_name, "tasks.md")
+    return os.path.isfile(tasks_path)
+
+
 def _is_question(text: str) -> bool:
     """判斷本輪回應是否包含提問。
 
@@ -907,7 +920,6 @@ def analyze_plan_node(state: AgentState) -> dict:
     review_level_raw = state.get("review_level", "")
     human_feedback = state.get("human_feedback", "")
     review_blocking = bool(state.get("review_blocking"))
-    analysis_state = state.get("analysis", "")
     is_rerun = state.get("start_from") == "analyze_plan"
 
     change_name = state.get("change_name", "")
@@ -917,13 +929,17 @@ def analyze_plan_node(state: AgentState) -> dict:
     raw_skip = state.get("skip_specs", None)
     skip_specs: bool | None = raw_skip if isinstance(raw_skip, bool) else None
 
+    planned = _is_planned(state, project_dir, change_name)
+    replan_failed = state.get("replan_failed") is True
+
     prior_session = take_session(state, _SESSION_KEY)
 
     def _fail(analysis: str, session_id: str | None = None) -> dict:
         """session_id 省略時沿用插槽裡原本的值：guard 與前置步驟（切分支、openspec init）
         失敗時還沒產生新的 session，不該把先前中斷留下的 id 清掉。task／human_feedback／
         review 相關欄位一併帶出目前值，讓調整中途失敗時附加後的 task 與調整內容仍寫進
-        state.json（見 _fail 呼叫端如何更新這些區域變數）。"""
+        state.json（見 _fail 呼叫端如何更新這些區域變數）。planned／replan_failed 同樣
+        帶出目前值，讓重跑時能判斷失敗當下是哪一種規劃。"""
         return {
             "status": "error",
             "analysis": analysis,
@@ -938,6 +954,8 @@ def analyze_plan_node(state: AgentState) -> dict:
             "project_dir": project_dir,
             "domains": domains,
             "skip_specs": skip_specs,
+            "planned": planned,
+            "replan_failed": replan_failed,
             **store_session(_SESSION_KEY, prior_session if session_id is None else session_id),
         }
 
@@ -963,17 +981,21 @@ def analyze_plan_node(state: AgentState) -> dict:
         return _fail("review_result 為空，無法重新規劃")
 
     # 有尚未處理的審查退回時，讓使用者選擇「依審查結果重新規劃」或「輸入調整內容」；
-    # 工作流內部自動重新規劃（非重跑入口）或已有可接回的 session 時直接走重新規劃，不提問
+    # 工作流內部自動重新規劃（非重跑入口）、已有可接回的 session、或上次就是依審查結果
+    # 重新規劃失敗（replan_failed）時直接走重新規劃，不提問
     is_adjust = False
     if is_replan:
-        if is_rerun and not prior_session and _ask_rerun_mode() == "adjust":
+        if is_rerun and not prior_session and not replan_failed and _ask_rerun_mode() == "adjust":
             is_replan = False
             is_adjust = True
-    elif is_rerun and not is_human_revise and analysis_state:
+            replan_failed = False
+        else:
+            replan_failed = True
+    elif is_rerun and not is_human_revise and planned:
         # 已完成規劃、沒有尚未處理的審查退回、且為使用者主動重跑 → 視為調整，
         # 不再是「不可重複初始規劃」的錯誤
         is_adjust = True
-    elif not is_human_revise and analysis_state:
+    elif not is_human_revise and planned:
         # 已完成規劃但非重跑入口（舊 state.json 或直接呼叫 node）→ 報錯，避免掉進初始
         # 規劃後重問分支／spec／domain 並覆寫整份規格
         return _fail("此 change 已完成規劃，請以重跑 analyze_plan 進行調整")
@@ -1241,6 +1263,8 @@ def analyze_plan_node(state: AgentState) -> dict:
         "project_dir": project_dir,
         "domains": domains,
         "skip_specs": skip_specs,
+        "planned": True,
+        "replan_failed": False,
         **store_session(_SESSION_KEY, ""),
     }
     if is_adjust:

@@ -144,6 +144,8 @@ def _empty_state(task: str) -> AgentState:
         "start_from": "",
         "stages": {},
         "stage_notes": {},
+        "planned": False,
+        "replan_failed": False,
     }
 
 
