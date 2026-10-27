@@ -1,9 +1,10 @@
-"""在目標專案切換／建立 git 分支。"""
+"""任務工作目錄（git worktree）的建立／移除／commit，與唯讀的分支查詢。"""
 import os
 import subprocess
 from .project_context import REPO_ROOT
 
 _GIT_TIMEOUT = 30
+_WORKTREES_DIR = ".agentloop-worktrees"
 
 
 def _git(repo: str, *args: str) -> subprocess.CompletedProcess:
@@ -14,6 +15,14 @@ def _git(repo: str, *args: str) -> subprocess.CompletedProcess:
         encoding="utf-8",
         timeout=_GIT_TIMEOUT,
     )
+
+
+def worktree_dir(project_dir: str, change_name: str) -> str:
+    """回傳任務工作目錄相對 `REPO_ROOT` 的路徑：`.agentloop-worktrees/<project_dir>/<change_name>`。
+
+    路徑完全由這兩個欄位決定，不另外存成 state 欄位。
+    """
+    return os.path.join(_WORKTREES_DIR, project_dir, change_name)
 
 
 def list_local_branches(project_dir: str) -> tuple[list[str], str]:
@@ -71,77 +80,157 @@ def read_branch_file(project_dir: str, branch: str, path_rel: str) -> tuple[str 
     return result.stdout, ""
 
 
-def create_branch_from(project_dir: str, branch_name: str, base_branch: str) -> tuple[bool, str]:
-    """切到 `base_branch`、以只快轉方式同步其追蹤的遠端分支後，從它建立並切換到 `branch_name`。
+def _list_worktrees(repo: str) -> list[dict]:
+    """解析 `git worktree list --porcelain`，回傳 `[{"worktree": path, "branch": "" 或分支名}, ...]`。
+    第一筆固定是主工作目錄；`branch` 為空代表 detached HEAD 或 bare repo。"""
+    result = _git(repo, "worktree", "list", "--porcelain")
+    entries: list[dict] = []
+    current: dict = {}
+    for line in result.stdout.splitlines():
+        if not line.strip():
+            if current:
+                entries.append(current)
+                current = {}
+            continue
+        if line.startswith("worktree "):
+            current["worktree"] = line[len("worktree "):]
+            current.setdefault("branch", "")
+        elif line.startswith("branch "):
+            ref = line[len("branch "):]
+            current["branch"] = ref[len("refs/heads/"):] if ref.startswith("refs/heads/") else ref
+    if current:
+        entries.append(current)
+    return entries
 
-    回傳 `(成功, 訊息)`。`base_branch` 沒有 upstream 時略過同步，直接以本地版本建立。
-    同步失敗（分岔、無法快轉、網路／認證錯誤、逾時）時停在 `base_branch` 上，不建立 `branch_name`。
+
+def ensure_worktree(project_dir: str, change_name: str, branch_name: str) -> tuple[bool, str]:
+    """確保任務工作目錄存在、簽出 `branch_name`（取代 `ensure_on_branch`）。
+
+    1. 任務工作目錄已存在且是該 repo 的 worktree、簽出 `branch_name` → 成功，不做事。
+    2. `branch_name` 是主工作目錄目前所在分支 → 失敗，固定錯誤訊息。
+    3. `branch_name` 已被其他 worktree 簽出 → 失敗並附 git 訊息。
+    4. 本地已有 `branch_name` → `git worktree add`；本地沒有 → 從主工作目錄 HEAD 建立。
     """
     repo = os.path.join(REPO_ROOT, project_dir)
+    abs_path = os.path.join(REPO_ROOT, worktree_dir(project_dir, change_name))
 
-    try:
-        checked_out = _git(repo, "checkout", base_branch)
-        if checked_out.returncode != 0:
-            err = (checked_out.stderr or checked_out.stdout).strip()
-            return False, err or f"無法切換到起點分支 {base_branch}"
+    _git(repo, "worktree", "prune")
+    entries = _list_worktrees(repo)
 
-        skip_note = ""
-        upstream = _git(repo, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}")
-        if upstream.returncode == 0:
-            pulled = _git(repo, "pull", "--ff-only")
-            if pulled.returncode != 0:
-                err = (pulled.stderr or pulled.stdout).strip()
-                return False, f"git pull 失敗：{err}"
+    abs_path_real = os.path.realpath(abs_path)
+    for entry in entries:
+        if os.path.realpath(entry.get("worktree", "")) == abs_path_real:
+            if entry.get("branch") == branch_name:
+                return True, f"任務工作目錄已存在並簽出分支 {branch_name}：{abs_path}"
+            return False, (
+                f"任務工作目錄 {abs_path} 已存在但簽出分支 "
+                f"{entry.get('branch') or '(detached)'}，與要求的 {branch_name} 不符"
+            )
+
+    main_branch = entries[0].get("branch", "") if entries else ""
+    if main_branch == branch_name:
+        return False, (
+            f"分支 {branch_name} 正在主工作目錄使用中，"
+            "請先將主工作目錄切換到其他分支（未提交變更請先 commit 或 stash）"
+        )
+
+    for entry in entries:
+        if entry.get("branch") == branch_name:
+            return False, f"分支 {branch_name} 已被其他 worktree 簽出：{entry.get('worktree', '')}"
+
+    os.makedirs(os.path.dirname(abs_path), exist_ok=True)
+
+    if branch_exists(project_dir, branch_name):
+        result = _git(repo, "worktree", "add", abs_path, branch_name)
+    else:
+        result = _git(repo, "worktree", "add", "-b", branch_name, abs_path, "HEAD")
+
+    if result.returncode != 0:
+        err = (result.stderr or result.stdout).strip()
+        return False, err or f"無法建立任務工作目錄 {abs_path}"
+
+    return True, f"已建立任務工作目錄 {abs_path}，簽出分支 {branch_name}"
+
+
+def create_worktree_from(
+    project_dir: str, change_name: str, branch_name: str, base_branch: str
+) -> tuple[bool, str]:
+    """以 `base_branch` 的遠端追蹤分支為起點，建立新分支 `branch_name` 與任務工作目錄
+    （取代 `create_branch_from`）；主工作目錄不 checkout、不 pull，只 `git fetch`。
+
+    `base_branch` 沒有 upstream 時直接以本地版本為起點。fetch 失敗但本地已有該遠端追蹤
+    ref 時仍以它為起點（容器內常無遠端認證）；fetch 失敗又沒有該 ref 則不建立。
+    """
+    repo = os.path.join(REPO_ROOT, project_dir)
+    abs_path = os.path.join(REPO_ROOT, worktree_dir(project_dir, change_name))
+
+    upstream = _git(repo, "rev-parse", "--abbrev-ref", "--symbolic-full-name", f"{base_branch}@{{u}}")
+    start_point = base_branch
+    note = ""
+
+    if upstream.returncode == 0 and upstream.stdout.strip():
+        remote_ref = upstream.stdout.strip()
+        remote_name, _, remote_branch = remote_ref.partition("/")
+        fetch = _git(repo, "fetch", remote_name, remote_branch or base_branch)
+        if fetch.returncode == 0:
+            start_point = remote_ref
         else:
-            skip_note = f"起點分支 {base_branch} 未設定 upstream，略過 git pull；"
+            fetch_err = (fetch.stderr or fetch.stdout).strip()
+            check = _git(repo, "rev-parse", "--verify", "--quiet", remote_ref)
+            if check.returncode != 0:
+                return False, f"無法連線遠端且本地無 {remote_ref}：{fetch_err}"
+            start_point = remote_ref
+            note = f"容器內無法連線遠端、改用本地的遠端追蹤分支 {remote_ref}（{fetch_err}）；"
+    else:
+        note = f"起點分支 {base_branch} 未設定 upstream，略過同步；"
 
-        created = _git(repo, "checkout", "-b", branch_name)
-        if created.returncode != 0:
-            err = (created.stderr or created.stdout).strip()
-            return False, err or f"無法建立分支 {branch_name}"
+    _git(repo, "worktree", "prune")
+    os.makedirs(os.path.dirname(abs_path), exist_ok=True)
 
-        return True, f"{skip_note}{project_dir} 已從 {base_branch} 建立並切換到分支 {branch_name}"
-    except subprocess.TimeoutExpired:
-        return False, "git pull 逾時"
+    result = _git(repo, "worktree", "add", "--no-track", "-b", branch_name, abs_path, start_point)
+    if result.returncode != 0:
+        err = (result.stderr or result.stdout).strip()
+        return False, err or f"無法建立任務工作目錄 {abs_path}"
+
+    return True, f"{note}已從 {start_point} 建立任務工作目錄 {abs_path}，分支 {branch_name}"
 
 
-def ensure_on_branch(project_dir: str, branch_name: str) -> tuple[bool, str]:
-    """把 `<workspace>/<project_dir>` 切到 `branch_name`；本地沒有則從目前 HEAD 建立。
+def commit_all(project_dir: str, change_name: str, message: str) -> tuple[bool, str]:
+    """在任務工作目錄 `git add -A` 後 `git commit -m message`；不 push。"""
+    abs_path = os.path.join(REPO_ROOT, worktree_dir(project_dir, change_name))
 
-    回傳 `(成功, 訊息)`。已在該分支上時視為成功。
-    """
-    if not project_dir or not branch_name:
-        return False, "缺少 project_dir 或 branch_name"
+    added = _git(abs_path, "add", "-A")
+    if added.returncode != 0:
+        return False, (added.stderr or added.stdout).strip() or "git add 失敗"
 
+    committed = _git(abs_path, "commit", "-m", message)
+    if committed.returncode != 0:
+        return False, (committed.stderr or committed.stdout).strip() or "git commit 失敗"
+
+    return True, (committed.stdout or "").strip() or f"已 commit：{message}"
+
+
+def remove_worktree(project_dir: str, change_name: str) -> tuple[bool, str]:
+    """移除任務工作目錄（`git worktree remove`，不加 `--force`）；工作分支保留。"""
     repo = os.path.join(REPO_ROOT, project_dir)
-    inside = _git(repo, "rev-parse", "--is-inside-work-tree")
-    if inside.returncode != 0 or inside.stdout.strip() != "true":
-        return False, f"{project_dir} 不是 git 工作樹"
+    abs_path = os.path.join(REPO_ROOT, worktree_dir(project_dir, change_name))
 
-    current = _git(repo, "rev-parse", "--abbrev-ref", "HEAD")
-    if current.returncode == 0 and current.stdout.strip() == branch_name:
-        return True, f"{project_dir} 已在分支 {branch_name}"
+    result = _git(repo, "worktree", "remove", abs_path)
+    if result.returncode != 0:
+        err = (result.stderr or result.stdout).strip()
+        return False, err or f"無法移除任務工作目錄 {abs_path}"
 
-    checked_out = _git(repo, "checkout", branch_name)
-    if checked_out.returncode == 0:
-        return True, f"{project_dir} 已切換到分支 {branch_name}"
-
-    created = _git(repo, "checkout", "-b", branch_name)
-    if created.returncode == 0:
-        return True, f"{project_dir} 已建立並切換到分支 {branch_name}"
-
-    err = (created.stderr or checked_out.stderr or created.stdout or checked_out.stdout).strip()
-    return False, err or f"無法切換到分支 {branch_name}"
+    return True, f"已移除任務工作目錄 {abs_path}"
 
 
-def rollback_except_openspec(project_dir: str) -> tuple[bool, str]:
-    """還原 `<workspace>/<project_dir>` 未提交的程式碼變更（含 untracked 新檔），
-    但保留 `openspec/` 目錄不動——規格文件必須留下給後續步驟更新。
+def rollback_except_openspec(project_dir: str, change_name: str) -> tuple[bool, str]:
+    """還原任務工作目錄未提交的程式碼變更（含 untracked 新檔），但保留 `openspec/` 目錄不動
+    ——規格文件必須留下給後續步驟更新。
 
     先試 `git stash`；若沒有可 stash 的變更或 stash 失敗，改用 `checkout` + `clean` 還原。
     回傳 `(成功, 訊息)`。
     """
-    repo = os.path.join(REPO_ROOT, project_dir)
+    repo = os.path.join(REPO_ROOT, worktree_dir(project_dir, change_name))
 
     stash = _git(repo, "stash", "push", "--include-untracked", "--", ".", ":!openspec")
     if stash.returncode == 0:

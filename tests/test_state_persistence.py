@@ -40,6 +40,32 @@ def _make_state(**overrides) -> dict:
     return base
 
 
+# ── _empty_state 預設值（舊 state.json 缺欄位相容） ─────────────────────────────
+
+class TestEmptyStateDefaults:
+    def test_commit_message_and_archived_default_values(self):
+        from AgentLoop.main import _empty_state
+
+        state = _empty_state("test task")
+
+        assert state["commit_message"] == ""
+        assert state["archived"] is False
+
+    def test_legacy_state_json_missing_fields_falls_back_to_defaults(self):
+        """`_empty_state()` 的預設值 + `.update(legacy_json)`（main.py `run_node()` 的作法）：
+        舊 state.json 沒有 commit_message／archived 欄位時仍以預設值載入，不是 KeyError。"""
+        from AgentLoop.main import _empty_state
+
+        legacy_state_json = {
+            "task": "test task", "change_name": "feat-test", "branch_name": "feat/test",
+        }
+        state = _empty_state("")
+        state.update(legacy_state_json)
+
+        assert state["commit_message"] == ""
+        assert state["archived"] is False
+
+
 # ── _save_state ───────────────────────────────────────────────────────────────
 
 class TestSaveState:
@@ -248,31 +274,34 @@ class TestCliArgs:
 # ── _list_existing_domains ────────────────────────────────────────────────────
 
 class TestListExistingDomains:
-    def _call(self, project_dir, workspace_root):
+    def _call(self, project_dir, workspace_root, change_name="feat-test"):
         from AgentLoop.nodes.analyze_plan import _list_existing_domains
         with patch("AgentLoop.nodes.analyze_plan.REPO_ROOT", str(workspace_root)):
-            return _list_existing_domains(project_dir)
+            return _list_existing_domains(project_dir, change_name)
+
+    def _worktree(self, workspace, project_dir="my-project", change_name="feat-test"):
+        return workspace / ".agentloop-worktrees" / project_dir / change_name
 
     def test_no_specs_dir(self, tmp_project):
         workspace, _ = tmp_project
         assert self._call("my-project", workspace) == []
 
     def test_empty_specs_dir(self, tmp_project):
-        workspace, project = tmp_project
-        (project / "openspec" / "specs").mkdir(parents=True)
+        workspace, _project = tmp_project
+        (self._worktree(workspace) / "openspec" / "specs").mkdir(parents=True)
         assert self._call("my-project", workspace) == []
 
     def test_returns_sorted_domain_dirs(self, tmp_project):
-        workspace, project = tmp_project
-        specs = project / "openspec" / "specs"
+        workspace, _project = tmp_project
+        specs = self._worktree(workspace) / "openspec" / "specs"
         specs.mkdir(parents=True)
         (specs / "users").mkdir()
         (specs / "articles").mkdir()
         assert self._call("my-project", workspace) == ["articles", "users"]
 
     def test_ignores_files_and_hidden_dirs(self, tmp_project):
-        workspace, project = tmp_project
-        specs = project / "openspec" / "specs"
+        workspace, _project = tmp_project
+        specs = self._worktree(workspace) / "openspec" / "specs"
         specs.mkdir(parents=True)
         (specs / "articles").mkdir()
         (specs / ".hidden").mkdir()
@@ -290,18 +319,18 @@ class TestAskDomainSelection:
         with patch("AgentLoop.nodes.analyze_plan._list_existing_domains", return_value=domains), \
              patch("sys.stdin.isatty", return_value=True), \
              patch("builtins.input", side_effect=inputs):
-            return _ask_domain_selection("my-project")
+            return _ask_domain_selection("my-project", "feat-test")
 
     def test_no_existing_domains_returns_empty(self):
         from AgentLoop.nodes.analyze_plan import _ask_domain_selection
         with patch("AgentLoop.nodes.analyze_plan._list_existing_domains", return_value=[]):
-            assert _ask_domain_selection("my-project") == ([], "")
+            assert _ask_domain_selection("my-project", "feat-test") == ([], "")
 
     def test_non_interactive_returns_empty(self):
         from AgentLoop.nodes.analyze_plan import _ask_domain_selection
         with patch("AgentLoop.nodes.analyze_plan._list_existing_domains", return_value=["articles"]), \
              patch("sys.stdin.isatty", return_value=False):
-            assert _ask_domain_selection("my-project") == ([], "")
+            assert _ask_domain_selection("my-project", "feat-test") == ([], "")
 
     def test_select_existing_domain_by_index(self):
         result = self._call(["articles", "users"], ["1"])
@@ -318,7 +347,7 @@ class TestAskDomainSelection:
         with patch("AgentLoop.nodes.analyze_plan._list_existing_domains", return_value=["web-gui"]), \
              patch("AgentLoop.nodes.analyze_plan.interaction.is_interactive", return_value=True), \
              patch("AgentLoop.nodes.analyze_plan.interaction.ask", side_effect=["2", "billing"]) as mock_ask:
-            result = _ask_domain_selection("my-project")
+            result = _ask_domain_selection("my-project", "feat-test")
 
         assert result == ([], "billing")
         first_call, second_call = mock_ask.call_args_list
@@ -331,7 +360,7 @@ class TestAskDomainSelection:
         with patch("AgentLoop.nodes.analyze_plan._list_existing_domains", return_value=["auth", "billing"]), \
              patch("AgentLoop.nodes.analyze_plan.interaction.is_interactive", return_value=True), \
              patch("AgentLoop.nodes.analyze_plan.interaction.ask", side_effect=["2"]) as mock_ask:
-            result = _ask_domain_selection("my-project")
+            result = _ask_domain_selection("my-project", "feat-test")
 
         assert result == (["billing"], "")
         mock_ask.assert_called_once()
@@ -363,7 +392,7 @@ class TestAskDomainSelection:
         with patch("AgentLoop.nodes.analyze_plan._list_existing_domains", return_value=["articles"]), \
              patch("sys.stdin.isatty", return_value=True), \
              patch("builtins.input", side_effect=EOFError):
-            assert _ask_domain_selection("my-project") == ([], "")
+            assert _ask_domain_selection("my-project", "feat-test") == ([], "")
 
 
 # ── _recover_domains ──────────────────────────────────────────────────────────
@@ -372,7 +401,10 @@ class TestRecoverDomains:
     def test_prefers_state_over_files(self, tmp_project):
         from AgentLoop.nodes.analyze_plan import _recover_domains
         workspace, project = tmp_project
-        specs = project / "openspec" / "changes" / "feat-test" / "specs" / "from-folder"
+        specs = (
+            workspace / ".agentloop-worktrees" / "my-project" / "feat-test"
+            / "openspec" / "changes" / "feat-test" / "specs" / "from-folder"
+        )
         specs.mkdir(parents=True)
         state_dir = project / ".agentloop" / "changes" / "feat-test"
         state_dir.mkdir(parents=True)
@@ -401,7 +433,10 @@ class TestRecoverDomains:
     def test_falls_back_to_change_specs(self, tmp_project):
         from AgentLoop.nodes.analyze_plan import _recover_domains
         workspace, project = tmp_project
-        specs = project / "openspec" / "changes" / "feat-test" / "specs"
+        specs = (
+            workspace / ".agentloop-worktrees" / "my-project" / "feat-test"
+            / "openspec" / "changes" / "feat-test" / "specs"
+        )
         (specs / "users").mkdir(parents=True)
         (specs / "articles").mkdir()
         with patch("AgentLoop.nodes.analyze_plan.REPO_ROOT", str(workspace)):
@@ -465,7 +500,10 @@ class TestRecoverSkipSpecs:
     def test_prefers_state_over_files(self, tmp_project):
         from AgentLoop.nodes.analyze_plan import _recover_skip_specs
         workspace, project = tmp_project
-        change = project / "openspec" / "changes" / "feat-test"
+        change = (
+            workspace / ".agentloop-worktrees" / "my-project" / "feat-test"
+            / "openspec" / "changes" / "feat-test"
+        )
         change.mkdir(parents=True)
         (change / ".openspec.yaml").write_text("skip_specs: false\n", encoding="utf-8")
         state_dir = project / ".agentloop" / "changes" / "feat-test"
@@ -501,7 +539,10 @@ class TestRecoverSkipSpecs:
     def test_falls_back_to_change_yaml(self, tmp_project):
         from AgentLoop.nodes.analyze_plan import _recover_skip_specs
         workspace, project = tmp_project
-        change = project / "openspec" / "changes" / "feat-test"
+        change = (
+            workspace / ".agentloop-worktrees" / "my-project" / "feat-test"
+            / "openspec" / "changes" / "feat-test"
+        )
         change.mkdir(parents=True)
         (change / ".openspec.yaml").write_text("schema: spec-driven\nskip_specs: true\n", encoding="utf-8")
         with patch("AgentLoop.nodes.analyze_plan.REPO_ROOT", str(workspace)):
@@ -510,7 +551,10 @@ class TestRecoverSkipSpecs:
     def test_yaml_false_is_a_decision(self, tmp_project):
         from AgentLoop.nodes.analyze_plan import _recover_skip_specs
         workspace, project = tmp_project
-        change = project / "openspec" / "changes" / "feat-test"
+        change = (
+            workspace / ".agentloop-worktrees" / "my-project" / "feat-test"
+            / "openspec" / "changes" / "feat-test"
+        )
         change.mkdir(parents=True)
         (change / ".openspec.yaml").write_text('skip_specs: "false"\n', encoding="utf-8")
         with patch("AgentLoop.nodes.analyze_plan.REPO_ROOT", str(workspace)):

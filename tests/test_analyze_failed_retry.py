@@ -47,7 +47,7 @@ class TestInitialPlanFailureRetryRedoesInitialPlan:
             return _mock_claude_result("規劃完成")
 
         with patch("AgentLoop.nodes.analyze_plan.call_claude", side_effect=_capture), \
-             patch("AgentLoop.nodes.analyze_plan.ensure_on_branch", return_value=(True, "ok")), \
+             patch("AgentLoop.nodes.analyze_plan.ensure_worktree", return_value=(True, "ok")), \
              patch("AgentLoop.nodes.analyze_plan.branch_exists", return_value=True), \
              patch("AgentLoop.nodes.analyze_plan.ensure_initialized", return_value=MagicMock(ok=True, error_text="")), \
              patch("AgentLoop.nodes.analyze_plan.ensure_change_created", return_value=MagicMock(ok=True, error_text="")), \
@@ -87,7 +87,7 @@ class TestInitialPlanInterruptedByUsageLimitResumes:
         mock_call = MagicMock(return_value=_mock_claude_result("規劃完成"))
 
         with patch("AgentLoop.nodes.analyze_plan.call_claude", mock_call), \
-             patch("AgentLoop.nodes.analyze_plan.ensure_on_branch", return_value=(True, "ok")), \
+             patch("AgentLoop.nodes.analyze_plan.ensure_worktree", return_value=(True, "ok")), \
              patch("AgentLoop.nodes.analyze_plan.branch_exists", return_value=True), \
              patch("AgentLoop.nodes.analyze_plan.ensure_initialized", return_value=MagicMock(ok=True, error_text="")), \
              patch("AgentLoop.nodes.analyze_plan.ensure_change_created", return_value=MagicMock(ok=True, error_text="")), \
@@ -119,7 +119,7 @@ class TestAlreadyPlannedAdjustmentFailureStillAsksAdjustmentContent:
             start_from="analyze_plan",
         )
         with patch("AgentLoop.nodes.analyze_plan.call_claude", return_value=_mock_claude_result("規劃完成")), \
-             patch("AgentLoop.nodes.analyze_plan.ensure_on_branch", return_value=(True, "ok")), \
+             patch("AgentLoop.nodes.analyze_plan.ensure_worktree", return_value=(True, "ok")), \
              patch("AgentLoop.nodes.analyze_plan.interaction.is_interactive", return_value=True), \
              patch(
                  "AgentLoop.nodes.analyze_plan.interaction.ask",
@@ -148,7 +148,7 @@ class TestLegacyStateWithoutPlannedField:
         )
         del state["planned"]
         with patch("AgentLoop.nodes.analyze_plan.call_claude", return_value=_mock_claude_result("規劃完成")), \
-             patch("AgentLoop.nodes.analyze_plan.ensure_on_branch", return_value=(True, "ok")), \
+             patch("AgentLoop.nodes.analyze_plan.ensure_worktree", return_value=(True, "ok")), \
              patch("AgentLoop.nodes.analyze_plan.branch_exists", return_value=True), \
              patch("AgentLoop.nodes.analyze_plan.ensure_initialized", return_value=MagicMock(ok=True, error_text="")), \
              patch("AgentLoop.nodes.analyze_plan.ensure_change_created", return_value=MagicMock(ok=True, error_text="")), \
@@ -175,7 +175,7 @@ class TestLegacyStateWithoutPlannedField:
         del state["planned"]
         with patch("AgentLoop.nodes.analyze_plan.REPO_ROOT", str(tmp_path)), \
              patch("AgentLoop.nodes.analyze_plan.call_claude", return_value=_mock_claude_result("規劃完成")), \
-             patch("AgentLoop.nodes.analyze_plan.ensure_on_branch", return_value=(True, "ok")), \
+             patch("AgentLoop.nodes.analyze_plan.ensure_worktree", return_value=(True, "ok")), \
              patch("AgentLoop.nodes.analyze_plan.branch_exists", return_value=True), \
              patch("AgentLoop.nodes.analyze_plan.ensure_initialized", return_value=MagicMock(ok=True, error_text="")), \
              patch("AgentLoop.nodes.analyze_plan.ensure_change_created", return_value=MagicMock(ok=True, error_text="")), \
@@ -198,7 +198,7 @@ class TestPlannedFlagRetainedOnRepeatedFailure:
 
         state = _base_state(planned=False, analysis="", plan=[], skip_specs=True, start_from="analyze_plan")
         with patch("AgentLoop.nodes.analyze_plan.call_claude", return_value=_mock_claude_result("失敗", is_error=True)), \
-             patch("AgentLoop.nodes.analyze_plan.ensure_on_branch", return_value=(True, "ok")), \
+             patch("AgentLoop.nodes.analyze_plan.ensure_worktree", return_value=(True, "ok")), \
              patch("AgentLoop.nodes.analyze_plan.branch_exists", return_value=True), \
              patch("AgentLoop.nodes.analyze_plan.ensure_initialized", return_value=MagicMock(ok=True, error_text="")), \
              patch("AgentLoop.nodes.analyze_plan.ensure_change_created", return_value=MagicMock(ok=True, error_text="")), \
@@ -216,7 +216,7 @@ class TestPlannedFlagRetainedOnRepeatedFailure:
 
         state = _base_state(planned=True, analysis="existing analysis", start_from="analyze_plan")
         with patch("AgentLoop.nodes.analyze_plan.call_claude", return_value=_mock_claude_result("失敗", is_error=True)), \
-             patch("AgentLoop.nodes.analyze_plan.ensure_on_branch", return_value=(True, "ok")), \
+             patch("AgentLoop.nodes.analyze_plan.ensure_worktree", return_value=(True, "ok")), \
              patch("AgentLoop.nodes.analyze_plan.build_skills_block", return_value="skill"), \
              patch("AgentLoop.nodes.analyze_plan.build_project_doc_hint_for", return_value=""), \
              patch("AgentLoop.nodes.analyze_plan.interaction.is_interactive", return_value=True), \
@@ -248,7 +248,7 @@ class TestReplanFailureRetryRedoesReplanWithoutModeChoice:
             return _mock_claude_result("規劃完成")
 
         with patch("AgentLoop.nodes.analyze_plan.call_claude", side_effect=_capture), \
-             patch("AgentLoop.nodes.analyze_plan.ensure_on_branch", return_value=(True, "ok")), \
+             patch("AgentLoop.nodes.analyze_plan.ensure_worktree", return_value=(True, "ok")), \
              patch("AgentLoop.nodes.analyze_plan.interaction.ask") as mock_ask, \
              patch("AgentLoop.nodes.analyze_plan._run_with_validate", return_value=("", "")), \
              patch(
@@ -277,7 +277,7 @@ class TestReplanFailureKeepsReplanFailedFlag:
             start_from="analyze_plan",
         )
         with patch("AgentLoop.nodes.analyze_plan.call_claude", return_value=_mock_claude_result("失敗", is_error=True)), \
-             patch("AgentLoop.nodes.analyze_plan.ensure_on_branch", return_value=(True, "ok")), \
+             patch("AgentLoop.nodes.analyze_plan.ensure_worktree", return_value=(True, "ok")), \
              patch("AgentLoop.nodes.analyze_plan.interaction.is_interactive", return_value=True), \
              patch("AgentLoop.nodes.analyze_plan.interaction.ask", return_value="1"):
             result = analyze_plan_node(state)
@@ -299,7 +299,7 @@ class TestReplanFailureKeepsReplanFailedFlag:
             start_from="analyze_plan",
         )
         with patch("AgentLoop.nodes.analyze_plan.call_claude", return_value=_mock_claude_result("失敗", is_error=True)), \
-             patch("AgentLoop.nodes.analyze_plan.ensure_on_branch", return_value=(True, "ok")), \
+             patch("AgentLoop.nodes.analyze_plan.ensure_worktree", return_value=(True, "ok")), \
              patch("AgentLoop.nodes.analyze_plan.interaction.is_interactive", return_value=True), \
              patch(
                  "AgentLoop.nodes.analyze_plan.interaction.ask",
@@ -330,7 +330,7 @@ class TestHumanReviseFailureRetryReusesSameFeedback:
             return _mock_claude_result("規劃完成")
 
         with patch("AgentLoop.nodes.analyze_plan.call_claude", side_effect=_capture), \
-             patch("AgentLoop.nodes.analyze_plan.ensure_on_branch", return_value=(True, "ok")), \
+             patch("AgentLoop.nodes.analyze_plan.ensure_worktree", return_value=(True, "ok")), \
              patch("AgentLoop.nodes.analyze_plan.interaction.ask") as mock_ask, \
              patch("AgentLoop.nodes.analyze_plan._run_with_validate", return_value=("", "")), \
              patch(

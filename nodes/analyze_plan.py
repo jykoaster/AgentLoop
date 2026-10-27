@@ -2,16 +2,22 @@ import json
 import os
 import re
 import time
-from ..core import AgentState, take_session, store_session
+from ..core import AgentState, take_session, store_session, change_lock
 from ..lib import (
     call_claude, call_resuming, format_usage_stats, QUESTION_MARKER,
     is_usage_limit_error, LANGUAGE_POLICY, build_skills_block,
     build_project_doc_hint_for, REPO_ROOT,
-    ensure_on_branch, rollback_except_openspec,
-    list_local_branches, branch_exists, create_branch_from,
+    worktree_dir, ensure_worktree, create_worktree_from, rollback_except_openspec,
+    list_local_branches, branch_exists,
     ensure_initialized, ensure_change_created, validate_change,
     interaction,
 )
+
+
+def _work_dir_abs(project_dir: str, change_name: str) -> str:
+    """任務工作目錄的絕對路徑：這個 change 所有 `openspec/` 讀寫都在這裡進行，
+    而不是主工作目錄（`project_dir`，只用來存 `.agentloop/` 執行狀態紀錄）。"""
+    return os.path.join(REPO_ROOT, worktree_dir(project_dir, change_name))
 
 # 初始規劃／依人工意見調整：完整 grilling + domain-modeling（人工意見可能牽涉詞彙或架構決策）
 _SKILLS = [
@@ -74,7 +80,8 @@ Purpose：<<DOMAIN_PURPOSE_VALUE>>
 
 _PROJECT_AND_DOMAIN_INFO = """## <<PROJECT_SECTION_TITLE>>
 
-目標專案目錄：<<PROJECT_DIR_VALUE>>（相對 workspace root；`openspec/` 已確認存在）
+目標專案目錄：<<PROJECT_DIR_VALUE>>（這是本次任務專屬的工作目錄，相對 workspace root；
+`openspec/` 已確認存在）
 
 <<DOMAIN_CONTEXT_VALUE>>"""
 
@@ -84,13 +91,13 @@ _PROJECT_AND_DOMAIN_SECTION_TITLE = "目標專案與 Domain（已由系統確認
 _CHANGE_SETUP_INITIAL = """## OpenSpec Change 位置
 
 change 資料夾已由系統建立於 `<<PROJECT_DIR_VALUE>>/openspec/changes/<<CHANGE_NAME_VALUE>>/`
-（工作分支 `<<BRANCH_NAME_VALUE>>` 也已切換完成），change name 固定為 <<CHANGE_NAME_VALUE>>，
+（工作分支 `<<BRANCH_NAME_VALUE>>` 也已在此目錄簽出完成），change name 固定為 <<CHANGE_NAME_VALUE>>，
 不要另取。"""
 
 _CHANGE_SETUP_EXISTING = """## 既有的 OpenSpec Change 位置
 
 本次沿用先前已建立的 change：
-- 目標專案：<<PROJECT_DIR_VALUE>>（工作分支 <<BRANCH_NAME_VALUE>> 已切換完成）
+- 目標專案：<<PROJECT_DIR_VALUE>>（工作分支 <<BRANCH_NAME_VALUE>> 已在此目錄簽出）
 - Change 位置：`<<PROJECT_DIR_VALUE>>/openspec/changes/<<CHANGE_NAME_VALUE>>/`
 
 直接在這個資料夾下用 Read 讀取、Edit/Write 更新（維持既有內容裡跟本次無關的部分，只改需要調整的段落）。"""
@@ -252,7 +259,7 @@ def _read_change_artifacts(project_dir: str, change_name: str) -> tuple[str, lis
     """規格文件的事實來源是 OpenSpec CLI 自己會驗證的檔案，不是 Claude 聊天回覆：
     analysis 讀 proposal.md 全文，plan 讀 tasks.md 的 checkbox 清單。讀不到則回傳空值，
     由呼叫端視為錯誤。"""
-    change_dir = os.path.join(REPO_ROOT, project_dir, "openspec", "changes", change_name)
+    change_dir = os.path.join(_work_dir_abs(project_dir, change_name), "openspec", "changes", change_name)
 
     analysis = ""
     try:
@@ -280,7 +287,9 @@ def _is_planned(state: AgentState, project_dir: str, change_name: str) -> bool:
         return raw
     if state.get("plan"):
         return True
-    tasks_path = os.path.join(REPO_ROOT, project_dir, "openspec", "changes", change_name, "tasks.md")
+    tasks_path = os.path.join(
+        _work_dir_abs(project_dir, change_name), "openspec", "changes", change_name, "tasks.md"
+    )
     return os.path.isfile(tasks_path)
 
 
@@ -349,10 +358,10 @@ def _run_with_validate(
     session_id 是因為這個迴圈自己也會撞到用量上限，呼叫端要拿它存進 state 才接得回。
     """
     session_id = result.session_id
-    project_dir_abs = os.path.join(REPO_ROOT, project_dir)
+    work_dir_abs = _work_dir_abs(project_dir, change_name)
 
     for attempt in range(1, _MAX_VALIDATE_RETRIES + 1):
-        validation = validate_change(project_dir_abs, change_name)
+        validation = validate_change(work_dir_abs, change_name)
         if validation.ok:
             return "", session_id
 
@@ -381,7 +390,9 @@ def _run_with_validate(
 
 def _reset_task_checkboxes(project_dir: str, change_name: str) -> None:
     """「重寫」等級時，把 tasks.md 所有 `- [x]` 重設回 `- [ ]`（重寫代表要重新執行整份計畫）。"""
-    path = os.path.join(REPO_ROOT, project_dir, "openspec", "changes", change_name, "tasks.md")
+    path = os.path.join(
+        _work_dir_abs(project_dir, change_name), "openspec", "changes", change_name, "tasks.md"
+    )
     try:
         with open(path, encoding="utf-8") as f:
             content = f.read()
@@ -393,8 +404,8 @@ def _reset_task_checkboxes(project_dir: str, change_name: str) -> None:
             f.write(reset)
 
 
-def _list_existing_domains(project_dir: str) -> list[str]:
-    specs_dir = os.path.join(REPO_ROOT, project_dir, "openspec", "specs")
+def _list_existing_domains(project_dir: str, change_name: str) -> list[str]:
+    specs_dir = os.path.join(_work_dir_abs(project_dir, change_name), "openspec", "specs")
     if not os.path.isdir(specs_dir):
         return []
     return sorted(
@@ -433,7 +444,7 @@ def _list_change_domains(project_dir: str, change_name: str) -> list[str]:
     if change_name in (".", "..") or os.sep in change_name:
         return []
     return _domain_dirs_in(
-        os.path.join(REPO_ROOT, project_dir, "openspec", "changes", change_name, "specs")
+        os.path.join(_work_dir_abs(project_dir, change_name), "openspec", "changes", change_name, "specs")
     )
 
 
@@ -536,11 +547,11 @@ def _load_saved_skip_specs(project_dir: str, change_name: str) -> bool | None:
 
 
 def _load_change_yaml_skip_specs(project_dir: str, change_name: str) -> bool | None:
-    """從 change 資料夾的 .openspec.yaml 讀 skip_specs。沒有這行就回傳 None。"""
+    """從任務工作目錄下 change 資料夾的 .openspec.yaml 讀 skip_specs。沒有這行就回傳 None。"""
     if not project_dir or not _safe_change_name(change_name):
         return None
     return _read_skip_specs_yaml(os.path.join(
-        REPO_ROOT, project_dir, "openspec", "changes", change_name, ".openspec.yaml"
+        _work_dir_abs(project_dir, change_name), "openspec", "changes", change_name, ".openspec.yaml"
     ))
 
 
@@ -662,7 +673,7 @@ def _ask_new_domain_name() -> str:
     )
 
 
-def _ask_domain_selection(project_dir: str) -> tuple[list[str], str]:
+def _ask_domain_selection(project_dir: str, change_name: str) -> tuple[list[str], str]:
     """初始規劃、且 `_recover_domains()` 還原不出上次歸屬時，列出既有 domain 讓使用者選
     （可複選、逗號分隔），或選「以上皆非，建立新 domain」。
 
@@ -671,7 +682,7 @@ def _ask_domain_selection(project_dir: str) -> tuple[list[str], str]:
     - 使用者選擇「以上皆非」：([], domain_name_or_"")
     - 沒有既有 domain 或非互動式環境：([], "")
     """
-    domains = _list_existing_domains(project_dir)
+    domains = _list_existing_domains(project_dir, change_name)
     if not domains:
         return [], ""
 
@@ -960,7 +971,7 @@ def analyze_plan_node(state: AgentState) -> dict:
         }
 
     # Guard: 已封存的任務不能調整，須在任何提問之前判定
-    if is_rerun and _is_archived_change(project_dir, change_name):
+    if is_rerun and (state.get("archived") is True or _is_archived_change(project_dir, change_name)):
         print(
             f"{_RED}  [分析+規劃 Agent] 此 change 已封存，請以新任務進行後續修改{_RESET}\n",
             flush=True,
@@ -1041,6 +1052,11 @@ def analyze_plan_node(state: AgentState) -> dict:
             if not project_dir:
                 return _fail("無法決定目標專案目錄，無法繼續規劃")
 
+        lock_ok, lock_msg = change_lock.acquire(project_dir, change_name)
+        if not lock_ok:
+            print(f"{_RED}  [分析+規劃 Agent] {lock_msg}{_RESET}\n", flush=True)
+            return _fail(lock_msg)
+
     if not branch_name:
         print(f"{_RED}  [分析+規劃 Agent] 缺少 branch_name{_RESET}\n", flush=True)
         return _fail("缺少 branch_name")
@@ -1051,26 +1067,26 @@ def analyze_plan_node(state: AgentState) -> dict:
             base_branch = _ask_base_branch(project_dir, branch_name)
             if not base_branch:
                 return _fail(f"未選擇起點分支，無法建立分支 {branch_name}")
-            ok, msg = create_branch_from(project_dir, branch_name, base_branch)
+            ok, msg = create_worktree_from(project_dir, change_name, branch_name, base_branch)
             print(f"{_YELLOW}  [git] {msg}{_RESET}", flush=True)
             if not ok:
-                return _fail(f"無法建立分支 {branch_name}：{msg}")
+                return _fail(f"無法建立任務工作目錄（分支 {branch_name}）：{msg}")
         else:
-            ok, msg = ensure_on_branch(project_dir, branch_name)
+            ok, msg = ensure_worktree(project_dir, change_name, branch_name)
             print(f"{_YELLOW}  [git] {msg}{_RESET}", flush=True)
             if not ok:
-                return _fail(f"無法切換到分支 {branch_name}：{msg}")
+                return _fail(f"無法建立或切換任務工作目錄（分支 {branch_name}）：{msg}")
 
     if is_replan and review_level == "重寫":
-        ok, msg = rollback_except_openspec(project_dir)
+        ok, msg = rollback_except_openspec(project_dir, change_name)
         print(f"{_YELLOW}  [git] {msg}{_RESET}", flush=True)
         if not ok:
             return _fail(f"rollback 失敗：{msg}")
 
     if not is_replan and not is_human_revise:
-        project_dir_abs = os.path.join(REPO_ROOT, project_dir)
+        work_dir_abs = _work_dir_abs(project_dir, change_name)
 
-        init_result = ensure_initialized(project_dir_abs)
+        init_result = ensure_initialized(work_dir_abs)
         if not init_result.ok:
             print(f"{_RED}  [分析+規劃 Agent] openspec init 失敗：{init_result.error_text}{_RESET}\n", flush=True)
             return _fail(f"openspec init 失敗：{init_result.error_text}")
@@ -1122,7 +1138,7 @@ def analyze_plan_node(state: AgentState) -> dict:
                 )
                 domain_context_value = _existing_domain_context(domains)
             else:
-                selected, new_domain_name = _ask_domain_selection(project_dir)
+                selected, new_domain_name = _ask_domain_selection(project_dir, change_name)
                 if selected:
                     domains = selected
                     domain_context_value = _existing_domain_context(domains)
@@ -1132,7 +1148,7 @@ def analyze_plan_node(state: AgentState) -> dict:
                     if new_domain_name:
                         domains = [new_domain_name]
 
-        change_result = ensure_change_created(project_dir_abs, change_name)
+        change_result = ensure_change_created(work_dir_abs, change_name)
         if not change_result.ok:
             print(
                 f"{_RED}  [分析+規劃 Agent] openspec new change 失敗：{change_result.error_text}{_RESET}\n",
@@ -1153,7 +1169,8 @@ def analyze_plan_node(state: AgentState) -> dict:
     try:
         skills_block = build_skills_block(_SKILLS_REPLAN if is_replan else _SKILLS)
 
-        project_context = build_project_doc_hint_for(project_dir)
+        work_dir_rel = worktree_dir(project_dir, change_name)
+        project_context = build_project_doc_hint_for(work_dir_rel)
 
         if is_replan:
             review_ctx = review_result
@@ -1164,7 +1181,7 @@ def analyze_plan_node(state: AgentState) -> dict:
                 .replace("<<PROJECT_CONTEXT>>", project_context)
                 .replace("<<REVIEW_CONTEXT>>", review_ctx)
                 .replace("<<REVIEW_LEVEL>>", review_level)
-                .replace("<<PROJECT_DIR_VALUE>>", project_dir)
+                .replace("<<PROJECT_DIR_VALUE>>", work_dir_rel)
                 .replace("<<CHANGE_NAME_VALUE>>", change_name)
                 .replace("<<BRANCH_NAME_VALUE>>", branch_name)
                 .replace("<<SKIP_SPECS_CONTEXT>>", _skip_specs_context(bool(skip_specs)))
@@ -1174,7 +1191,7 @@ def analyze_plan_node(state: AgentState) -> dict:
                 _SYSTEM_HUMAN_REVISE
                 .replace("<<PROJECT_CONTEXT>>", project_context)
                 .replace("<<HUMAN_FEEDBACK>>", human_feedback)
-                .replace("<<PROJECT_DIR_VALUE>>", project_dir)
+                .replace("<<PROJECT_DIR_VALUE>>", work_dir_rel)
                 .replace("<<CHANGE_NAME_VALUE>>", change_name)
                 .replace("<<BRANCH_NAME_VALUE>>", branch_name)
                 .replace("<<SKIP_SPECS_CONTEXT>>", _skip_specs_context(bool(skip_specs)))
@@ -1183,7 +1200,7 @@ def analyze_plan_node(state: AgentState) -> dict:
             system = (
                 _SYSTEM_INITIAL
                 .replace("<<PROJECT_CONTEXT>>", project_context)
-                .replace("<<PROJECT_DIR_VALUE>>", project_dir)
+                .replace("<<PROJECT_DIR_VALUE>>", work_dir_rel)
                 .replace(
                     "<<PROJECT_SECTION_TITLE>>",
                     _PROJECT_SECTION_TITLE if skip_specs else _PROJECT_AND_DOMAIN_SECTION_TITLE,
@@ -1241,7 +1258,8 @@ def analyze_plan_node(state: AgentState) -> dict:
     if not analysis or not plan:
         print(
             f"{_RED}  [分析+規劃 Agent] 讀不到 "
-            f"{project_dir}/openspec/changes/{change_name}/ 下的 proposal.md 或 tasks.md{_RESET}\n",
+            f"{worktree_dir(project_dir, change_name)}/openspec/changes/{change_name}/ "
+            f"下的 proposal.md 或 tasks.md{_RESET}\n",
             flush=True,
         )
         return _fail("讀不到 proposal.md 或 tasks.md")

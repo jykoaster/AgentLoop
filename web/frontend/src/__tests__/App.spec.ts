@@ -10,7 +10,7 @@ vi.mock('../api', async (importOriginal) => {
     getSettings: vi.fn(),
     putSettings: vi.fn(),
     getChanges: vi.fn(),
-    getRun: vi.fn(),
+    getRuns: vi.fn(),
     getArchive: vi.fn(),
     getSpecs: vi.fn(),
     getFs: vi.fn(),
@@ -29,7 +29,7 @@ beforeEach(() => {
     run_active: false,
   })
   mockedApi.getChanges.mockResolvedValue([])
-  mockedApi.getRun.mockResolvedValue({ active: false })
+  mockedApi.getRuns.mockResolvedValue([])
   mockedApi.getArchive.mockResolvedValue([])
   mockedApi.getSpecs.mockResolvedValue([])
 })
@@ -83,7 +83,7 @@ describe('App 分頁', () => {
       run_active: false,
     })
     mockedApi.getChanges.mockResolvedValue([])
-    mockedApi.getRun.mockResolvedValue({ active: false })
+    mockedApi.getRuns.mockResolvedValue([])
 
     await entries[1].trigger('click') // 進入 my-project（此處直接按確定即可，不需真的進入子資料夾）
     await wrapper.find('.folder-picker .confirm-button').trigger('click')

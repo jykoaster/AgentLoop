@@ -87,9 +87,9 @@ def get_change_file(name: str, path: str):
 
 # ── 執行管理 ─────────────────────────────────────────────────────────────────
 
-@router.get("/run")
-def get_run():
-    return get_manager().status()
+@router.get("/runs")
+def get_runs():
+    return get_manager().runs()
 
 
 @router.post("/runs", status_code=201)
@@ -97,10 +97,7 @@ def post_run(body: NewTaskBody):
     task = body.task.strip()
     if not task:
         raise HTTPException(422, "任務描述不可為空白")
-    try:
-        return get_manager().start_new_task(task)
-    except RunConflict as e:
-        raise HTTPException(409, f"目前已有 {e.label} 執行中") from e
+    return get_manager().start_new_task(task)
 
 
 @router.post("/changes/{name}/rerun")
@@ -110,13 +107,13 @@ def post_rerun(name: str, body: RerunBody):
     try:
         return get_manager().start_rerun(name, body.stage)
     except RunConflict as e:
-        raise HTTPException(409, f"目前已有 {e.label} 執行中") from e
+        raise HTTPException(409, f"{e.label} 執行中") from e
 
 
-@router.post("/run/answer")
-def post_answer(body: AnswerBody):
+@router.post("/runs/{run_id}/answer")
+def post_answer(run_id: str, body: AnswerBody):
     try:
-        get_manager().answer(body.question_id, body.answer)
+        get_manager().answer(run_id, body.question_id, body.answer)
     except QuestionGone as e:
         raise HTTPException(410, "此提問已結束，請重新整理") from e
     except RequiredAnswerMissing as e:
@@ -124,9 +121,9 @@ def post_answer(body: AnswerBody):
     return {"ok": True}
 
 
-@router.post("/run/abort")
-def post_abort():
-    get_manager().abort()
+@router.post("/runs/{run_id}/abort")
+def post_abort(run_id: str):
+    get_manager().abort(run_id)
     return {"ok": True}
 
 

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
-import type { ChangeRow as ChangeRowType, RunStatus } from '../../api'
+import type { ChangeRow as ChangeRowType, RunInfo } from '../../api'
 import StageCard from './StageCard.vue'
 import StageDetail from './StageDetail.vue'
 
@@ -9,7 +9,7 @@ const RERUNNABLE = new Set<string>(['analyze_plan', 'execute', 'review', 'archiv
 
 const props = defineProps<{
   row: ChangeRowType
-  runStatus: RunStatus
+  run: RunInfo | null
   temporary?: boolean
 }>()
 
@@ -27,21 +27,17 @@ const truncatedTask = computed(() => {
 })
 
 const disabledReason = computed(() =>
-  props.runStatus.active ? `目前已有 ${props.runStatus.label ?? ''} 執行中` : '',
+  props.run ? `${props.row.change_name || props.run.task} 執行中` : '',
 )
 
-const hasPendingQuestion = computed(() =>
-  !!props.runStatus.active &&
-  !!props.runStatus.question &&
-  (props.runStatus.change_name || '') === (props.row.change_name || ''),
-)
+const hasPendingQuestion = computed(() => !!props.run?.question)
 
 function hasQuestion(stage: string): boolean {
-  return hasPendingQuestion.value && props.runStatus.question?.stage === stage
+  return hasPendingQuestion.value && props.run?.question?.stage === stage
 }
 
 const question = computed(() =>
-  selectedStage.value && hasQuestion(selectedStage.value) ? (props.runStatus.question ?? null) : null,
+  selectedStage.value && hasQuestion(selectedStage.value) ? (props.run?.question ?? null) : null,
 )
 
 function openStage(stage: string): void {
@@ -61,7 +57,7 @@ function rerun(stage: string): void {
   <div
     class="change-row flex flex-col gap-3 rounded-xl border border-line bg-surface p-5 shadow-lg"
     :class="{ 'animate-breathe-warning motion-reduce:animate-none': hasPendingQuestion }"
-    :data-change-name="row.change_name || '(temp)'"
+    :data-change-name="row.change_name || run?.run_id || '(temp)'"
   >
     <div class="flex items-start justify-between gap-2">
       <div class="flex flex-wrap items-baseline gap-2">
@@ -128,6 +124,7 @@ function rerun(stage: string): void {
           :question="question"
           :temporary="temporary"
           :stage-status="selectedStageStatus"
+          :run-id="run?.run_id ?? ''"
         />
       </div>
     </template>

@@ -31,14 +31,12 @@ export interface Question {
   multiline: boolean
 }
 
-export interface RunStatus {
-  active: boolean
-  run_id?: string
-  label?: string
-  change_name?: string
-  task?: string
-  stage?: string
-  question?: Question | null
+export interface RunInfo {
+  run_id: string
+  change_name: string
+  task: string
+  stage: string
+  question: Question | null
 }
 
 export interface StageDetail {
@@ -52,6 +50,7 @@ export interface ArchiveRow {
   dir: string
   date: string
   name: string
+  branch: string
 }
 
 export interface SecretField {
@@ -126,8 +125,8 @@ export function getChangeFile(name: string, path: string): Promise<FileContent> 
   return request(`/changes/${encodeURIComponent(name)}/files/${path}`)
 }
 
-export function getRun(): Promise<RunStatus> {
-  return request('/run')
+export function getRuns(): Promise<RunInfo[]> {
+  return request('/runs')
 }
 
 export function postNewTask(task: string): Promise<{ run_id: string }> {
@@ -141,15 +140,15 @@ export function postRerun(name: string, stage: string): Promise<unknown> {
   })
 }
 
-export function postAnswer(questionId: string, answer: string): Promise<unknown> {
-  return request('/run/answer', {
+export function postAnswer(runId: string, questionId: string, answer: string): Promise<unknown> {
+  return request(`/runs/${encodeURIComponent(runId)}/answer`, {
     method: 'POST',
     body: JSON.stringify({ question_id: questionId, answer }),
   })
 }
 
-export function postAbort(): Promise<unknown> {
-  return request('/run/abort', { method: 'POST' })
+export function postAbort(runId: string): Promise<unknown> {
+  return request(`/runs/${encodeURIComponent(runId)}/abort`, { method: 'POST' })
 }
 
 export function getArchive(): Promise<ArchiveRow[]> {

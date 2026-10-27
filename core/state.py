@@ -24,3 +24,5 @@ class AgentState(TypedDict):
     replan_failed: bool   # 最近一次 analyze_plan 是否在「依審查結果重新規劃」途中失敗；成功時寫 False
     stages: dict[str, str]        # 各工作階段狀態："pending" | "running" | "done" | "error"；見 core/stages.py
     stage_notes: dict[str, str]   # 階段附註（目前只有 "使用者中止"）；見 core/stages.py
+    commit_message: str  # execute 擬出的一行任務 commit 訊息；archive 成功 commit 時使用，不實際由 execute commit
+    archived: bool        # 這個 change 是否已由 archive 成功 commit 並移除任務工作目錄；只由 archive 節點寫 True

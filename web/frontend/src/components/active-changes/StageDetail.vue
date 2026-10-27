@@ -11,6 +11,7 @@ const props = defineProps<{
   question: Question | null
   temporary?: boolean
   stageStatus?: string
+  runId?: string
 }>()
 
 const detail = ref<StageDetailType | null>(null)
@@ -45,10 +46,10 @@ const plan = computed<string[]>(() => {
 })
 
 async function onSubmitAnswer(answer: string): Promise<void> {
-  if (!props.question) return
+  if (!props.question || !props.runId) return
   answerError.value = ''
   try {
-    await api.postAnswer(props.question.id, answer)
+    await api.postAnswer(props.runId, props.question.id, answer)
     await load()
   } catch (e) {
     if (e instanceof api.ApiError && e.status === 410) {
@@ -62,8 +63,9 @@ async function onSubmitAnswer(answer: string): Promise<void> {
 }
 
 async function onAbort(): Promise<void> {
+  if (!props.runId) return
   if (!window.confirm('確定要中止這個階段嗎？')) return
-  await api.postAbort()
+  await api.postAbort(props.runId)
   await load()
 }
 </script>

@@ -16,23 +16,26 @@ AgentLoop/
 │   ├── state.py               # AgentState 型別定義
 │   ├── session.py             # 中斷 session 插槽的唯一讀寫處（見下方「跨程序接回：session 插槽」）
 │   ├── stages.py               # 各工作階段狀態追蹤（見下方「網頁控制台」的「階段狀態」）
+│   ├── change_lock.py          # 同一任務（change）同時最多一個執行的互斥鎖（`fcntl.flock`，見下方「任務工作目錄」）
 │   └── workflow.py            # LangGraph 工作流程定義（`from ..nodes import ...` 組圖）
 ├── lib/                     # 節點共用的工具層（見下方各節點對這些模組的說明）
 │   ├── claude_runner.py       # Claude Code CLI 封裝層
 │   ├── openspec_runner.py     # OpenSpec CLI 封裝層（唯一跟 `openspec` CLI 對話的地方；目前只有 archive）
 │   ├── skill_loader.py        # Skill 注入器
 │   ├── project_context.py     # 動態偵測工作區內各專案的 CLAUDE.md / AGENT.md；PACKAGE_ROOT／REPO_ROOT 的唯一定義處
-│   ├── git_ops.py             # 在目標專案 checkout／建立 AgentState["branch_name"]；初始規劃時另外
-│   │                          # 列出本地分支、判斷工作分支是否存在、從使用者選的起點分支只快轉同步後建立；
-│   │                          # 另提供 list_branch_files()／read_branch_file() 兩個唯讀查詢（git ls-tree／
-│   │                          # git show），回傳 (結果或 None, git 錯誤訊息)，不 checkout、不動工作樹與
-│   │                          # index，供 web/repo_view.py 讀取其他分支
+│   ├── git_ops.py             # 任務工作目錄（git worktree）的建立／移除／commit：`worktree_dir()` 算出路徑、
+│   │                          # `ensure_worktree()`／`create_worktree_from()` 建立或簽出分支、`commit_all()`／
+│   │                          # `remove_worktree()` 供 archive 收尾用；初始規劃時另列出本地分支、判斷工作分支
+│   │                          # 是否存在；另提供 list_branch_files()／read_branch_file() 兩個唯讀查詢（git
+│   │                          # ls-tree／git show），回傳 (結果或 None, git 錯誤訊息)，不 checkout、不動工作樹
+│   │                          # 與 index，供 web/repo_view.py 讀取其他分支（見下方「任務工作目錄」）
 │   └── interaction.py         # 互動埠：CLI／網頁兩種提問實作的唯一切換點（見下方「網頁控制台」）
 ├── web/                     # 網頁控制台（見下方「網頁控制台」整節）
 │   ├── app.py                  # FastAPI app（前綴 `/api`），同時以 StaticFiles 提供前端
-│   ├── runner.py               # 單一作用中執行：子行程、日誌、提問/回覆檔、中止、session 回寫
+│   ├── runner.py               # 多執行管理：以 run_id 為鍵的子行程、日誌、提問/回覆檔、中止、session 回寫
 │   ├── repo_view.py            # 唯讀瀏覽 .agentloop/changes、openspec/changes(/archive)、openspec/specs；
-│   │                          # 工作樹找不到 change 資料夾時改讀該任務工作分支最新 commit（git_ops 唯讀查詢）
+│   │                          # 讀取順序為任務工作目錄 → 主工作目錄（舊任務）→ 該任務工作分支最新 commit
+│   │                          # （git_ops 唯讀查詢）；「已封存任務」另外混排未合併封存任務（見下方說明）
 │   ├── search_api.py           # 重用 search.py 的索引／檢索／回答函式
 │   ├── settings.py             # `.web/settings.json` 讀寫、合併 .env、secret 遮罩、資料夾邊界檢查
 │   └── frontend/                # Vue 3 + TypeScript + Vite SPA（見下方「前端」）
@@ -71,6 +74,60 @@ change/spec-delta 規則；review 通過後由 `archive` 節點呼叫 `openspec 
 
 ---
 
+## 任務工作目錄：git worktree（見 `docs/adr/0002-change-worktree-and-commit-on-archive.md`）
+
+每個任務（change）在自己專屬的 **git worktree** 裡規劃、實作、審查與封存，主工作目錄
+（`AgentState["project_dir"]` 指向的目錄）永遠不被 `checkout` 或修改——因此不同任務可無上限
+同時執行，同一任務同時最多一個執行（見下方「同一任務互斥：`core/change_lock.py`」）。
+
+- **路徑**：`worktree_dir(project_dir, change_name)`（`lib/git_ops.py`）算出
+  `<工作區根目錄>/.agentloop-worktrees/<project_dir>/<change_name>/`，不另存欄位——完全由
+  `project_dir` + `change_name` 推得。`.agentloop-worktrees/` 以點開頭，`project_context.list_project_docs()`
+  與 `web/settings.py` 的資料夾列舉都已略過點開頭目錄，不需特別排除。
+- **建立／簽出**：`ensure_worktree(project_dir, change_name, branch_name)` 取代舊版
+  `ensure_on_branch()`——已存在且分支正確就不重建；分支是主工作目錄目前所在分支時，回傳固定錯誤
+  訊息「分支 `<branch_name>` 正在主工作目錄使用中，請先將主工作目錄切換到其他分支（未提交變更請先
+  commit 或 stash）」；分支已被其他 worktree 簽出時失敗；本地已有分支用 `git worktree add`，沒有則
+  從主工作目錄 HEAD `git worktree add -b` 建立。初始規劃且工作分支本地不存在時改用
+  `create_worktree_from(project_dir, change_name, branch_name, base_branch)` 取代舊版
+  `create_branch_from()`：只 `git fetch` 起點分支的遠端追蹤分支（有 upstream 才 fetch；fetch 失敗
+  但本地已有該遠端追蹤 ref 時仍以它為起點，訊息註明「容器內無法連線遠端、改用本地的遠端追蹤分支
+  `<ref>`」；都沒有則不建立）、`git worktree add --no-track -b`，**不 checkout、不 pull 主工作目錄**。
+- **`.agentloop/` 執行狀態紀錄仍在主工作目錄**：`state.json`、`logs/<stage>.log` 不隨 worktree
+  移動，見下方「檔案系統作為共享記憶」。
+- **`execute`／`review` 都在任務工作目錄操作**：`git diff HEAD`、`openspec` CLI 的 cwd、
+  `build_project_doc_hint_for()` 與 prompt 裡「目標專案目錄」都指向任務工作目錄；`execute` 的
+  prompt 另外告知主工作目錄路徑，由 Agent 自行決定沿用其中的未追蹤相依檔（例如符號連結
+  `node_modules`）或在任務工作目錄內重新安裝。
+- **execute 不 commit，只擬訊息**：`execute` 最後輸出一行 `COMMIT_MESSAGE: <訊息>`
+  （`^COMMIT_MESSAGE:\s*(.+)$`，多行模式取最後一個），寫入 `AgentState["commit_message"]`；沒有
+  這行則保留 state 原值。真正的 commit 延後到 `archive` 成功之後才做——worktree 移除前必須先
+  commit，否則 execute 留下的未提交變更會隨 worktree 一起消失。
+- **archive 的六步驟**（`nodes/archive.py`，取代舊版單純呼叫 `openspec archive` 收尾）：
+  1. `ensure_worktree()` 失敗 → `status: "error"`
+  2. 詢問是否併入 specs/（`_ask_should_archive()`），答否 → 與既有行為相同，只印提示、不 commit、不移除
+  3. 若 `is_change_archived()` 判定已封存（前次 archive 成功但 commit 失敗）→ 略過 `openspec archive`
+     直接進第 4 步；否則呼叫 `archive_change()`，失敗 → 只印警告，不 commit、不移除
+  4. `AgentState["commit_message"]` 為空 → `status: "error"`，`stage_notes["archive"]` 註明「沒有
+     任務 commit 訊息，未 commit、保留任務工作目錄 `<路徑>`；請重跑 execute 產生 commit 訊息後再
+     重跑 archive」
+  5. `commit_all(project_dir, change_name, commit_message)` 失敗 → `status: "error"` 並附 git 訊息，
+     worktree 保留
+  6. commit 成功 → `remove_worktree()` 移除任務工作目錄（工作分支保留）；不論移除成功與否都寫
+     `AgentState["archived"] = True`（移除失敗只印警告並附路徑，因為變更已安全 commit）
+- **同一任務互斥：`core/change_lock.py`**——`acquire(project_dir, change_name)` 對
+  `<主工作目錄>/.agentloop/changes/<change_name>/run.lock` 以 `fcntl.flock(LOCK_EX | LOCK_NB)`
+  上鎖，檔案描述子存在模組層，行程結束（含被 SIGKILL）時由 OS 自動釋放，不需要清理程式碼；同一行程
+  重複呼叫視為成功。上鎖時機：`main.py` 的 `run_node()`（`--node` 直呼節點）載入 state 後立即上鎖；
+  完整工作流的新任務在 `analyze_plan` 決定 change 名稱之後、建立 worktree 之前上鎖。取不到鎖的節點
+  回傳 `status: "error"` 結束。這層同時保護 CLI 與網頁；網頁另在 `web/runner.RunManager` 先擋（見
+  下方「執行管理」），讓按鈕即時停用、API 回 409。
+- **舊任務相容**：本 change 之前建立、規格仍留在主工作目錄未提交的任務，重跑時會在新建的 worktree
+  從分支最新 commit 開始，主工作目錄當時的未提交改動不會被帶過去；`list_active_changes()`／
+  `read_change_file()` 等仍會 fallback 讀主工作目錄，見下方「檔案系統作為共享記憶」。
+
+---
+
 ## 核心資料結構：`AgentState`
 
 所有節點之間以一個不可變的 `TypedDict` 傳遞狀態，完整定義如下：
@@ -106,6 +163,10 @@ class AgentState(TypedDict):
                            # analyze_plan 成功時寫 True，用來判定重跑 analyze_plan 要走初始規劃還是調整
     replan_failed: bool    # 最近一次 analyze_plan 是否在「依審查結果重新規劃」途中失敗；成功時寫 False，
                            # 用來判定重跑時是否要略過「依審查結果重新規劃／輸入調整內容」選擇題
+    commit_message: str    # execute 擬出的一行任務 commit 訊息（COMMIT_MESSAGE: 輸出解析而來）；
+                           # archive 成功後用它在任務工作目錄 commit，execute 自己不 commit
+    archived: bool         # 這個 change 是否已由 archive 成功 commit 並移除任務工作目錄；只由
+                           # archive 節點寫 True，見下方「任務工作目錄」
 ```
 
 每個節點讀取需要的欄位、寫入自己負責的欄位，節點之間**不直接呼叫彼此**，全部透過狀態字典溝通。
@@ -169,7 +230,10 @@ START
 答 `y` 才繼續），同意才呼叫 `openspec archive <change_name> --yes --json` 把這次的 spec delta 併入
 目標專案持久的 `openspec/specs/`；同一個 change 已被 archive 過、目標資料夾已存在時，會先把舊的
 改名為 `<name>-2` / `<name>-3` … 再呼叫 CLI（OpenSpec 拒絕覆寫既有 archive，也不提供 force 旗標）。
-使用者選擇不 archive、或 archive 本身失敗，都只印警告，不影響工作流程結束狀態。
+`openspec archive` 成功後，在任務工作目錄以 execute 擬好的 `commit_message` commit 全部變更、移除
+任務工作目錄（工作分支保留），並把 `AgentState["archived"]` 寫為 `True`；缺 commit 訊息或 commit
+失敗則記為 `status: "error"`、保留任務工作目錄，見上方「任務工作目錄」的 archive 六步驟。使用者
+選擇不 archive、或 `openspec archive` 本身失敗，都只印警告，不影響工作流程結束狀態。
 
 ### 關鍵函式
 
@@ -296,13 +360,15 @@ Claude 呼叫中途被中斷，`_fail()` 回傳的 `task`／`human_feedback`／s
 OpenSpec change 位置，不需要各自重新判斷；`archive_node` 單獨執行（沒有 state 可讀）時也是同樣
 直接採用 `TARGET_PROJECT`，見 `nodes/archive.py` 的 `_resolve_location()`。
 
-確認 `branch_name`／`project_dir` 後，執行／審查／archive，以及初始規劃時工作分支本地已存在的情況，
-都會透過 `git_ops.ensure_on_branch()` 切到該分支（已存在則 `checkout`，不存在則 `checkout -b` 從目前
-HEAD 建立）——這一步在呼叫 Claude 之前就完成，不再讓 Claude 自己 checkout。
+確認 `branch_name`／`project_dir` 後，初始規劃先 `change_lock.acquire(project_dir, change_name)`
+上鎖，再依工作分支是否已存在呼叫 `ensure_worktree()`／`create_worktree_from()` 建立或簽出任務
+工作目錄（見上方「任務工作目錄」）；執行／審查／archive 一律呼叫 `ensure_worktree()`。這一步在呼叫
+Claude 之前就完成，Claude 看到的「目標專案目錄」一律是任務工作目錄，不再讓 Claude 自己 checkout，
+主工作目錄全程不被切換分支。
 
 **初始規劃、且工作分支本地不存在時，改為讓使用者選擇起點分支並先同步：** 這一步只發生在初始規劃
 （`execute`／`review`／`archive` 切到既有分支時不會觸發，因為那時工作分支必然已存在）。流程在原本
-呼叫 `ensure_on_branch()` 之前先用 `git_ops.branch_exists()` 判斷工作分支是否已存在，不存在才走這條
+呼叫 `ensure_worktree()` 之前先用 `git_ops.branch_exists()` 判斷工作分支是否已存在，不存在才走這條
 路徑：
 
 1. `_ask_base_branch()` 用 `git_ops.list_local_branches()` 列出目標專案全部本地分支（依名稱排序），
@@ -311,19 +377,18 @@ HEAD 建立）——這一步在呼叫 Claude 之前就完成，不再讓 Claude
    按鈕，另保留自訂輸入框。直接 Enter／自訂輸入框留空送出或非互動式環境採用目前分支（detached HEAD
    時直接 Enter 要重問，非互動式環境則直接回傳空字串）；輸入非清單內編號會提示後重問；使用者中止
    （EOF／Ctrl-C）回傳空字串，呼叫端 `_fail()` 記為錯誤，不建立工作分支、不呼叫 Claude
-2. 取得起點分支後呼叫 `git_ops.create_branch_from(project_dir, branch_name, base_branch)`：
-   `checkout base_branch` → 用 `rev-parse --abbrev-ref --symbolic-full-name @{u}` 判斷有無 upstream
-   →有則 `pull --ff-only`（失敗或逾時都回傳 `(False, 訊息)`，停在 `base_branch` 上，不建立
-   `branch_name`；沒有 upstream 則印出「起點分支 `<base>` 未設定 upstream，略過 git pull」直接略過
-   這步）→ 同步成功（或略過）後 `checkout -b branch_name`
-3. 失敗（切換起點分支失敗、`git pull` 失敗或逾時）時 `_fail(f"無法建立分支 {branch_name}：{msg}")`，
-   錯誤說明包含工作分支名稱與 git 回報的原因，工作分支不會被建立，系統不進入規格撰寫
+2. 取得起點分支後呼叫 `git_ops.create_worktree_from(project_dir, change_name, branch_name, base_branch)`
+   建立任務工作目錄與工作分支（見上方「任務工作目錄」的 fetch／upstream 細節）；主工作目錄全程不
+   checkout、不 pull
+3. 失敗（fetch 失敗且本地無遠端追蹤 ref、或 `git worktree add` 失敗）時
+   `_fail(f"無法建立任務工作目錄（分支 {branch_name}）：{msg}")`，錯誤說明包含工作分支名稱與 git
+   回報的原因，任務工作目錄不會被建立，系統不進入規格撰寫
 
 起點分支只在這次呼叫內使用，不寫進 `AgentState`——後續節點只需要 `branch_name`，不需要知道當初從哪個
 分支建立。
 
 **Domain 歸屬確認、`openspec init`／`new change`（皆已搬到 Python，呼叫 Claude 之前完成）：**
-初始規劃在 `ensure_on_branch()` 之後、組 prompt 之前，依序執行：
+初始規劃在任務工作目錄建立完成之後、組 prompt 之前，依序執行：
 
 1. `openspec_runner.ensure_initialized()`：`<目標專案>/openspec/` 不存在才執行一次性
    `openspec init --tools none --force`（只建目錄，不安裝 workflow skill），已存在則直接略過
@@ -370,8 +435,9 @@ system prompt 只多一行 `skip_specs: true` 或 `skip_specs: false`；怎麼�
 `state.json` 持久化，所以驗收後對同一個 change 再開一輪會沿用。
 
 **「重寫」等級的 rollback（已搬到 Python，呼叫 Claude 之前完成）：** 重新規劃若 `review_level`
-為「重寫」，在 `ensure_on_branch()` 之後、組 prompt 之前，呼叫 `git_ops.rollback_except_openspec()`：
-在目標專案執行 `git stash push --include-untracked -- . ':!openspec'`（失敗則 `git checkout --
+為「重寫」，在 `ensure_worktree()` 之後、組 prompt 之前，呼叫
+`git_ops.rollback_except_openspec(project_dir, change_name)`：在任務工作目錄執行
+`git stash push --include-untracked -- . ':!openspec'`（失敗則 `git checkout --
 . ':!openspec'` + `git clean -fd --exclude=openspec/`）丟棄程式碼變更（含 execute 留下的
 untracked 新檔），但保留 `openspec/`，失敗即視為錯誤（`status: "error"`）、不繼續呼叫 Claude。
 「修補」等級不執行此步驟，保留現有變更。
@@ -441,11 +507,11 @@ growing」），不在個別 `_SYSTEM` 裡重複描述。
 同時列在 `_SKILLS` 與 `_SKILLS_REPLAN`，所以 replan 也會收到那段範本，這個 token 最佳化已經失效。
 要恢復的話得把範本另外拆成一個只列在 `_SKILLS` 的 skill。
 
-**OpenSpec Change 建立與規格文件範本：** 規格文件不再是 AgentLoop 自訂的單一 Markdown 檔案，而是遵照 [OpenSpec](https://github.com/Fission-AI/OpenSpec) 的 change 資料夾格式，寫在目標專案的 `<project_dir>/openspec/changes/<change_name>/` 底下：
+**OpenSpec Change 建立與規格文件範本：** 規格文件不再是 AgentLoop 自訂的單一 Markdown 檔案，而是遵照 [OpenSpec](https://github.com/Fission-AI/OpenSpec) 的 change 資料夾格式，寫在**任務工作目錄**的 `openspec/changes/<change_name>/` 底下（見上方「任務工作目錄」）：
 
-- **建立階段**（僅初始規劃，皆由 Python 在呼叫 Claude 前完成，見上方說明）：`ensure_on_branch()`
-  checkout 分支 → `ensure_initialized()` bootstrap `openspec/` → `_ask_domain_selection()` 確認
-  domain 歸屬 → `ensure_change_created()` 建立 change 資料夾
+- **建立階段**（僅初始規劃，皆由 Python 在呼叫 Claude 前完成，見上方說明）：建立／簽出任務工作目錄
+  （`ensure_worktree()`／`create_worktree_from()`）→ `ensure_initialized()` bootstrap `openspec/` →
+  `_ask_domain_selection()` 確認 domain 歸屬 → `ensure_change_created()` 建立 change 資料夾
 - **沿用階段**（`_CHANGE_SETUP_EXISTING`，replan／human-revise 共用）：`project_dir`/`change_name`
   沿用 `AgentState` 已存的值，不重新 `init`/`new change`，直接 Edit/Write 同一個 change 資料夾；
   「重寫」等級的 replan 在 Claude 完成撰寫、`openspec validate` 通過後，由 `_reset_task_checkboxes()`
@@ -495,16 +561,16 @@ growing」），不在個別 `_SYSTEM` 裡重複描述。
 
 **執行前準備（必須完成）：**
 
-1. Python 先用 `git_ops.ensure_on_branch()` 把目標專案切到 `state["branch_name"]`（已存在則 checkout，不存在則建立）；失敗則 `status: "error"`，不呼叫 Claude
+1. Python 先用 `git_ops.ensure_worktree()` 建立或簽出任務工作目錄（已存在則沿用，不存在則從主工作目錄 HEAD 建立）；失敗則 `status: "error"`，不呼叫 Claude
 2. Read `openspec/changes/<change_name>/` 下的 proposal.md、specs/**/\*.md、tasks.md（若有 design.md 一併讀取）。規格、驗收條件與任務清單以這些檔案為準，**不**把 `state["plan"]` 扁平清單貼進 prompt，也 **不\*\*注入 `state["task"]`（原始使用者描述只給規劃用；execute 的工作範圍就是 change 資料夾，再貼一次會讓它重新診斷原始問題、略過 tasks.md 已收斂的剩餘項）
-3. 依 `project_context.build_project_doc_hint_for(project_dir)` 指名的目標專案，Read 讀取其 `CLAUDE.md` / `AGENT.md`，了解架構、指令（測試、lint、build 等）、目錄慣例、程式碼規範與技術棧；找不到說明檔則自行 Read/Glob/Grep 探索並比對現有風格
+3. 依 `project_context.build_project_doc_hint_for()` 指名的任務工作目錄，Read 讀取其 `CLAUDE.md` / `AGENT.md`，了解架構、指令（測試、lint、build 等）、目錄慣例、程式碼規範與技術棧；找不到說明檔則自行 Read/Glob/Grep 探索並比對現有風格
 4. 依偵測到的技術棧，**自行**從可用的 skills 中挑選並使用適合的其他 skill（例如 Vue 專案適用 `vue-best-practices`、Nuxt + Vitest 專案適用 `nuxt-vitest-msw`）——不寫死任何特定技術棧的 skill 清單。這些完全不經過 `skill_loader.py`，靠 Claude Code 自己原生的 skill 探索機制（只認執行者 `$HOME/.claude/skills/`，見下方「Skill 系統作為知識注入」）；`tdd` 已固定完整注入（見下方「注入的 Skills」），不需要另外挑選
 5. 若該專案 `docs/` 目錄存在，讀取其下所有現有文件，了解商業邏輯說明；`docs/` 目錄不存在時不需自行建立
 
 **執行方式：** 依 change 資料夾內 `tasks.md` 的順序嚴格依序處理（不重排）：
 
 - `- [ ]` 必須執行；`- [x]` **預設略過**，略過前先 Read/Grep 核對該項聲稱完成的檔案是否真的在磁碟上、內容是否對得上規格——對得上才略過，對不上才重做該項。這條寫在 `_SYSTEM` 裡，所以即使 session 失效、冷啟動重送完整 prompt，也不會把已完成的實作重做一遍（`RESUME_AFTER_INTERRUPT_PROMPT` 另外保住「做到一半」的脈絡）
-- **不** commit——是否提交由使用者事後決定
+- **不得自行 commit**——完成後在最終輸出最後一行附上 `COMMIT_MESSAGE:`，由 archive 節點在成功封存後統一 commit（見上方「任務工作目錄」）
 - **不**自行呼叫 `/code-review`——後續有獨立的 Review Agent 依專案規格審查本次修改
 - tasks.md 中若有「撰寫／更新測試」的 TASK，**必須**依 `tdd` skill 的紅-綠循環執行：先寫會失敗的測試，再寫最小可行實作讓測試通過，最後重構；不可先完成其他 TASK 的實作、事後才回頭補測試
 - 過程中定期執行型別檢查與單一測試檔案，全部 TASK 完成後執行完整測試
@@ -520,6 +586,9 @@ growing」），不在個別 `_SYSTEM` 裡重複描述。
 1. 所有已修改的程式碼檔案清單
 2. 所有已新增/修改的說明文件清單
 3. 每個 TASK 的完成狀態（✅ 已完成 / ❌ 未完成 + 原因）
+4. 最後一行：`COMMIT_MESSAGE: <一行 commit 訊息，依該專案 git log 慣例>`——節點以
+   `^COMMIT_MESSAGE:\s*(.+)$`（多行模式，取最後一個）解析寫入 `AgentState["commit_message"]`；
+   沒有這行則保留 state 原值
 
 **注入的 Skills：** `tdd`（完整內容，見下方「Skill 系統作為知識注入」關於為什麼不能只列名稱）；其餘依偵測到的技術棧由 Agent 自行從可用 skills 中挑選使用（依賴 Claude Code 自己的原生 skill 探索，不經過 `skill_loader.py`）。不 commit、不自行 `/code-review`，流程寫在 `_SYSTEM`。
 
@@ -588,8 +657,9 @@ skill 全文、兩輪 sub-agent 往返、額外驗證步驟之後的深層決策
 
 異動與規格都以檔案為準，prompt **不**注入 `state["plan"]` 扁平清單，也 **不**注入 `execution_result`。fixed point（固定為 `HEAD`）與 spec 來源（OpenSpec change 資料夾）由本節點參數提供給 `code-review` skill，不經由 skill 自己詢問使用者或找 issue tracker——這兩步在 `AgentLoop/.claude/skills/code-review/SKILL.md` 這份專案內建副本裡已經直接拿掉（見下方「Skill 系統作為知識注入」的說明）。
 
-- **Fixed point**：本次修改尚未 commit，固定為 `HEAD`（`git diff HEAD` 取得完整異動，不用三點 diff）
-- **Spec 來源**：`<project_dir>/openspec/changes/<change_name>/`（`AgentState["project_dir"]`/`["change_name"]` 組成的路徑）——Read 讀取其下 proposal.md / tasks.md / specs/\*_/_.md（若有 design.md 一併讀取；小改動可能沒有此檔，不視為缺漏），也可用 `openspec show <change_name> --json` 快速確認結構；若該 change 已被前一輪迭代 archive，改讀 `<project_dir>/openspec/specs/` 下對應 domain 的 spec.md
+- **Fixed point**：本次修改尚未 commit，固定為 `HEAD`；審查對象是任務工作目錄（已簽出工作分支），
+  在該目錄下直接執行 `git diff HEAD` 取得完整異動，不用三點 diff
+- **Spec 來源**：任務工作目錄的 `openspec/changes/<change_name>/`——Read 讀取其下 proposal.md / tasks.md / specs/\*_/_.md（若有 design.md 一併讀取；小改動可能沒有此檔，不視為缺漏），也可用 `openspec show <change_name> --json` 快速確認結構；若該 change 已被前一輪迭代 archive，改讀任務工作目錄的 `openspec/specs/` 下對應 domain 的 spec.md
 - **Standards 來源**：依 `project_context.build_project_doc_hint_for(project_dir)` 指名的目標專案，讀取其 `CLAUDE.md` / `AGENT.md`，以及其中提及或專案根目錄下的 `CODING_STANDARDS.md` / `CONTRIBUTING.md`（若有）
 - 其餘仍依 skill：Fowler smell baseline、平行 sub-agent、以 `## Standards` / `## Spec` 並陳報告
 
@@ -648,19 +718,42 @@ SUGGESTION 2: [建議內容與理由]
 
 ### 5. `archive_change`（收尾節點，`nodes/archive.py`）
 
-**職責：** review 判定通過（`review_blocking=False`）後的機械式收尾動作——把這次的 OpenSpec change 併入目標專案持久的 `openspec/specs/`。這是「該不該 archive」的判斷（review 通過就 archive），不需要 Claude 的判斷力，因此**不呼叫 `call_claude()`**，純 Python 直接跑 `openspec` CLI，不佔用一次 Claude 呼叫、不耗費 token。
+**職責：** review 判定通過（`review_blocking=False`）後的收尾動作——把這次的 OpenSpec change 併入目標專案持久的 `openspec/specs/`，commit 到工作分支，並移除任務工作目錄。「該不該 archive」的判斷（review 通過就問一次）不需要 Claude 的判斷力，因此**不呼叫 `call_claude()`**，純 Python 直接跑 `openspec` CLI 與 git，不佔用一次 Claude 呼叫、不耗費 token。
 
 **觸發時機：** 只在 `route_after_review()` 判定 `review_blocking=False` 時進入；`status=="error"` 或 `review_blocking=True` 且已達 iteration 上限（放棄重試）時直接 END，不會進入這個節點——沒有通過審查的東西不併入持久 specs/。
 
-**人工卡控：** 定位到 change 位置、（有需要時）checkout 完分支後，實際呼叫 `openspec archive` 前，`_ask_should_archive()` 在終端機問一次「是否要將此 change 併入 `<project_dir>/openspec/specs/`？[y/N]」——單層問法，答 `y` 才 archive，其餘（`N`、直接 Enter、非互動式環境、Ctrl-C/EOF）一律視為否、略過 archive 並印出手動指令，跟其他 archive 略過的情況一樣不讓整個工作流程失敗。CJK 提示文字改用 `print(..., end="")` 印出、`input()` 不帶 prompt 參數，避免重蹈 `human_confirm` 曾修過的「CJK readline 提示吃字元」問題（見 `f59edb4`）。
+**六步驟（詳見上方「任務工作目錄」）：** `ensure_worktree()` 失敗即錯誤 → 人工卡控（下） →
+`openspec archive` 或偵測已封存略過 → 檢查 `commit_message` → `commit_all()` → `remove_worktree()`，
+最後寫 `AgentState["archived"] = True`。
 
-**執行內容：** 透過 `openspec_runner.archive_change(project_dir_abs, change_name)`（`openspec_runner.py`，跟 `claude_runner.py` 是「唯一跟 claude CLI 對話的地方」同樣的角色，這裡是唯一跟 `openspec` CLI 對話的地方）執行 `openspec archive <change_name> --yes --json`，把 change 的 spec delta 合併進 `openspec/specs/`、change 資料夾搬到 `openspec/changes/archive/YYYY-MM-DD-<name>/`。目標名稱的計算跟 OpenSpec CLI 一致：change 名稱已以 `YYYY-MM-DD-` 開頭就原樣使用（分支轉 kebab-case 時常如此），否則前置今天的本地日期。呼叫 CLI 前若該目標已存在（同一 change 被 archive 過後又改、再 archive），`vacate_existing_archive()` 會把舊資料夾改名為 `<name>-2` / `<name>-3` … 讓出原名——OpenSpec 拒絕覆寫既有 archive，也不提供 suffix / force 旗標；舊快照保留不刪。成功時結果帶 `vacated_as`，`archive_node` 會印出改名後的路徑。
+**人工卡控：** 定位到任務工作目錄、確認 worktree 就緒後，實際呼叫 `openspec archive` 前，`_ask_should_archive()` 在終端機問一次「是否要將此 change 併入 `<project_dir>/openspec/specs/`？[y/N]」——單層問法，答 `y` 才 archive，其餘（`N`、直接 Enter、非互動式環境、Ctrl-C/EOF）一律視為否、略過 archive（不 commit、不移除任務工作目錄）並印出手動指令，跟其他 archive 略過的情況一樣不讓整個工作流程失敗。CJK 提示文字改用 `print(..., end="")` 印出、`input()` 不帶 prompt 參數，避免重蹈 `human_confirm` 曾修過的「CJK readline 提示吃字元」問題（見 `f59edb4`）。
 
-**單獨執行：** `python -m AgentLoop.main --node archive`（不帶參數，從列出的 changes 選一個）。`change_name` 一律取 `AgentState["change_name"]`。`project_dir` 已在 state 裡就直接用；否則直接採用環境變數 `TARGET_PROJECT`（workspace 只支援單一目標專案），再依 `change_name` 的原值／kebab-case 兩種形式比對哪個資料夾實際存在。`branch_name` 仍可選，有填才 checkout。
+**執行內容：** 若 `is_change_archived(work_dir_abs, change_name)` 已為 `True`（前次 archive 成功但
+commit 失敗，重跑補做後半段），略過 `openspec archive` 直接進 commit；否則透過
+`openspec_runner.archive_change(work_dir_abs, change_name)`（`openspec_runner.py`，跟
+`claude_runner.py` 是「唯一跟 claude CLI 對話的地方」同樣的角色，這裡是唯一跟 `openspec` CLI 對話
+的地方）執行 `openspec archive <change_name> --yes --json`，把 change 的 spec delta 合併進任務
+工作目錄的 `openspec/specs/`、change 資料夾搬到 `openspec/changes/archive/YYYY-MM-DD-<name>/`。
+目標名稱的計算跟 OpenSpec CLI 一致：change 名稱已以 `YYYY-MM-DD-` 開頭就原樣使用（分支轉
+kebab-case 時常如此），否則前置今天的本地日期。呼叫 CLI 前若該目標已存在（同一 change 被 archive
+過後又改、再 archive），`vacate_existing_archive()` 會把舊資料夾改名為 `<name>-2` / `<name>-3` …
+讓出原名——OpenSpec 拒絕覆寫既有 archive，也不提供 suffix / force 旗標；舊快照保留不刪。成功時
+結果帶 `vacated_as`，`archive_node` 會印出改名後的路徑。
 
-**失敗處理：** 容錯解析 stdout 的 JSON 診斷（OpenSpec agent-contract 的 `status: StoreDiagnostic[]` 慣例），失敗（`openspec` 指令不存在、validate 沒過、change 不存在等）只印警告訊息並附上手動補跑指令，**不**讓整個 workflow 失敗——程式碼已經審查通過，archive 只是收尾，失敗頂多之後手動執行 `openspec archive <name> --yes`。
+openspec archive 成功（或偵測已封存略過）後，檢查 `AgentState["commit_message"]`：為空則
+`status: "error"`、`stage_notes["archive"]` 註明原因，不 commit、保留任務工作目錄；非空則呼叫
+`commit_all(project_dir, change_name, commit_message)` 在任務工作目錄 `git add -A` + `git commit`，
+失敗同樣記為 `status: "error"` 並保留 worktree；成功後呼叫 `remove_worktree()` 移除任務工作目錄
+（`git worktree remove`，不加 `--force`；工作分支保留），不論移除成功與否都寫
+`AgentState["archived"] = True`（移除失敗只印警告並附路徑，因為變更已安全 commit）。
 
-**回傳：** 不更動 `AgentState` 任何欄位（`{}`），純粹是收尾動作。
+**單獨執行：** `python -m AgentLoop.main --node archive`（不帶參數，從列出的 changes 選一個）。`change_name` 一律取 `AgentState["change_name"]`。`project_dir` 已在 state 裡就直接用；否則直接採用環境變數 `TARGET_PROJECT`（workspace 只支援單一目標專案），再依 `change_name` 的原值／kebab-case 兩種形式比對哪個資料夾實際存在。`branch_name` 用來定位／建立任務工作目錄，缺少則視為錯誤。
+
+**失敗處理：** 容錯解析 stdout 的 JSON 診斷（OpenSpec agent-contract 的 `status: StoreDiagnostic[]` 慣例），`openspec archive` 本身失敗（`openspec` 指令不存在、validate 沒過、change 不存在等）只印警告訊息並附上手動補跑指令，**不**讓整個 workflow 失敗——程式碼已經審查通過，archive 只是收尾，失敗頂多之後手動執行 `openspec archive <name> --yes`。但 `openspec archive` 成功之後、commit 訊息缺漏或 `commit_all()` 失敗，都會讓任務工作目錄面臨「即將移除卻可能丟失成果」的風險，因此這兩種情況一律回報 `status: "error"` 並保留任務工作目錄，不比照「只印警告」處理。
+
+**回傳：** 使用者選擇不 archive、或 `openspec archive` 本身失敗時不更動 `AgentState`（`{}`）；成功
+commit 並移除 worktree 後回傳 `{"archived": True}`；commit 訊息缺漏或 commit 失敗回傳
+`{"status": "error", "stage_notes": {...}}` 或 `{"status": "error"}`。
 
 ---
 
@@ -715,7 +808,7 @@ embedding 模型輸出 L2 正規化後的 384 維向量，存為 `float[384]` bl
 - `human_confirm` → 填入 `status`（`"confirmed"` / `"needs_revision"` + `human_feedback` / `"aborted"`）
 - `execute` → 填入 `execution_result`、`status`
 - `review` → 填入 `review_result`、`review_level`、`review_blocking`、`status`
-- `archive_change` → 不填入任何欄位（純收尾動作）
+- `archive_change` → 成功 commit 並移除任務工作目錄時填入 `archived`；其餘情況不更動欄位（見上方「任務工作目錄」）
 
 ### 2. 動態專案偵測作為共同上下文
 
@@ -728,15 +821,15 @@ embedding 模型輸出 L2 正規化後的 384 維向量，存為 `float[384]` bl
 
 | 產出物          | 路徑                                                                                                                                                                              | 讀寫者                                                                                                                                            |
 | --------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
-| OpenSpec Change | `<project_dir>/openspec/changes/<change_name>/`（`proposal.md`/`tasks.md`/`specs/**/*.md`，非小改動時另有 `design.md`；`<project_dir>`/`<change_name>` 為 `AgentState` 對應欄位） | `analyze_plan` 寫；`human_confirm` 讀 proposal.md + tasks.md 供顯示；`execute` 讀完整 change 後實作並勾選 tasks.md；`review`、`archive_change` 讀 |
-| 持久規格        | `<project_dir>/openspec/specs/<domain>/spec.md`                                                                                                                                   | `archive_change` 呼叫 `openspec archive` 合併寫入，跨任務累積                                                                                     |
+| OpenSpec Change | **任務工作目錄**的 `openspec/changes/<change_name>/`（`proposal.md`/`tasks.md`/`specs/**/*.md`，非小改動時另有 `design.md`；路徑由 `worktree_dir(project_dir, change_name)` 算出，見上方「任務工作目錄」） | `analyze_plan` 寫；`human_confirm` 讀 proposal.md + tasks.md 供顯示；`execute` 讀完整 change 後實作並勾選 tasks.md；`review`、`archive_change` 讀 |
+| 持久規格        | 任務工作目錄的 `openspec/specs/<domain>/spec.md`（commit＋移除 worktree 後併入工作分支，merge 回主工作目錄所在分支才會出現在 `<project_dir>/openspec/specs/`）                     | `archive_change` 呼叫 `openspec archive` 合併寫入該任務工作目錄，跨任務累積                                                                       |
 | 審查結果        | `<project_dir>/.agentloop/changes/<change_name>/state.json` 的 `review_result` 欄位                                                                                               | `review` 執行後由 `_save_state()` 寫入；`analyze_plan` 重新規劃時從 `AgentState` 讀取                                                             |
-| AgentLoop State | `<project_dir>/.agentloop/changes/<change_name>/state.json`（`AgentState` 去除 `project_dir` 的 JSON 序列化；每個 node 結束後自動覆蓋）                                           | `main.py` 寫（`_save_state()`）；`--node` 模式下作為入口 state 載入，`project_dir` 在載入時由 `TARGET_PROJECT` 環境變數補回                       |
-| 業務文件        | 各偵測到專案的 `docs/` 目錄                                                                                                                                                       | `execute` 寫，`review` 驗證                                                                                                                       |
+| AgentLoop State | `<project_dir>/.agentloop/changes/<change_name>/state.json`（`AgentState` 去除 `project_dir` 的 JSON 序列化；每個 node 結束後自動覆蓋）——**主工作目錄**，不隨任務工作目錄移除而消失 | `main.py` 寫（`_save_state()`）；`--node` 模式下作為入口 state 載入，`project_dir` 在載入時由 `TARGET_PROJECT` 環境變數補回                       |
+| 業務文件        | 任務工作目錄下各偵測到專案的 `docs/` 目錄                                                                                                                                          | `execute` 寫，`review` 驗證                                                                                                                       |
 
 ### 4. Git Diff 作為稽核媒介
 
-`review` 節點執行 `git diff HEAD` 取得所有實際變更，而非僅依賴執行節點的自述，確保審查基於事實。
+`review` 節點在任務工作目錄執行 `git diff HEAD` 取得所有實際變更，而非僅依賴執行節點的自述，確保審查基於事實。
 
 ### 5. Skill 系統作為知識注入
 
@@ -762,7 +855,7 @@ Iteration 2:
     → human_confirm [y]（再次等待確認）
     → execute（執行差異修補）
     → review → "通過"
-    → archive_change（併入目標專案持久 openspec/specs/）
+    → archive_change（併入任務工作目錄的 openspec/specs/、commit 並移除任務工作目錄）
     → END ✅
 ```
 
@@ -896,7 +989,7 @@ AgentLoop 容器本身不跑 Docker daemon，而是讓容器內的 Docker CLI �
 | 技術                            | 說明                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
 | ------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **Docker**                      | 以 `python:3.11-slim` 為基底，加裝 Node.js 22 執行 Claude Code CLI（`@anthropic-ai/claude-code@2.1.285`；`claude-opus-5-5` 等新模型要求 CLI ≥ 2.1.280，該版宣告 Node ≥ 22），並加裝 `docker-ce-cli` + `docker-compose-plugin`（僅 CLI，不含 daemon）                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
-| **Docker Compose 路徑掛載**     | 自 v0.5.0 起改掛載**整個工作區根目錄**（`${HOST_WORKSPACE_ROOT}:${HOST_WORKSPACE_ROOT}`），而非只掛 `AgentLoop/` 與單一 `TARGET_PROJECT`，讓網頁控制台能切換目標專案、用資料夾選擇器看到其他專案，不需要為此重建容器；路徑同樣用「與 host 相同的絕對路徑」，原因不變：宿主 daemon 幫目標專案建立 bind mount 時，用的是掛載路徑「字串本身」，該字串必須在宿主上真實存在，否則會掛到空目錄。目標專案改由網頁設定（`web/settings.py`，優先於 `.env` 的 `TARGET_PROJECT`）決定，`project_context.py` 的動態偵測邏輯本身不寫死任何專案名稱。仍只支援單一目標專案同時執行，不提供多專案並行的擴充方式                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| **Docker Compose 路徑掛載**     | 自 v0.5.0 起改掛載**整個工作區根目錄**（`${HOST_WORKSPACE_ROOT}:${HOST_WORKSPACE_ROOT}`），而非只掛 `AgentLoop/` 與單一 `TARGET_PROJECT`，讓網頁控制台能切換目標專案、用資料夾選擇器看到其他專案，不需要為此重建容器；路徑同樣用「與 host 相同的絕對路徑」，原因不變：宿主 daemon 幫目標專案建立 bind mount 時，用的是掛載路徑「字串本身」，該字串必須在宿主上真實存在，否則會掛到空目錄。目標專案改由網頁設定（`web/settings.py`，優先於 `.env` 的 `TARGET_PROJECT`）決定，`project_context.py` 的動態偵測邏輯本身不寫死任何專案名稱。同一目標專案可多任務並行（見上方「任務工作目錄」），仍只支援單一目標專案                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | **`/var/run/docker.sock` 掛載** | `- /var/run/docker.sock:/var/run/docker.sock`，讓容器內 Docker CLI 連上宿主 daemon（DooD 的核心）                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
 | **對外埠**                      | `ports: ["127.0.0.1:8000:8000"]`：網頁控制台只綁 host 的 `127.0.0.1`，不對外開放；容器內 `command` 為 `python -m uvicorn AgentLoop.web.app:app --host 0.0.0.0 --port 8000`，前端由映像的 `WEB_DIST_DIR` 建置產物提供                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
 | **Claude 設定掛載**             | 分兩塊，刻意分開：(1) 登入狀態（`.claude/` 其餘內容、`.claude.json`）掛在容器專屬的 `agent_home` named volume（`- agent_home:/home/agent`），**不**與 host 共用——原因是若直接掛載 host 的 `~/.claude`，host 與容器內的 `claude` subprocess 會共用同一份 OAuth 憑證檔，兩邊同時使用時 token refresh 互搶，會導致容器內 node 執行到一半認證失效、或剛啟動時讀到寫入中的檔案顯示未登入；因此改為另外設定認證——首選在 host 執行 `claude setup-token`，將產出的 token 寫入 `.env` 的 `CLAUDE_CODE_OAUTH_TOKEN`（或改設 `ANTHROPIC_API_KEY`）；容器內互動式 `claude login` 仍可用但非首選，因為 `docker exec -it` 的嵌套 TTY 貼授權碼常因 paste 截斷或過期顯示 `Invalid code`。登入狀態隨 volume 持久化，容器重建不會遺失。(2) skills 內容：本專案用到的 skill 已直接複製進 `AgentLoop/.claude/skills/` 隨專案版控、不再依賴掛載即可運作；host 的 `${HOME}/.claude/skills:/home/agent/.claude/skills:ro` 與 `${HOME}/.agents:/home/agent/.agents:ro`（純靜態、無寫入需求）仍保留唯讀掛載，作為 `skill_loader.py` 的 fallback 來源，供 Agent 依偵測到的技術棧動態選用專案未內建的其他 skill（`~/.claude/skills` 底下多為指向 `~/.agents/skills` 的符號連結，需一併掛載才能解析）。`working_dir: ${HOST_WORKSPACE_ROOT}` |
@@ -1032,56 +1125,82 @@ note="使用者中止")`（見下方「執行管理」），不在其他模組�
 
 ### 執行管理：`web/runner.py`
 
-同一目標專案同時只允許一個執行（模組層 `RunManager` + `threading.Lock`，`RunConflict` 例外
-對應 API 的 409）：各節點會 `git checkout` 共用的工作目錄，兩個執行並行會互相切走分支，因此
-不做排隊、只簡單拒絕。
+**多個任務可無上限同時執行，同一任務同時最多一個執行**（`RunManager` 改為以 `run_id` 為鍵的
+`dict[str, _RunHandle]` + `threading.Lock`；`RunConflict` 例外只在「同一任務已有執行」時拋出，
+對應 API 的 409）——這是因為每個任務都在自己專屬的任務工作目錄（git worktree）操作，彼此不再
+共用同一份工作目錄（見上方「任務工作目錄」）。`core/change_lock.py` 的檔案鎖同時保護 CLI 與
+網頁，這裡的 `RunManager` 檢查只是讓網頁按鈕能即時停用、回 409，不是唯一的互斥機制。
 
-- **啟動**：`subprocess.Popen([sys.executable, "-m", "AgentLoop.main", ...], cwd=REPO_ROOT,
-start_new_session=True, env=合併設定＋AGENTLOOP_INTERACTION=web＋AGENTLOOP_RUN_DIR)`。新增
+- **啟動**：`start_new_task(task)` 永不因其他執行而拒絕；`start_rerun(change_name, stage)`
+  只在「已有任一執行的 `change_name` 等於它」時拋 `RunConflict(change_name)`。
+  `subprocess.Popen([sys.executable, "-m", "AgentLoop.main", ...], cwd=REPO_ROOT,
+  start_new_session=True, env=合併設定＋AGENTLOOP_INTERACTION=web＋AGENTLOOP_RUN_DIR)`。新增
   任務帶 `"<task>"`；重跑帶 `--node <stage> --change <name>`（`stage` 限
   `analyze_plan`／`execute`／`review`／`archive`，`human_confirm` 不可單獨重跑，跟命令列
   `--node` 的限制一致）。
-- **執行目錄**：`$AGENTLOOP_WEB_STATE_DIR/run/`（預設 `AgentLoop/.web/run/`），內含
-  `meta.json`（run_id、kind、task、change_name、stage、started_at、pid）、`output.log`、
-  `question.json`、`answer.json`、`session.json`。
-- **change 名稱偵測**：新增任務時分支名稱決定前，`change_name` 還不知道——查詢執行狀態時用
-  `task` 字串＋`state.json` 的 mtime（晚於 `started_at`）掃描 `<target>/.agentloop/changes/*/`，
-  找到就寫回 `meta.json`，往後直接採用，不再重複掃描。
+- **執行目錄**：每個 run 各自一份 `$AGENTLOOP_WEB_STATE_DIR/runs/<run_id>/`（預設
+  `AgentLoop/.web/runs/<run_id>/`），內含 `meta.json`（run_id、kind、task、change_name、
+  stage、started_at、pid）、`output.log`、`question.json`、`answer.json`、`session.json`、
+  `change.json`。
+- **change 名稱偵測**：新增任務時分支名稱決定前，`change_name` 還不知道——子行程在
+  `main._save_state()` 寫入 state 時，若設有 `AGENTLOOP_RUN_DIR` 就同時寫
+  `<run_dir>/change.json`（`{"change_name": ...}`）；`RunManager` 讀此檔取得 change 名稱，
+  取代舊版以任務描述＋`state.json` mtime 掃描的 `_detect_change_name`（兩個相同描述的新任務
+  並行時舊方法會認錯）。
 - **session 回寫**：`claude_runner._run_claude_once()` 讀到第一個 `session_id` 時，若設定了
   `AGENTLOOP_RUN_DIR` 就寫 `session.json`（`{stage, session_id}`）。
-- **中止**：對 process group 送 `SIGTERM`，5 秒後仍存活再送 `SIGKILL`；之後讀該 change 的
-  `state.json`，把目前執行中的階段（先看 `stages` 裡誰是 `running`，找不到才退回 `meta.json`
-  的 `stage`）經 `stages.finish(state, stage, "error", note="使用者中止")` 記為 `error`＋
-  附註，`session.json` 存在的話依 `core.session.store_session()` 覆寫 session 插槽，最後清空
-  執行目錄——重跑該階段時會接回同一個 session，跟命令列 `q` 中止再 `--node` 重跑的行為一致。
-  沒有 change 名稱（分支名稱尚未決定）或偵測不到 `state.json` 時，只結束 process group、清空
-  執行目錄，不回寫狀態——新增任務後仍以暫時列呈現的執行走的就是這條路徑。
-- **日誌**：執行結束時依 `@@AGENTLOOP_STAGE x@@` 標記切分 `output.log`、去 ANSI，覆寫到
-  `<target>/.agentloop/changes/<name>/logs/<stage>.log`；執行中查詢日誌則直接即時切分
-  `output.log`（`live_stage_log()`），不等執行結束。
+- **中止**：`abort(run_id)` 只對指定的執行對 process group 送 `SIGTERM`，5 秒後仍存活再送
+  `SIGKILL`；之後讀該 change 的 `state.json`，把目前執行中的階段（先看 `stages` 裡誰是
+  `running`，找不到才退回 `meta.json` 的 `stage`）經
+  `stages.finish(state, stage, "error", note="使用者中止")` 記為 `error`＋附註，
+  `session.json` 存在的話依 `core.session.store_session()` 覆寫 session 插槽，最後把該 run
+  從 `_handles` 移除並清空其執行目錄——重跑該階段時會接回同一個 session，跟命令列 `q` 中止
+  再 `--node` 重跑的行為一致。沒有 change 名稱（分支名稱尚未決定）或偵測不到 `state.json`
+  時，只結束 process group、清空執行目錄，不回寫狀態——新增任務後仍以暫時列呈現的執行走的
+  就是這條路徑。其他執行中的 run 不受影響。
+- **日誌**：執行結束時依 `@@AGENTLOOP_STAGE x@@` 標記切分該 run 的 `output.log`、去 ANSI，
+  覆寫到 `<target>/.agentloop/changes/<name>/logs/<stage>.log`；執行中查詢日誌則在所有
+  `_handles` 中找 `change_name` 相符者、直接即時切分其 `output.log`（`live_stage_log()`），
+  不等執行結束。
+- **`is_active()`**：任一執行存在即 `True`（供設定頁禁止變更目標專案）；`runs()` 回傳所有
+  執行中任務的清單 `[{run_id, change_name, task, stage, question}]`，取代舊版單一執行的
+  `status()`。
 
 ### HTTP API：`web/app.py` + `web/repo_view.py` + `web/search_api.py`
 
 FastAPI，前綴 `/api`；`repo_view.py` 純讀檔（`.agentloop/changes/*/state.json`、
-`openspec/changes(/archive)/`、`openspec/specs/`），`search_api.py` 重用 `search.py` 的索引／
-檢索／回答函式（呼叫前用 context manager 暫時覆寫 `os.environ` 套用網頁設定的有效值，並用一把
-鎖序列化，因為暫時覆寫行程全域的 `os.environ` 不是執行緒安全的操作）。主要端點：
+`openspec/changes(/archive)/`、`openspec/specs/`，以及各任務工作目錄），`search_api.py` 重用
+`search.py` 的索引／檢索／回答函式（呼叫前用 context manager 暫時覆寫 `os.environ` 套用網頁設定
+的有效值，並用一把鎖序列化，因為暫時覆寫行程全域的 `os.environ` 不是執行緒安全的操作）。主要端點：
 
 | Method   | Path                                                                  | 用途                                                                                           |
 | -------- | --------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------- |
-| GET      | `/changes`                                                            | 執行中任務列表（排除已封存；舊任務缺 `stages` 時一律視為 `pending`）                           |
+| GET      | `/changes`                                                            | 執行中任務列表（排除已封存——state `archived: True` 或主工作目錄依舊規則判定已封存；舊任務缺 `stages` 時一律視為 `pending`） |
 | GET      | `/changes/{name}/stages/{stage}`                                      | 階段詳情：結果欄位、note、日誌最後 500 行（執行中即時切分、其餘讀持久化的 `logs/<stage>.log`） |
-| GET      | `/changes/{name}/files[/{path}]`                                      | 規格文件瀏覽（`proposal.md`/`design.md`/`tasks.md` 排最前，其餘依路徑排序）；工作樹找不到該 change 資料夾時，唯讀改讀該任務工作分支最新 commit 的內容，不 checkout、不動工作樹；該次 git 指令本身失敗時，在 404 的找不到訊息後附上「（git：<git 錯誤訊息>）」 |
-| GET/POST | `/run`、`/runs`、`/changes/{name}/rerun`、`/run/answer`、`/run/abort` | 執行狀態查詢、啟動新任務、重跑、回覆提問、中止                                                 |
-| GET      | `/archive`、`/archive/{dir}/files[/{path}]`                           | 已封存任務瀏覽                                                                                 |
+| GET      | `/changes/{name}/files[/{path}]`                                      | 規格文件瀏覽（`proposal.md`/`design.md`/`tasks.md` 排最前，其餘依路徑排序）；讀取順序為任務工作目錄 → 主工作目錄（舊任務）→ 該任務工作分支最新 commit，三者都找不到該 change 資料夾時唯讀改讀，不 checkout、不動工作樹；該次 git 指令本身失敗時，在 404 的找不到訊息後附上「（git：<git 錯誤訊息>）」 |
+| GET      | `/runs`                                                               | 所有執行中任務的清單（陣列，空陣列＝沒有執行）                                                 |
+| POST     | `/runs`                                                               | 啟動新任務（永不因其他執行而拒絕）                                                             |
+| POST     | `/changes/{name}/rerun`                                               | 重跑某階段；只有同一任務已有執行時回 409（`detail` 為「`<change_name>` 執行中」）              |
+| POST     | `/runs/{run_id}/answer`、`/runs/{run_id}/abort`                        | 回覆指定執行的提問、中止指定執行                                                               |
+| GET      | `/archive`、`/archive/{dir}/files[/{path}]`                           | 已封存任務瀏覽，含未合併封存任務（`branch` 欄位非空時表示尚未合併，見下方「前端」）            |
 | GET      | `/specs`、`/specs/{domain}`                                           | 既有 Spec 瀏覽                                                                                 |
 | POST     | `/specs/search`                                                       | 語意搜尋（查無結果回固定訊息；失敗回 502）                                                     |
-| GET/PUT  | `/settings`                                                           | 讀寫網頁設定；執行中禁止變更目標專案（409）                                                    |
+| GET/PUT  | `/settings`                                                           | 讀寫網頁設定；任一執行進行中禁止變更目標專案（409）                                            |
 | GET      | `/fs?path=`                                                           | 資料夾選擇器用的子資料夾列舉                                                                   |
 
 所有「目標專案」相關路徑都以 `os.path.realpath()` 後比對是否仍在 workspace root 底下，防止
 路徑穿越；`StaticFiles` 以 `html=True` 掛在 `/`（最後掛載，不蓋過 `/api/*`），`WEB_DIST_DIR`
 未設定或目錄不存在時只提供 API，方便本機開發時前端另外用 Vite dev server。
+
+**未合併封存任務**（`repo_view.list_archive()`）：掃描 `.agentloop/changes/*/state.json` 中
+`archived` 為 `True`、`branch_name` 非空且該分支仍存在的任務，對其工作分支呼叫
+`list_branch_files(project, branch, "openspec/changes/archive")`，取出第一層資料夾名稱中符合
+`_ARCHIVE_DIR_RE` 且 change 名稱等於該任務者；主工作目錄已有同名資料夾（已合併）則略過，否則
+加入一筆 `{"dir", "date", "name", "branch": <工作分支>}`，與一般封存（`branch` 固定為 `""`）
+混排、依 `dir` 由新到舊排序。工作分支不存在或 `ls-tree` 失敗時略過該任務、不拋錯。
+`list_archive_files()`／`read_archive_file()` 在主工作目錄沒有該資料夾時，改用
+`list_branch_files()`／`read_branch_file()` 從對應的工作分支唯讀讀取（不 checkout），讀取時
+`rel_path` 須在列出的檔案清單中，避免路徑穿越。
 
 ### 前端：`web/frontend/`
 
@@ -1095,6 +1214,16 @@ Vue 3 + TypeScript + `<script setup>` + Vite，測試用 Vitest + `@vue/test-uti
 `existing-specs/`（`ExistingSpecs`／`SpecSearch`）、`settings/`（`SettingsPanel`）、`utils/`
 （跨頁共用的 `FileBrowser`／`FolderPicker`）；四個主分頁對應的元件都掛在 `App.vue` 底下，相對
 import 路徑隨資料夾深度調整（例如 `../../api`）。
+
+**多執行並行的呈現**：`api.ts` 的 `RunInfo { run_id, change_name, task, stage, question }` 取代
+舊版單一執行的 `RunStatus`，`getRuns(): Promise<RunInfo[]>` 取代 `getRun()`。`ActiveChanges.vue`
+輪詢 `getRuns()`：每個 `change_name` 為空的執行（分支名稱尚未決定）各產生一列暫時列（以
+`run_id` 為 key）；每個 `ChangeRow` 依 `change_name` 對應到屬於自己的那筆執行（`run: RunInfo |
+null`，沒有則為 `null`），重跑停用、驚嘆號、呼吸光暈、中止都只看這個 prop——「新增任務」按鈕
+不再因任何執行而停用，重跑按鈕只在**自己這一列**有執行時停用（停用原因「`<change_name>` 執行
+中」）。回覆提問（`postAnswer(runId, questionId, answer)`）與中止（`postAbort(runId)`）都帶這
+一列對應的 `run_id`，確保只影響該執行。`ArchivedChanges.vue` 的 `ArchiveRow` 新增 `branch`
+欄位，非空時在名稱後顯示「未合併 · `<branch>`」標籤。
 
 圖示使用 `@fortawesome/vue-fontawesome`（SVG 版，非 webfont）：`src/icons.ts` 匯出用到的
 `free-solid-svg-icons` 清單，`main.ts` 以 `library.add(...)` 註冊並全域掛載

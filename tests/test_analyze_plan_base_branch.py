@@ -1,8 +1,9 @@
-"""初始規劃時選擇起點分支並先同步才建立工作分支（feat-new-change-source-branch）。
+"""初始規劃時選擇起點分支並建立任務工作目錄（feat-git-worktree-mode，原 feat-new-change-source-branch）。
 
 Seam：analyze_plan_node(state)，沿用 tests/test_node_guards.py 的 patch 慣例：patch
 interaction.ask／interaction.is_interactive、branch_exists、list_local_branches、
-create_branch_from、ensure_on_branch、call_claude，斷言提示選項、呼叫參數與 status。
+create_worktree_from、ensure_worktree、change_lock.acquire、call_claude，斷言提示選項、
+呼叫參數與 status；每案都確認主工作目錄未被觸碰（不 patch 任何主工作目錄 checkout 相關函式）。
 """
 from unittest.mock import patch, MagicMock
 
@@ -45,11 +46,12 @@ def _base_state(**overrides) -> dict:
 
 
 _OK = MagicMock(ok=True, error_text="")
+_LOCK_OK = (True, "ok")
 
 
 class TestAsksBaseBranchWhenMissing:
     def test_lists_branches_and_creates_from_selected_branch(self):
-        """Scenario: 工作分支不存在時列出本地分支並以使用者選的分支為起點"""
+        """Scenario: 工作分支不存在時列出本地分支並以使用者選的分支為起點，建立任務工作目錄"""
         from AgentLoop.nodes.analyze_plan import analyze_plan_node
 
         state = _base_state()
@@ -58,8 +60,9 @@ class TestAsksBaseBranchWhenMissing:
                    return_value=(["develop", "main"], "develop")), \
              patch("AgentLoop.nodes.analyze_plan.interaction.is_interactive", return_value=True), \
              patch("AgentLoop.nodes.analyze_plan.interaction.ask", return_value="2") as mock_ask, \
-             patch("AgentLoop.nodes.analyze_plan.create_branch_from",
-                   return_value=(True, "my-project 已從 main 建立並切換到分支 feat/login")) as mock_create, \
+             patch("AgentLoop.nodes.analyze_plan.change_lock.acquire", return_value=_LOCK_OK), \
+             patch("AgentLoop.nodes.analyze_plan.create_worktree_from",
+                   return_value=(True, "已從 main 建立任務工作目錄，分支 feat/login")) as mock_create, \
              patch("AgentLoop.nodes.analyze_plan.ensure_initialized", return_value=_OK), \
              patch("AgentLoop.nodes.analyze_plan.ensure_change_created", return_value=_OK), \
              patch("AgentLoop.nodes.analyze_plan.call_claude", return_value=_mock_claude_result("規劃完成")), \
@@ -69,7 +72,7 @@ class TestAsksBaseBranchWhenMissing:
 
         assert mock_ask.call_args.kwargs["options"] == ["1. develop（目前分支）", "2. main"]
         assert mock_ask.call_args.kwargs["kind"] == "choice"
-        mock_create.assert_called_once_with("my-project", "feat/login", "main")
+        mock_create.assert_called_once_with("my-project", "feat-login", "feat/login", "main")
         assert result["status"] != "error"
 
     def test_blank_answer_uses_current_branch(self):
@@ -82,7 +85,8 @@ class TestAsksBaseBranchWhenMissing:
                    return_value=(["develop", "main"], "develop")), \
              patch("AgentLoop.nodes.analyze_plan.interaction.is_interactive", return_value=True), \
              patch("AgentLoop.nodes.analyze_plan.interaction.ask", return_value=""), \
-             patch("AgentLoop.nodes.analyze_plan.create_branch_from",
+             patch("AgentLoop.nodes.analyze_plan.change_lock.acquire", return_value=_LOCK_OK), \
+             patch("AgentLoop.nodes.analyze_plan.create_worktree_from",
                    return_value=(True, "ok")) as mock_create, \
              patch("AgentLoop.nodes.analyze_plan.ensure_initialized", return_value=_OK), \
              patch("AgentLoop.nodes.analyze_plan.ensure_change_created", return_value=_OK), \
@@ -91,7 +95,7 @@ class TestAsksBaseBranchWhenMissing:
              patch("AgentLoop.nodes.analyze_plan._read_change_artifacts", return_value=("analysis", ["- [x] t1"])):
             result = analyze_plan_node(state)
 
-        mock_create.assert_called_once_with("my-project", "feat/login", "develop")
+        mock_create.assert_called_once_with("my-project", "feat-login", "feat/login", "develop")
         assert result["status"] != "error"
 
     def test_invalid_number_reasks_then_accepts(self):
@@ -105,7 +109,8 @@ class TestAsksBaseBranchWhenMissing:
              patch("AgentLoop.nodes.analyze_plan.interaction.is_interactive", return_value=True), \
              patch("AgentLoop.nodes.analyze_plan.interaction.ask",
                    side_effect=["9", "1"]) as mock_ask, \
-             patch("AgentLoop.nodes.analyze_plan.create_branch_from",
+             patch("AgentLoop.nodes.analyze_plan.change_lock.acquire", return_value=_LOCK_OK), \
+             patch("AgentLoop.nodes.analyze_plan.create_worktree_from",
                    return_value=(True, "ok")) as mock_create, \
              patch("AgentLoop.nodes.analyze_plan.ensure_initialized", return_value=_OK), \
              patch("AgentLoop.nodes.analyze_plan.ensure_change_created", return_value=_OK), \
@@ -115,19 +120,20 @@ class TestAsksBaseBranchWhenMissing:
             result = analyze_plan_node(state)
 
         assert mock_ask.call_count == 2
-        mock_create.assert_called_once_with("my-project", "feat/login", "develop")
+        mock_create.assert_called_once_with("my-project", "feat-login", "feat/login", "develop")
         assert result["status"] != "error"
 
 
 class TestExistingBranchSkipsQuestion:
     def test_existing_branch_switches_directly_without_asking(self):
-        """Scenario: 工作分支已存在時直接切換不詢問起點分支"""
+        """Scenario: 工作分支已存在時直接建立／切換任務工作目錄，不詢問起點分支"""
         from AgentLoop.nodes.analyze_plan import analyze_plan_node
 
         state = _base_state()
         with patch("AgentLoop.nodes.analyze_plan.branch_exists", return_value=True), \
-             patch("AgentLoop.nodes.analyze_plan.ensure_on_branch", return_value=(True, "ok")) as mock_ensure, \
+             patch("AgentLoop.nodes.analyze_plan.ensure_worktree", return_value=(True, "ok")) as mock_ensure, \
              patch("AgentLoop.nodes.analyze_plan.interaction.ask") as mock_ask, \
+             patch("AgentLoop.nodes.analyze_plan.change_lock.acquire", return_value=_LOCK_OK), \
              patch("AgentLoop.nodes.analyze_plan.ensure_initialized", return_value=_OK), \
              patch("AgentLoop.nodes.analyze_plan.ensure_change_created", return_value=_OK), \
              patch("AgentLoop.nodes.analyze_plan.call_claude", return_value=_mock_claude_result("規劃完成")), \
@@ -136,13 +142,13 @@ class TestExistingBranchSkipsQuestion:
             result = analyze_plan_node(state)
 
         mock_ask.assert_not_called()
-        mock_ensure.assert_called_once_with("my-project", "feat/login")
+        mock_ensure.assert_called_once_with("my-project", "feat-login", "feat/login")
         assert result["status"] != "error"
 
 
 class TestNonInteractiveUsesCurrentBranch:
     def test_non_interactive_skips_question_uses_current_branch(self):
-        """Scenario: 非互動式環境以目前分支為起點建立工作分支"""
+        """Scenario: 非互動式環境以目前分支為起點建立任務工作目錄"""
         from AgentLoop.nodes.analyze_plan import analyze_plan_node
 
         state = _base_state()
@@ -151,7 +157,8 @@ class TestNonInteractiveUsesCurrentBranch:
                    return_value=(["develop", "main"], "develop")), \
              patch("AgentLoop.nodes.analyze_plan.interaction.is_interactive", return_value=False), \
              patch("AgentLoop.nodes.analyze_plan.interaction.ask") as mock_ask, \
-             patch("AgentLoop.nodes.analyze_plan.create_branch_from",
+             patch("AgentLoop.nodes.analyze_plan.change_lock.acquire", return_value=_LOCK_OK), \
+             patch("AgentLoop.nodes.analyze_plan.create_worktree_from",
                    return_value=(True, "ok")) as mock_create, \
              patch("AgentLoop.nodes.analyze_plan.ensure_initialized", return_value=_OK), \
              patch("AgentLoop.nodes.analyze_plan.ensure_change_created", return_value=_OK), \
@@ -161,7 +168,7 @@ class TestNonInteractiveUsesCurrentBranch:
             result = analyze_plan_node(state)
 
         mock_ask.assert_not_called()
-        mock_create.assert_called_once_with("my-project", "feat/login", "develop")
+        mock_create.assert_called_once_with("my-project", "feat-login", "feat/login", "develop")
         assert result["status"] != "error"
 
 
@@ -176,6 +183,7 @@ class TestAbortBaseBranchQuestionIsError:
                    return_value=(["develop", "main"], "develop")), \
              patch("AgentLoop.nodes.analyze_plan.interaction.is_interactive", return_value=True), \
              patch("AgentLoop.nodes.analyze_plan.interaction.ask", side_effect=KeyboardInterrupt), \
+             patch("AgentLoop.nodes.analyze_plan.change_lock.acquire", return_value=_LOCK_OK), \
              patch("AgentLoop.nodes.analyze_plan.call_claude") as mock_claude:
             result = analyze_plan_node(state)
 
@@ -184,9 +192,9 @@ class TestAbortBaseBranchQuestionIsError:
         assert "feat/login" in result["analysis"]
 
 
-class TestSyncFailureIsError:
-    def test_non_ff_failure_is_error_and_branch_not_created(self):
-        """Scenario: 起點分支無法快轉時記為錯誤且不建立工作分支"""
+class TestFetchFailureIsError:
+    def test_fetch_failure_without_local_tracking_ref_is_error_and_worktree_not_created(self):
+        """Scenario: fetch 失敗且本地無遠端追蹤 ref 時記為錯誤且不建立任務工作目錄"""
         from AgentLoop.nodes.analyze_plan import analyze_plan_node
 
         state = _base_state()
@@ -195,12 +203,33 @@ class TestSyncFailureIsError:
                    return_value=(["develop", "main"], "develop")), \
              patch("AgentLoop.nodes.analyze_plan.interaction.is_interactive", return_value=True), \
              patch("AgentLoop.nodes.analyze_plan.interaction.ask", return_value="2"), \
-             patch("AgentLoop.nodes.analyze_plan.create_branch_from",
-                   return_value=(False, "git pull 失敗：non-fast-forward")), \
+             patch("AgentLoop.nodes.analyze_plan.change_lock.acquire", return_value=_LOCK_OK), \
+             patch("AgentLoop.nodes.analyze_plan.create_worktree_from",
+                   return_value=(False, "無法連線遠端且本地無 origin/main：could not resolve host")), \
              patch("AgentLoop.nodes.analyze_plan.call_claude") as mock_claude:
             result = analyze_plan_node(state)
 
         mock_claude.assert_not_called()
         assert result["status"] == "error"
         assert "feat/login" in result["analysis"]
-        assert "git pull 失敗" in result["analysis"]
+        assert "無法連線遠端" in result["analysis"]
+
+
+class TestChangeLockFailureIsError:
+    def test_lock_conflict_is_error_and_does_not_create_worktree(self):
+        """Scenario: 同一任務已有執行進行中時上鎖失敗，記為錯誤且不建立任務工作目錄"""
+        from AgentLoop.nodes.analyze_plan import analyze_plan_node
+
+        state = _base_state()
+        with patch("AgentLoop.nodes.analyze_plan.change_lock.acquire",
+                   return_value=(False, "任務 feat-login 已有執行進行中")), \
+             patch("AgentLoop.nodes.analyze_plan.create_worktree_from") as mock_create, \
+             patch("AgentLoop.nodes.analyze_plan.ensure_worktree") as mock_ensure, \
+             patch("AgentLoop.nodes.analyze_plan.call_claude") as mock_claude:
+            result = analyze_plan_node(state)
+
+        mock_claude.assert_not_called()
+        mock_create.assert_not_called()
+        mock_ensure.assert_not_called()
+        assert result["status"] == "error"
+        assert "已有執行進行中" in result["analysis"]

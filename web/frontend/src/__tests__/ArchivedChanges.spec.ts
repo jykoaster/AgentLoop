@@ -22,8 +22,8 @@ beforeEach(() => {
 describe('ArchivedChanges', () => {
   test('已封存任務分頁每個封存 change 一列並可瀏覽其文件', async () => {
     mockedApi.getArchive.mockResolvedValue([
-      { dir: '2026-10-01-feat-b', date: '2026-10-01', name: 'feat-b' },
-      { dir: '2026-09-01-feat-a', date: '2026-09-01', name: 'feat-a' },
+      { dir: '2026-10-01-feat-b', date: '2026-10-01', name: 'feat-b', branch: '' },
+      { dir: '2026-09-01-feat-a', date: '2026-09-01', name: 'feat-a', branch: '' },
     ])
     mockedApi.getArchiveFiles.mockResolvedValue(['proposal.md', 'tasks.md'])
     mockedApi.getArchiveFile.mockResolvedValue({ path: 'proposal.md', content: '# proposal' })
@@ -52,5 +52,19 @@ describe('ArchivedChanges', () => {
     await flushPromises()
 
     expect(wrapper.text()).toContain('目前沒有已封存的任務')
+  })
+
+  test('未合併封存任務在名稱後顯示「未合併 · 工作分支」標籤，一般封存無標籤', async () => {
+    mockedApi.getArchive.mockResolvedValue([
+      { dir: '2026-10-19-feat-login', date: '2026-10-19', name: 'feat-login', branch: 'feat/login' },
+      { dir: '2026-09-01-feat-a', date: '2026-09-01', name: 'feat-a', branch: '' },
+    ])
+
+    const wrapper = mount(ArchivedChanges)
+    await flushPromises()
+
+    const rows = wrapper.findAll('li button')
+    expect(rows[0].text()).toContain('未合併 · feat/login')
+    expect(rows[1].text()).not.toContain('未合併')
   })
 })

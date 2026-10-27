@@ -1,9 +1,10 @@
 import os
+import re
 import time
 from ..core import AgentState, take_session, store_session
 from ..lib import (
     call_claude, call_resuming, format_usage_stats, build_skills_block,
-    build_project_doc_hint_for, ensure_on_branch, is_usage_limit_error,
+    build_project_doc_hint_for, worktree_dir, ensure_worktree, is_usage_limit_error,
     LANGUAGE_POLICY, REPO_ROOT,
 )
 
@@ -36,6 +37,10 @@ _SYSTEM = f"""你是一位資深全端工程師，負責「執行」階段。
 
 <<PROJECT_CONTEXT>>
 
+本次在獨立的任務工作目錄 `<<WORK_DIR_VALUE>>` 中實作（已簽出分支 `<<BRANCH_NAME_VALUE>>`），
+主工作目錄在 `<<MAIN_DIR_VALUE>>`；相依套件等未追蹤檔案（例如 `node_modules`）可自行決定沿用
+主工作目錄現有檔案（例如建立符號連結）或在任務工作目錄內重新安裝。
+
 ## 執行方式
 
 依 `<<CHANGE_LOCATION>>/tasks.md` 的順序**嚴格依序**處理（不重排）：
@@ -52,7 +57,8 @@ _SYSTEM = f"""你是一位資深全端工程師，負責「執行」階段。
 - 撰寫或更新測試前，先用 Grep/Read **讀取現有測試**，確認此次變動涉及的 Scenario 是否已有相同或可覆蓋情境的測試：
   - 若現有測試已覆蓋相同情境，**不重複撰寫**；若情境相似但覆蓋範圍不完整，**合併**成一個測試即可
 - 全部 TASK 完成後再跑完整測試（見下方）
-- **不要** commit——修改是否提交由使用者事後決定
+- **不得自行 commit**——完成後在最終輸出的最後一行附上 `COMMIT_MESSAGE:`（見下方「最終輸出格式」），
+  由系統統一在封存階段 commit
 - **不要**自行呼叫 /code-review——後續有獨立的 Review Agent 依專案規格審查本次修改，此處只需完成實作與測試
 
 ## 重要規範
@@ -83,9 +89,12 @@ _SYSTEM = f"""你是一位資深全端工程師，負責「執行」階段。
 1. 所有已修改的程式碼檔案清單
 2. 所有已新增/修改的說明文件清單
 3. 每個 TASK 的完成狀態（✅ 已完成 / ❌ 未完成 + 原因）
+4. 最後一行：`COMMIT_MESSAGE: <一行 commit 訊息，依該專案 git log 慣例，例如 feat: git worktree mode>`
 
 {LANGUAGE_POLICY}
 """
+
+_COMMIT_MESSAGE_RE = re.compile(r"^COMMIT_MESSAGE:\s*(.+)$", re.MULTILINE)
 
 _BANNER = "\033[1;32m"
 _RED    = "\033[1;31m"
@@ -98,7 +107,21 @@ def execute_node(state: AgentState) -> dict:
 
     project_dir = state.get("project_dir", "")
     change_name = state.get("change_name", "")
-    change_dir = os.path.join(REPO_ROOT, project_dir, "openspec", "changes", change_name)
+    branch_name = state.get("branch_name", "")
+
+    if not branch_name:
+        return {"status": "error", "execution_result": "缺少 branch_name，無法在指定分支上實作"}
+
+    ok, msg = ensure_worktree(project_dir, change_name, branch_name)
+    print(f"{_YELLOW}  [git] {msg}{_RESET}", flush=True)
+    if not ok:
+        return {
+            "status": "error",
+            "execution_result": f"無法建立或切換任務工作目錄（分支 {branch_name}）：{msg}",
+        }
+
+    work_dir_rel = worktree_dir(project_dir, change_name)
+    change_dir = os.path.join(REPO_ROOT, work_dir_rel, "openspec", "changes", change_name)
     if not os.path.isdir(change_dir):
         print(
             f"{_RED}  [執行 Agent] 找不到 OpenSpec change 目錄：{change_dir}，"
@@ -112,21 +135,14 @@ def execute_node(state: AgentState) -> dict:
     start = time.monotonic()
 
     try:
-        branch_name = state.get("branch_name", "")
-        if project_dir and branch_name:
-            ok, msg = ensure_on_branch(project_dir, branch_name)
-            print(f"{_YELLOW}  [git] {msg}{_RESET}", flush=True)
-            if not ok:
-                return {"status": "error", "execution_result": f"無法切換到分支 {branch_name}：{msg}"}
-        elif not branch_name:
-            return {"status": "error", "execution_result": "缺少 branch_name，無法在指定分支上實作"}
-
         skills_block = build_skills_block(_SKILLS)
-        change_location = f"{project_dir}/openspec/changes/{change_name}"
+        change_location = f"{work_dir_rel}/openspec/changes/{change_name}"
         system = (
             _SYSTEM
-            .replace("<<PROJECT_CONTEXT>>", build_project_doc_hint_for(project_dir))
+            .replace("<<PROJECT_CONTEXT>>", build_project_doc_hint_for(work_dir_rel))
             .replace("<<CHANGE_LOCATION>>", change_location)
+            .replace("<<WORK_DIR_VALUE>>", work_dir_rel)
+            .replace("<<MAIN_DIR_VALUE>>", project_dir)
             .replace("<<BRANCH_NAME_VALUE>>", branch_name)
         )
         prompt = (
@@ -162,9 +178,15 @@ def execute_node(state: AgentState) -> dict:
             **store_session(_SESSION_KEY, result.session_id or prior_session),
         }
 
+    matches = _COMMIT_MESSAGE_RE.findall(result.text)
+    commit_message = matches[-1].strip() if matches else state.get("commit_message", "")
+    if not matches:
+        print(f"{_YELLOW}  [執行 Agent] 回應未包含 COMMIT_MESSAGE，沿用舊值{_RESET}\n", flush=True)
+
     trimmed = result.text[-4000:] if len(result.text) > 4000 else result.text
     return {
         "status": "ok",
         "execution_result": trimmed,
+        "commit_message": commit_message,
         **store_session(_SESSION_KEY, ""),
     }

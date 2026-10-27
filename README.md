@@ -32,7 +32,8 @@
    是只掛單一目標專案），讓網頁控制台能用資料夾選擇器切換目標專案，不需要為此重建容器。
    `TARGET_PROJECT`、`CLAUDE_CODE_OAUTH_TOKEN`、`ANTHROPIC_API_KEY` 這幾項仍可
    寫在 `.env` 裡當作預設值，但也可以改到網頁的「設定」分頁設定（見下方「網頁控制台」）——網頁
-   設定的值優先於 `.env`。只支援單一目標專案同時執行。
+   設定的值優先於 `.env`。只支援單一目標專案，但同一目標專案下可以有多個任務並行執行（見下方
+   「網頁控制台」）。
 
 2. 確認目標專案內已放好 [`CLAUDE.md` / `AGENT.md`](#目標專案文件需求)——這是系統判斷架構與慣例的主要依據。
 
@@ -67,9 +68,13 @@ docker exec -it agent_loop bash
   用量上限暫停都在這裡處理，效果等同在終端機輸入同一內容）或中止該階段；
   `analyze_plan`／`execute`／`review`／`archive` 四張卡片可單獨重跑。標題列最右側的純圖示按鈕
   可收合／展開該任務列（收合後只留標題列，任務多時可把不關心的任務收起來）。「新增任務」等同
-  命令列的完整工作流程模式。同一時間只允許一個執行進行中，進行中時其他啟動動作會停用並顯示
-  原因
-- **已封存任務**：唯讀瀏覽目標專案 `openspec/changes/archive/` 底下每個已封存的 change
+  命令列的完整工作流程模式，**不受其他任務執行中影響，永遠可用**；每個任務在自己專屬的任務
+  工作目錄執行（見下方「規格文件」），因此不同任務可無上限同時執行，只有**同一任務**同時最多
+  一個執行——該任務執行中時只有它自己的「重跑」按鈕停用並顯示「`<change 名稱>` 執行中」，其他
+  任務的重跑與「新增任務」不受影響
+- **已封存任務**：唯讀瀏覽目標專案 `openspec/changes/archive/` 底下每個已封存的 change，以及
+  尚未合併回主工作目錄所在分支的「未合併封存任務」（名稱後標示「未合併 · `<工作分支>`」，文件
+  內容從該工作分支唯讀讀取；合併後自動併入一般封存列表、不再有標籤）
 - **既有 Spec**：唯讀瀏覽目標專案 `openspec/specs/` 底下每個 domain，並提供語意搜尋（等同
   `python -m AgentLoop.search`）
 - **設定**：目標專案、Claude OAuth token、Anthropic API key；尚未指定目標專案時
@@ -138,7 +143,7 @@ python -m AgentLoop.main --node execute --change feat-login
 
 完整工作流跑到 `human_confirm` 時會暫停，在終端機顯示規劃摘要與 TASK 清單，輸入 `y` 才會繼續往下執行。
 
-執行過程中，`analyze_plan` 第一次進行初始規劃時會先在終端機詢問**本次任務要使用的 git 分支名稱（必填）**：已存在則切過去；不存在則接著列出目標專案全部本地分支，詢問**要從哪個分支建立**（直接 Enter 採用目前分支），選定後會先切到該起點分支、以只快轉方式 `git pull` 同步到遠端最新版本（起點分支沒有追蹤遠端分支時會印出提示並略過這步），同步成功才從它建立並切換到工作分支；若切換或同步失敗（網路／認證錯誤、本地與遠端分岔無法快轉、逾時等），會記為錯誤且不建立工作分支。容器需具備目標專案 remote 的 git 認證（SSH key 或 credential helper）才能完成同步，否則凡是有追蹤遠端分支的起點分支都會同步失敗。OpenSpec change 名稱由工作分支名稱轉成 kebab-case（例如 `feature/add-login` → `feature-add-login`），之後規劃、實作、審查、archive 都在這個分支上進行。此值會沿用到同一個任務後續的重新規劃／依人工意見調整，不會重複問。
+執行過程中，`analyze_plan` 第一次進行初始規劃時會先在終端機詢問**本次任務要使用的 git 分支名稱（必填）**：已存在則在任務專屬的工作目錄簽出；不存在則接著列出目標專案全部本地分支，詢問**要從哪個分支建立**（直接 Enter 採用目前分支），選定後只對該起點分支的遠端追蹤分支 `git fetch`（起點分支沒有追蹤遠端分支時會印出提示並略過這步；fetch 失敗但本地已有該遠端追蹤分支時仍以它為起點並註明「容器內無法連線遠端」），再從取得的起點建立任務專屬的 git worktree 與工作分支；若無法連線遠端又沒有本地遠端追蹤分支、或建立 worktree 本身失敗，會記為錯誤且不建立工作分支。**主工作目錄全程不會被 checkout 或 pull**：容器若沒有目標專案 remote 的 git 認證，`fetch` 會失敗並退回本地既有的遠端追蹤分支（容器內常見情況，見上方容器化層的 DooD 限制），只有連本地遠端追蹤分支都沒有時才會真正失敗。OpenSpec change 名稱由工作分支名稱轉成 kebab-case（例如 `feature/add-login` → `feature-add-login`），之後規劃、實作、審查都在這個任務專屬的工作目錄進行，archive 成功後 commit 到工作分支並移除該工作目錄（工作分支保留）。此值會沿用到同一個任務後續的重新規劃／依人工意見調整，不會重複問。
 
 接著會問**本次是否需要撰寫 spec**（`y` 寫 `specs/<domain>/spec.md`；`n` 表示純重構／文件／設定，不寫 spec）。答案記在 state 的 `skip_specs`（`n` 為 `true`），同一個 change 之後再規劃、或驗收後再開一輪，都會沿用、不再問。選 `n` 時不會再問 domain 歸屬。
 
@@ -150,7 +155,7 @@ python -m AgentLoop.main --node execute --change feat-login
 python -m AgentLoop.main --node analyze_plan --change feat-login
 ```
 
-都會先以必填文字題詢問**本次要調整的內容**，不會再問一次分支名稱、是否撰寫 spec、domain 歸屬（這些沿用原本的決定）。調整內容會保留任務描述原文，附加成「調整 N：<內容>」，依調整內容更新同一個 `openspec/changes/<name>/`；已勾選完成的 `tasks.md` 項目維持不動，只新增或改寫尚未完成的項目，接著照原工作流進入人工確認、`execute`、`review`，審查重試次數重新從 0 起算。若該任務有尚未處理的審查退回，會先讓你選「依審查結果重新規劃」或「輸入調整內容」。已封存的任務（`openspec/changes/archive/` 底下）不能用這個方式調整，會直接報錯，請改開新任務。
+都會先以必填文字題詢問**本次要調整的內容**，不會再問一次分支名稱、是否撰寫 spec、domain 歸屬（這些沿用原本的決定）。調整內容會保留任務描述原文，附加成「調整 N：<內容>」，依調整內容更新同一個 `openspec/changes/<name>/`；已勾選完成的 `tasks.md` 項目維持不動，只新增或改寫尚未完成的項目，接著照原工作流進入人工確認、`execute`、`review`，審查重試次數重新從 0 起算。若該任務有尚未處理的審查退回，會先讓你選「依審查結果重新規劃」或「輸入調整內容」。已封存的任務（執行狀態紀錄已標記為封存，見上方「已封存任務」）不能用這個方式調整，會直接報錯，請改開新任務。
 
 ### 撞到 Claude 用量上限時
 
@@ -171,7 +176,7 @@ python -m AgentLoop.main --node review
 
 注意 `analyze_plan` 預設用 Opus 且 grilling 最多問 15 題，很容易先把 5 小時窗口吃掉，導致後面的 `execute` 一開跑就沒額度。
 
-規格文件遵照 [OpenSpec](https://github.com/Fission-AI/OpenSpec) 的 change/spec-delta 規則，寫在**目標專案**（不是 AgentLoop 這個 repo）下的 `openspec/changes/<change 名稱>/`（`proposal.md`/`tasks.md`/`specs/<domain>/spec.md`；非小改動時另有 `design.md`）。目標專案第一次被處理時，若尚未有 `openspec/` 目錄，`analyze_plan` 會自動執行一次 `openspec init` bootstrap，不需要手動介入；`openspec` CLI 已由 Dockerfile 自動安裝在容器內。審查通過後，最後一個節點會呼叫 `openspec archive` 把這次的規格差異併入目標專案持久的 `openspec/specs/`，跨任務累積成完整的行為規格。
+規格文件遵照 [OpenSpec](https://github.com/Fission-AI/OpenSpec) 的 change/spec-delta 規則，寫在**任務專屬的工作目錄**（`<工作區根目錄>/.agentloop-worktrees/<目標專案>/<change 名稱>/`，而不是目標專案的主工作目錄，也不是 AgentLoop 這個 repo）下的 `openspec/changes/<change 名稱>/`（`proposal.md`/`tasks.md`/`specs/<domain>/spec.md`；非小改動時另有 `design.md`）。目標專案第一次被處理時，若尚未有 `openspec/` 目錄，`analyze_plan` 會自動執行一次 `openspec init` bootstrap，不需要手動介入；`openspec` CLI 已由 Dockerfile 自動安裝在容器內。審查通過後，最後一個節點會呼叫 `openspec archive` 把這次的規格差異併入該任務工作目錄的 `openspec/specs/`，接著以 execute 擬好的訊息 commit 到工作分支、移除任務工作目錄（分支保留）；工作分支合併回主工作目錄所在分支後，規格差異才會出現在主工作目錄的 `openspec/specs/`，跨任務累積成完整的行為規格。相依套件（如 `node_modules`）不會自動帶進新建的任務工作目錄，由 `execute`／`review` 的 Agent 自行決定沿用主工作目錄的檔案（例如符號連結）或重新安裝。
 
 ### 語意搜尋目標專案的規格
 
@@ -196,7 +201,7 @@ python -m AgentLoop.search --reindex "query"   # 強制重建索引後再搜尋
 | `human_confirm`  | 人工確認閘        | 顯示 proposal.md 與 tasks.md 摘要，等待使用者輸入 `y` 確認才放行；也可輸入修改意見打回重新規劃，或直接中止 |
 | `execute`        | 執行 Agent        | 自行讀取 OpenSpec change，依 tasks.md 依序改程式碼、同步商業邏輯文件、跑測試並修復失敗、勾選對應項目 |
 | `review`         | 審查 Agent        | 唯讀比對 `git diff HEAD` 與 OpenSpec change，從 Standards／Spec 兩軸審查，判定是否可合併 |
-| `archive_change` | 收尾（純 Python） | review 通過後，呼叫 `openspec archive` 把這次的規格差異併入目標專案持久的 `openspec/specs/`；失敗只印警告，不影響流程結束 |
+| `archive_change` | 收尾（純 Python） | review 通過後，呼叫 `openspec archive` 把這次的規格差異併入任務工作目錄的 `openspec/specs/`，再以 execute 擬好的訊息 commit 並移除任務工作目錄（分支保留）；`openspec archive` 失敗只印警告，commit 訊息缺漏或 commit 失敗則記為錯誤並保留工作目錄 |
 
 審查只有在發現**嚴重影響功能**的問題時（核心邏輯錯誤、功能無法正常運作、架構根本偏差等）才自動標記「重寫」或「修補」、直接回到 `analyze_plan` 重新規劃；其餘不影響功能的修改建議會逐條列出，在終端機讓使用者選擇要修哪幾條（或全部不修，直接放行），只有選中至少一條才會回到 `analyze_plan` 針對選中的建議重新規劃。重新規劃後再次經過人工確認才重跑 `execute` → `review`，最多重試 3 輪，超過即強制結束（且不會 archive）。
 

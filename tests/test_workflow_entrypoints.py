@@ -308,15 +308,40 @@ class TestRunNodeMarksRerunEntry:
             return {"status": "pending"}
 
         with patch("AgentLoop.main.REPO_ROOT", str(tmp_path)), \
+             patch("AgentLoop.main.change_lock.acquire", return_value=(True, "ok")) as mock_acquire, \
              patch("AgentLoop.nodes.analyze_plan_node", side_effect=_fake_analyze_plan_node), \
              patch("AgentLoop.main._stream_and_save", return_value="pending"):
             main_module.run_node("analyze_plan", change_name="feat-test")
 
+        mock_acquire.assert_called_once_with("my-project", "feat-test")
         assert captured_state.get("start_from") == "analyze_plan"
 
         state_file = change_dir / "state.json"
         data = json.loads(state_file.read_text())
         assert "start_from" not in data
+
+    def test_lock_conflict_exits_without_running_node(self, tmp_path, monkeypatch):
+        """同一任務已有執行進行中時，run_node() 必須在呼叫節點前以 exit 1 結束。"""
+        from AgentLoop import main as main_module
+
+        project = tmp_path / "my-project"
+        change_dir = project / ".agentloop" / "changes" / "feat-test"
+        change_dir.mkdir(parents=True)
+        (change_dir / "state.json").write_text(
+            json.dumps({"task": "test task", "change_name": "feat-test", "branch_name": "feat/test"}),
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("TARGET_PROJECT", "my-project")
+
+        with patch("AgentLoop.main.REPO_ROOT", str(tmp_path)), \
+             patch("AgentLoop.main.change_lock.acquire",
+                   return_value=(False, "任務 feat-test 已有執行進行中")), \
+             patch("AgentLoop.nodes.analyze_plan_node") as mock_node:
+            with pytest.raises(SystemExit) as exc_info:
+                main_module.run_node("analyze_plan", change_name="feat-test")
+
+        assert exc_info.value.code == 1
+        mock_node.assert_not_called()
 
 
 # ── default entry point ───────────────────────────────────────────────────────
