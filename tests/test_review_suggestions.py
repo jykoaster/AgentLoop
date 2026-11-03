@@ -28,7 +28,7 @@ class TestReviewSuggestionsMultiChoice:
             return "1,3"
 
         with patch("AgentLoop.nodes.review.REPO_ROOT", str(tmp_path)), \
-             patch("AgentLoop.nodes.review.ensure_on_branch", return_value=(True, "ok")), \
+             patch("AgentLoop.nodes.review.ensure_worktree", return_value=(True, "ok")), \
              patch("AgentLoop.nodes.review.build_skills_block", return_value="skill"), \
              patch("AgentLoop.nodes.review.call_claude", return_value=_mock_claude_result(_REVIEW_TEXT_WITH_SUGGESTIONS)), \
              patch("AgentLoop.nodes.review.interaction.is_interactive", return_value=True), \
@@ -61,7 +61,7 @@ class TestReviewSuggestionsMultiChoice:
             return ""
 
         with patch("AgentLoop.nodes.review.REPO_ROOT", str(tmp_path)), \
-             patch("AgentLoop.nodes.review.ensure_on_branch", return_value=(True, "ok")), \
+             patch("AgentLoop.nodes.review.ensure_worktree", return_value=(True, "ok")), \
              patch("AgentLoop.nodes.review.build_skills_block", return_value="skill"), \
              patch("AgentLoop.nodes.review.call_claude", return_value=_mock_claude_result(_REVIEW_TEXT_WITH_SUGGESTIONS)), \
              patch("AgentLoop.nodes.review.interaction.is_interactive", return_value=True), \
@@ -90,7 +90,7 @@ class TestReviewSuggestionsMultiChoice:
             return "all"
 
         with patch("AgentLoop.nodes.review.REPO_ROOT", str(tmp_path)), \
-             patch("AgentLoop.nodes.review.ensure_on_branch", return_value=(True, "ok")), \
+             patch("AgentLoop.nodes.review.ensure_worktree", return_value=(True, "ok")), \
              patch("AgentLoop.nodes.review.build_skills_block", return_value="skill"), \
              patch("AgentLoop.nodes.review.call_claude", return_value=_mock_claude_result(_REVIEW_TEXT_TWO_SUGGESTIONS)), \
              patch("AgentLoop.nodes.review.interaction.is_interactive", return_value=True), \

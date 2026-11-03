@@ -26,6 +26,7 @@ usePolling(load)
           @click="openDir = row.dir"
         >
           <font-awesome-icon icon="box-archive" class="mr-1 text-fg-muted" />{{ row.date }} {{ row.name }}
+          <span v-if="row.branch" class="unmerged-label text-fg-muted">　未合併 · {{ row.branch }}</span>
         </button>
       </li>
     </ul>

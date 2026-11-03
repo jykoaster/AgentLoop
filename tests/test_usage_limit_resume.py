@@ -72,7 +72,7 @@ def _interrupted(node: str, session_id: str) -> dict:
 
 
 def _make_change_dir(workspace: Path) -> Path:
-    d = workspace / "my-project" / "openspec" / "changes" / "feat-test"
+    d = workspace / ".agentloop-worktrees" / "my-project" / "feat-test" / "openspec" / "changes" / "feat-test"
     d.mkdir(parents=True)
     (d / "tasks.md").write_text("- [x] 1.1 done\n- [ ] 1.2 todo")
     (d / "proposal.md").write_text("## Intent\n測試用提案")
@@ -195,7 +195,7 @@ class TestExecuteSessionResume:
 
         mock_call = MagicMock(side_effect=claude_side_effect)
         with patch("AgentLoop.nodes.execute.REPO_ROOT", str(workspace)), \
-             patch("AgentLoop.nodes.execute.ensure_on_branch", return_value=(True, "ok")), \
+             patch("AgentLoop.nodes.execute.ensure_worktree", return_value=(True, "ok")), \
              patch("AgentLoop.nodes.execute.build_skills_block", return_value="skill"), \
              patch("AgentLoop.nodes.execute.call_claude", mock_call):
             result = execute_node(state)
@@ -306,7 +306,7 @@ class TestAnalyzePlanSessionResume:
 
         mock_call = MagicMock(side_effect=claude_side_effect)
         with patch("AgentLoop.nodes.analyze_plan.REPO_ROOT", str(workspace)), \
-             patch("AgentLoop.nodes.analyze_plan.ensure_on_branch", return_value=(True, "ok")), \
+             patch("AgentLoop.nodes.analyze_plan.ensure_worktree", return_value=(True, "ok")), \
              patch("AgentLoop.nodes.analyze_plan.build_skills_block", return_value="skill"), \
              patch("AgentLoop.nodes.analyze_plan.build_project_doc_hint_for", return_value=""), \
              patch("AgentLoop.nodes.analyze_plan.validate_change",
@@ -383,7 +383,7 @@ class TestAnalyzePlanSessionResume:
         limit = _claude_result(_REAL_SESSION_LIMIT_TEXT, is_error=True, session_id="sess-fix")
         mock_call = MagicMock(side_effect=[_claude_result("規劃完成", session_id="sess-plan"), limit])
         with patch("AgentLoop.nodes.analyze_plan.REPO_ROOT", str(tmp_path)), \
-             patch("AgentLoop.nodes.analyze_plan.ensure_on_branch", return_value=(True, "ok")), \
+             patch("AgentLoop.nodes.analyze_plan.ensure_worktree", return_value=(True, "ok")), \
              patch("AgentLoop.nodes.analyze_plan.build_skills_block", return_value="skill"), \
              patch("AgentLoop.nodes.analyze_plan.build_project_doc_hint_for", return_value=""), \
              patch("AgentLoop.nodes.analyze_plan.validate_change",
@@ -407,7 +407,7 @@ class TestReviewSessionResume:
 
         mock_call = MagicMock(side_effect=claude_side_effect)
         with patch("AgentLoop.nodes.review.REPO_ROOT", str(workspace)), \
-             patch("AgentLoop.nodes.review.ensure_on_branch", return_value=(True, "ok")), \
+             patch("AgentLoop.nodes.review.ensure_worktree", return_value=(True, "ok")), \
              patch("AgentLoop.nodes.review.build_skills_block", return_value="code-review skill"), \
              patch("AgentLoop.nodes.review.build_project_doc_hint_for", return_value=""), \
              patch("AgentLoop.nodes.review._run_spec_trace_check", return_value=("✅ 全數通過", [])), \

@@ -1,7 +1,7 @@
 """
 「對同一個任務進行調整」功能測試（feat-adjust-plan）。
 
-Seam：analyze_plan_node(state)，patch call_claude／ensure_on_branch／_run_with_validate／
+Seam：analyze_plan_node(state)，patch call_claude／ensure_worktree／_run_with_validate／
 _read_change_artifacts／interaction.ask／interaction.is_interactive，斷言回傳的
 task／human_feedback／status／iteration，interaction.ask 的呼叫參數，以及送進
 call_claude 的 prompt 是否含調整內容。
@@ -65,7 +65,7 @@ class TestAdjustMainPath:
             return _mock_claude_result("規劃完成")
 
         with patch("AgentLoop.nodes.analyze_plan.call_claude", side_effect=_capture), \
-             patch("AgentLoop.nodes.analyze_plan.ensure_on_branch", return_value=(True, "ok")), \
+             patch("AgentLoop.nodes.analyze_plan.ensure_worktree", return_value=(True, "ok")), \
              patch("AgentLoop.nodes.analyze_plan.interaction.is_interactive", return_value=True), \
              patch(
                  "AgentLoop.nodes.analyze_plan.interaction.ask",
@@ -100,7 +100,7 @@ class TestAdjustMissingContent:
 
         state = _base_state(start_from="analyze_plan")
         with patch("AgentLoop.nodes.analyze_plan.call_claude") as mock_claude, \
-             patch("AgentLoop.nodes.analyze_plan.ensure_on_branch", return_value=(True, "ok")), \
+             patch("AgentLoop.nodes.analyze_plan.ensure_worktree", return_value=(True, "ok")), \
              patch("AgentLoop.nodes.analyze_plan.interaction.is_interactive", return_value=True), \
              patch("AgentLoop.nodes.analyze_plan.interaction.ask", side_effect=KeyboardInterrupt):
             result = analyze_plan_node(state)
@@ -115,7 +115,7 @@ class TestAdjustMissingContent:
 
         state = _base_state(start_from="analyze_plan")
         with patch("AgentLoop.nodes.analyze_plan.call_claude") as mock_claude, \
-             patch("AgentLoop.nodes.analyze_plan.ensure_on_branch", return_value=(True, "ok")), \
+             patch("AgentLoop.nodes.analyze_plan.ensure_worktree", return_value=(True, "ok")), \
              patch("AgentLoop.nodes.analyze_plan.interaction.is_interactive", return_value=False):
             result = analyze_plan_node(state)
 
@@ -135,7 +135,7 @@ class TestAdjustSecondTime:
             start_from="analyze_plan",
         )
         with patch("AgentLoop.nodes.analyze_plan.call_claude", return_value=_mock_claude_result("規劃完成")), \
-             patch("AgentLoop.nodes.analyze_plan.ensure_on_branch", return_value=(True, "ok")), \
+             patch("AgentLoop.nodes.analyze_plan.ensure_worktree", return_value=(True, "ok")), \
              patch("AgentLoop.nodes.analyze_plan.interaction.is_interactive", return_value=True), \
              patch("AgentLoop.nodes.analyze_plan.interaction.ask", return_value="鎖定時間改為 10 分鐘"), \
              patch("AgentLoop.nodes.analyze_plan._run_with_validate", return_value=("", "")), \
@@ -164,7 +164,7 @@ class TestAdjustInterruptedResume:
             start_from="analyze_plan",
         )
         with patch("AgentLoop.nodes.analyze_plan.call_claude", return_value=interrupted_result), \
-             patch("AgentLoop.nodes.analyze_plan.ensure_on_branch", return_value=(True, "ok")), \
+             patch("AgentLoop.nodes.analyze_plan.ensure_worktree", return_value=(True, "ok")), \
              patch("AgentLoop.nodes.analyze_plan.interaction.is_interactive", return_value=True), \
              patch("AgentLoop.nodes.analyze_plan.interaction.ask", return_value="鎖定時間改為 10 分鐘"):
             first = analyze_plan_node(state1)
@@ -194,7 +194,7 @@ class TestAdjustInterruptedResume:
             return _mock_claude_result("規劃完成")
 
         with patch("AgentLoop.nodes.analyze_plan.call_claude", side_effect=_capture), \
-             patch("AgentLoop.nodes.analyze_plan.ensure_on_branch", return_value=(True, "ok")), \
+             patch("AgentLoop.nodes.analyze_plan.ensure_worktree", return_value=(True, "ok")), \
              patch("AgentLoop.nodes.analyze_plan.interaction.is_interactive", return_value=True), \
              patch("AgentLoop.nodes.analyze_plan.interaction.ask") as mock_ask, \
              patch("AgentLoop.nodes.analyze_plan._run_with_validate", return_value=("", "")), \
@@ -225,7 +225,7 @@ class TestRerunModeChoiceAfterReviewRejection:
             start_from="analyze_plan",
         )
         with patch("AgentLoop.nodes.analyze_plan.call_claude", return_value=_mock_claude_result("規劃完成")), \
-             patch("AgentLoop.nodes.analyze_plan.ensure_on_branch", return_value=(True, "ok")), \
+             patch("AgentLoop.nodes.analyze_plan.ensure_worktree", return_value=(True, "ok")), \
              patch("AgentLoop.nodes.analyze_plan.interaction.is_interactive", return_value=True), \
              patch(
                  "AgentLoop.nodes.analyze_plan.interaction.ask",
@@ -264,7 +264,7 @@ class TestRerunModeChoiceAfterReviewRejection:
             return _mock_claude_result("規劃完成")
 
         with patch("AgentLoop.nodes.analyze_plan.call_claude", side_effect=_capture), \
-             patch("AgentLoop.nodes.analyze_plan.ensure_on_branch", return_value=(True, "ok")), \
+             patch("AgentLoop.nodes.analyze_plan.ensure_worktree", return_value=(True, "ok")), \
              patch("AgentLoop.nodes.analyze_plan.interaction.is_interactive", return_value=True), \
              patch(
                  "AgentLoop.nodes.analyze_plan.interaction.ask", return_value="1",
@@ -292,7 +292,7 @@ class TestRerunModeChoiceAfterReviewRejection:
             start_from="",
         )
         with patch("AgentLoop.nodes.analyze_plan.call_claude", return_value=_mock_claude_result("規劃完成")), \
-             patch("AgentLoop.nodes.analyze_plan.ensure_on_branch", return_value=(True, "ok")), \
+             patch("AgentLoop.nodes.analyze_plan.ensure_worktree", return_value=(True, "ok")), \
              patch("AgentLoop.nodes.analyze_plan.interaction.ask") as mock_ask, \
              patch("AgentLoop.nodes.analyze_plan._run_with_validate", return_value=("", "")), \
              patch(
@@ -367,7 +367,7 @@ class TestAdjustPromptKeepsCheckedTasks:
             return _mock_claude_result("規劃完成")
 
         with patch("AgentLoop.nodes.analyze_plan.call_claude", side_effect=_capture), \
-             patch("AgentLoop.nodes.analyze_plan.ensure_on_branch", return_value=(True, "ok")), \
+             patch("AgentLoop.nodes.analyze_plan.ensure_worktree", return_value=(True, "ok")), \
              patch("AgentLoop.nodes.analyze_plan.interaction.is_interactive", return_value=True), \
              patch(
                  "AgentLoop.nodes.analyze_plan.interaction.ask",
@@ -402,7 +402,7 @@ class TestAdjustPromptKeepsCheckedTasks:
             return _mock_claude_result("規劃完成")
 
         with patch("AgentLoop.nodes.analyze_plan.call_claude", side_effect=_capture), \
-             patch("AgentLoop.nodes.analyze_plan.ensure_on_branch", return_value=(True, "ok")), \
+             patch("AgentLoop.nodes.analyze_plan.ensure_worktree", return_value=(True, "ok")), \
              patch("AgentLoop.nodes.analyze_plan.interaction.ask") as mock_ask, \
              patch("AgentLoop.nodes.analyze_plan._run_with_validate", return_value=("", "")), \
              patch(

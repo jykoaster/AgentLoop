@@ -6,7 +6,7 @@ import os
 from ..core import AgentState, take_session, store_session
 from ..lib import (
     call_claude, call_resuming, format_usage_stats, build_skills_block,
-    build_project_doc_hint_for, ensure_on_branch, is_usage_limit_error,
+    build_project_doc_hint_for, worktree_dir, ensure_worktree, is_usage_limit_error,
     LANGUAGE_POLICY, REPO_ROOT, interaction,
 )
 
@@ -34,13 +34,14 @@ fixed point 與 spec 來源見下方「依 code-review skill 執行時的具體�
 
 ## 依 code-review skill 執行時的具體參數（覆蓋 skill 前半）
 
-- **Fixed point**：本次修改尚未 commit，固定點為 `HEAD`。審查前應已在分支 `<<BRANCH_NAME_VALUE>>` 上；
-  直接執行 `git diff HEAD` 取得完整異動，不需詢問使用者，也不用三點 diff。
+- **Fixed point**：本次修改尚未 commit，固定點為 `HEAD`。審查對象是任務工作目錄
+  `<<WORK_DIR_VALUE>>`（已簽出分支 `<<BRANCH_NAME_VALUE>>`）；在該目錄下直接執行
+  `git diff HEAD` 取得完整異動，不需詢問使用者，也不用三點 diff。
 - **Spec 來源**：`<<CHANGE_LOCATION>>`（由分析規劃階段依 OpenSpec 規則產生的 change 資料夾，
   用 Read 讀取其下 proposal.md / tasks.md / specs/**/*.md 取得完整內容（若有 design.md 一併讀取；
   小改動可能沒有此檔，不視為缺漏）；也可用
   `openspec show <<CHANGE_NAME_VALUE>> --json` 快速確認結構。若該 change 已被前一輪迭代
-  archive，改讀 `<<PROJECT_DIR_VALUE>>/openspec/specs/` 下對應 domain 的 spec.md）
+  archive，改讀 `<<WORK_DIR_VALUE>>/openspec/specs/` 下對應 domain 的 spec.md）
 - **Standards 來源**：依下方「目標專案」讀取其 CLAUDE.md / AGENT.md，以及其中提及或專案根目錄下的
   CODING_STANDARDS.md / CONTRIBUTING.md（若有）作為 Standards 依據
 - 其餘仍依 skill：Fowler smell baseline、平行 sub-agent、以 `## Standards` / `## Spec` 並陳報告
@@ -250,7 +251,21 @@ def review_node(state: AgentState) -> dict:
 
     project_dir = state.get("project_dir", "")
     change_name = state.get("change_name", "")
-    change_dir = os.path.join(REPO_ROOT, project_dir, "openspec", "changes", change_name)
+    branch_name = state.get("branch_name", "")
+
+    ok, msg = ensure_worktree(project_dir, change_name, branch_name)
+    print(f"{_YELLOW}  [git] {msg}{_RESET}", flush=True)
+    if not ok:
+        return {
+            "status": "error",
+            "review_result": f"無法建立或切換任務工作目錄（分支 {branch_name}）：{msg}",
+            "review_level": "",
+            "review_blocking": False,
+        }
+
+    work_dir_rel = worktree_dir(project_dir, change_name)
+    work_dir_abs = os.path.join(REPO_ROOT, work_dir_rel)
+    change_dir = os.path.join(work_dir_abs, "openspec", "changes", change_name)
     if not os.path.isdir(change_dir):
         print(
             f"\n{_RED}{'═'*50}\n  [Review Agent] 找不到 OpenSpec change 目錄：{change_dir}，"
@@ -265,17 +280,6 @@ def review_node(state: AgentState) -> dict:
         }
 
     print(f"\n{_BANNER}{'═'*50}\n  [Review Agent] 開始\n{'═'*50}{_RESET}\n", flush=True)
-    branch_name = state.get("branch_name", "")
-    if project_dir and branch_name:
-        ok, msg = ensure_on_branch(project_dir, branch_name)
-        print(f"{_YELLOW}  [git] {msg}{_RESET}", flush=True)
-        if not ok:
-            return {
-                "status": "error",
-                "review_result": f"無法切換到分支 {branch_name}：{msg}",
-                "review_level": "",
-                "review_blocking": False,
-            }
 
     code_review_skill = build_skills_block(["code-review"])
     if not code_review_skill:
@@ -285,9 +289,8 @@ def review_node(state: AgentState) -> dict:
             **store_session(_SESSION_KEY, ""),
         }
 
-    change_location = f"{project_dir}/openspec/changes/{change_name}"
-    project_abs = os.path.join(REPO_ROOT, project_dir)
-    spec_trace_result, missing_scenarios = _run_spec_trace_check(change_dir, project_abs)
+    change_location = f"{work_dir_rel}/openspec/changes/{change_name}"
+    spec_trace_result, missing_scenarios = _run_spec_trace_check(change_dir, work_dir_abs)
     print(f"{_YELLOW}  [Review Agent] Spec 測試追溯（事前）：\n{spec_trace_result}{_RESET}\n", flush=True)
 
     if missing_scenarios:
@@ -313,10 +316,10 @@ def review_node(state: AgentState) -> dict:
             .replace("<<CODE_REVIEW_SKILL>>", code_review_skill)
             .replace("<<TASK>>", state["task"])
             .replace("<<CHANGE_LOCATION>>", change_location)
-            .replace("<<PROJECT_DIR_VALUE>>", project_dir)
+            .replace("<<WORK_DIR_VALUE>>", work_dir_rel)
             .replace("<<CHANGE_NAME_VALUE>>", change_name)
             .replace("<<BRANCH_NAME_VALUE>>", branch_name)
-            .replace("<<PROJECT_CONTEXT>>", build_project_doc_hint_for(project_dir))
+            .replace("<<PROJECT_CONTEXT>>", build_project_doc_hint_for(work_dir_rel))
             .replace("<<SPEC_TRACE_RESULT>>", spec_trace_result)
         )
         attempt = 0

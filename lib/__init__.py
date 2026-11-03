@@ -3,8 +3,9 @@ from .claude_runner import (
     is_usage_limit_error, LANGUAGE_POLICY, RESUME_AFTER_INTERRUPT_PROMPT,
 )
 from .git_ops import (
-    ensure_on_branch, rollback_except_openspec,
-    list_local_branches, branch_exists, create_branch_from,
+    worktree_dir, ensure_worktree, create_worktree_from,
+    commit_all, remove_worktree, rollback_except_openspec,
+    list_local_branches, branch_exists,
     list_branch_files, read_branch_file,
 )
 from .openspec_runner import ensure_initialized, ensure_change_created, validate_change, archive_change
@@ -15,8 +16,9 @@ from . import interaction
 __all__ = [
     "call_claude", "call_resuming", "format_usage_stats", "QUESTION_MARKER",
     "is_usage_limit_error", "LANGUAGE_POLICY", "RESUME_AFTER_INTERRUPT_PROMPT",
-    "ensure_on_branch", "rollback_except_openspec",
-    "list_local_branches", "branch_exists", "create_branch_from",
+    "worktree_dir", "ensure_worktree", "create_worktree_from",
+    "commit_all", "remove_worktree", "rollback_except_openspec",
+    "list_local_branches", "branch_exists",
     "list_branch_files", "read_branch_file",
     "ensure_initialized", "ensure_change_created", "validate_change", "archive_change",
     "build_project_doc_hint_for", "REPO_ROOT",

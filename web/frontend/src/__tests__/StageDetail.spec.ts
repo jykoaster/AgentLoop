@@ -202,7 +202,7 @@ describe('StageDetail', () => {
     }
 
     const wrapper = mount(StageDetail, {
-      props: { changeName: 'feat-login', stage: 'human_confirm', question },
+      props: { changeName: 'feat-login', stage: 'human_confirm', question, runId: 'r1' },
     })
     await flushPromises()
 
@@ -252,7 +252,7 @@ describe('StageDetail', () => {
     }
 
     const wrapper = mount(StageDetail, {
-      props: { changeName: 'feat-login', stage: 'review', question },
+      props: { changeName: 'feat-login', stage: 'review', question, runId: 'r1' },
     })
     await flushPromises()
 
@@ -268,7 +268,7 @@ describe('StageDetail', () => {
       .find((b) => b.text() === '送出')!
     await submitButton.trigger('click')
 
-    expect(mockedApi.postAnswer).toHaveBeenCalledWith('q1', '1,3')
+    expect(mockedApi.postAnswer).toHaveBeenCalledWith('r1', 'q1', '1,3')
   })
 
   test('未勾選任何建議就送出時視為不修改並直接通過', async () => {
@@ -283,7 +283,7 @@ describe('StageDetail', () => {
     }
 
     const wrapper = mount(StageDetail, {
-      props: { changeName: 'feat-login', stage: 'review', question },
+      props: { changeName: 'feat-login', stage: 'review', question, runId: 'r1' },
     })
     await flushPromises()
 
@@ -292,7 +292,7 @@ describe('StageDetail', () => {
       .find((b) => b.text() === '送出')!
     await submitButton.trigger('click')
 
-    expect(mockedApi.postAnswer).toHaveBeenCalledWith('q1', '')
+    expect(mockedApi.postAnswer).toHaveBeenCalledWith('r1', 'q1', '')
   })
 
   test('點擊全選切換時勾選或取消全部建議', async () => {
@@ -307,7 +307,7 @@ describe('StageDetail', () => {
     }
 
     const wrapper = mount(StageDetail, {
-      props: { changeName: 'feat-login', stage: 'review', question },
+      props: { changeName: 'feat-login', stage: 'review', question, runId: 'r1' },
     })
     await flushPromises()
 
@@ -323,7 +323,7 @@ describe('StageDetail', () => {
       .findAll('.question-form button')
       .find((b) => b.text() === '送出')!
     await submitButton.trigger('click')
-    expect(mockedApi.postAnswer).toHaveBeenCalledWith('q1', '1,2,3')
+    expect(mockedApi.postAnswer).toHaveBeenCalledWith('r1', 'q1', '1,2,3')
 
     await selectAll.setValue(false)
     for (const cb of suggestionCheckboxes) {

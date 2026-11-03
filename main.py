@@ -21,7 +21,7 @@ from dotenv import load_dotenv
 
 load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
 
-from .core import app, AgentState, MAX_ITERATIONS, stages
+from .core import app, AgentState, MAX_ITERATIONS, stages, change_lock
 from .lib import REPO_ROOT
 
 _BOLD  = "\033[1m"
@@ -34,11 +34,27 @@ def _agentloop_dir(project_dir: str, change_name: str) -> Path:
     return Path(REPO_ROOT) / project_dir / ".agentloop" / "changes" / change_name
 
 
+def _write_run_change_name(change_name: str) -> None:
+    """網頁模式下，change 名稱一旦決定就寫進執行目錄的 `change.json`，取代以任務描述＋
+    mtime 掃描偵測——兩個相同描述的新任務並行時舊方法會認錯（見 web/runner.py）。"""
+    run_dir = os.environ.get("AGENTLOOP_RUN_DIR", "")
+    if not run_dir or not change_name:
+        return
+    try:
+        path = Path(run_dir) / "change.json"
+        tmp = path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps({"change_name": change_name}, ensure_ascii=False), encoding="utf-8")
+        tmp.replace(path)
+    except OSError:
+        pass
+
+
 def _save_state(state: dict) -> None:
     project_dir = state.get("project_dir", "")
     change_name = state.get("change_name", "")
     if not project_dir or not change_name:
         return
+    _write_run_change_name(change_name)
     try:
         d = _agentloop_dir(project_dir, change_name)
         d.mkdir(parents=True, exist_ok=True)
@@ -146,6 +162,8 @@ def _empty_state(task: str) -> AgentState:
         "stage_notes": {},
         "planned": False,
         "replan_failed": False,
+        "commit_message": "",
+        "archived": False,
     }
 
 
@@ -227,6 +245,11 @@ def run_node(node_name: str, change_name: str | None = None) -> None:
     # 舊版 state.json 可能缺少的欄位預設值（例如後來才加的 session 插槽）。
     state = _empty_state("")
     state.update(_load_change(change_name) if change_name else _list_and_select_change())
+
+    lock_ok, lock_msg = change_lock.acquire(state["project_dir"], state["change_name"])
+    if not lock_ok:
+        print(f"\033[1;31m  錯誤：{lock_msg}\033[0m")
+        sys.exit(1)
 
     if node_name == "analyze_plan":
         state["start_from"] = "analyze_plan"

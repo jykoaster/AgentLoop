@@ -8,7 +8,7 @@ from dataclasses import dataclass
 
 from .runner import get_manager
 from ..core.stages import STAGES
-from ..lib import REPO_ROOT, branch_exists, list_branch_files, read_branch_file
+from ..lib import REPO_ROOT, branch_exists, list_branch_files, read_branch_file, worktree_dir
 from ..lib.openspec_runner import is_change_archived
 
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
@@ -74,9 +74,11 @@ def list_active_changes(project: str) -> list[dict]:
     out = []
     for name in sorted(os.listdir(root)):
         state_path = os.path.join(root, name, "state.json")
-        if not os.path.isfile(state_path) or _is_archived(project, name):
+        if not os.path.isfile(state_path):
             continue
         state = _read_json(state_path) or {}
+        if state.get("archived") is True or _is_archived(project, name):
+            continue
         stored_stages = state.get("stages") or {}
         stages = {s: stored_stages.get(s, "pending") for s in STAGES}
         out.append({
@@ -185,9 +187,15 @@ class _BranchSource:
 
 
 def _resolve_change_source(project: str, change_name: str) -> "_WorktreeSource | _BranchSource":
-    root = _openspec_change_dir(project, change_name)
-    if os.path.isdir(root):
-        return _WorktreeSource(root)
+    worktree_root = os.path.join(
+        REPO_ROOT, worktree_dir(project, change_name), "openspec", "changes", change_name
+    )
+    if os.path.isdir(worktree_root):
+        return _WorktreeSource(worktree_root)
+
+    legacy_root = _openspec_change_dir(project, change_name)
+    if os.path.isdir(legacy_root):
+        return _WorktreeSource(legacy_root)
 
     branch = _work_branch_name(project, change_name)
     if branch and branch_exists(project, branch):
@@ -222,17 +230,67 @@ def read_change_file(project: str, change_name: str, rel_path: str) -> str:
     return content
 
 
-def list_archive(project: str) -> list[dict]:
-    root = _archive_root(project)
+def _unmerged_archive_rows(project: str) -> list[dict]:
+    """未合併封存任務：state `archived` 為 True、`branch_name` 非空且分支仍存在，
+    從該工作分支的 `openspec/changes/archive/` 讀出對應這個任務的資料夾。主工作目錄
+    已有同名資料夾（已合併）就略過；工作分支不存在或 `ls-tree` 失敗時略過該任務、不拋錯。
+    """
+    root = _changes_root(project)
     if not os.path.isdir(root):
         return []
+
+    main_archive_root = _archive_root(project)
+    existing_main_dirs: set[str] = set()
+    if os.path.isdir(main_archive_root):
+        existing_main_dirs = {
+            d for d in os.listdir(main_archive_root)
+            if os.path.isdir(os.path.join(main_archive_root, d))
+        }
+
     out = []
-    for name in os.listdir(root):
-        if not os.path.isdir(os.path.join(root, name)):
+    for name in sorted(os.listdir(root)):
+        state_path = os.path.join(root, name, "state.json")
+        if not os.path.isfile(state_path):
             continue
-        m = _ARCHIVE_DIR_RE.match(name)
-        date, change_name = (m.group(1), m.group(2)) if m else ("", name)
-        out.append({"dir": name, "date": date, "name": change_name})
+        state = _read_json(state_path) or {}
+        if state.get("archived") is not True:
+            continue
+        branch = state.get("branch_name", "")
+        if not branch or not branch_exists(project, branch):
+            continue
+        files, err = list_branch_files(project, branch, "openspec/changes/archive")
+        if files is None:
+            continue
+        first_level = {f.split("/", 1)[0] for f in files if f}
+        for dirname in first_level:
+            if dirname in existing_main_dirs:
+                continue
+            m = _ARCHIVE_DIR_RE.match(dirname)
+            date, change_name = (m.group(1), m.group(2)) if m else ("", dirname)
+            if change_name != name:
+                continue
+            out.append({"dir": dirname, "date": date, "name": change_name, "branch": branch})
+    return out
+
+
+def _find_unmerged_archive_row(project: str, dir_name: str) -> dict | None:
+    for row in _unmerged_archive_rows(project):
+        if row["dir"] == dir_name:
+            return row
+    return None
+
+
+def list_archive(project: str) -> list[dict]:
+    root = _archive_root(project)
+    out = []
+    if os.path.isdir(root):
+        for name in os.listdir(root):
+            if not os.path.isdir(os.path.join(root, name)):
+                continue
+            m = _ARCHIVE_DIR_RE.match(name)
+            date, change_name = (m.group(1), m.group(2)) if m else ("", name)
+            out.append({"dir": name, "date": date, "name": change_name, "branch": ""})
+    out.extend(_unmerged_archive_rows(project))
     out.sort(key=lambda d: d["dir"], reverse=True)
     return out
 
@@ -240,13 +298,35 @@ def list_archive(project: str) -> list[dict]:
 def list_archive_files(project: str, dir_name: str) -> list[str]:
     _require_safe_name(dir_name, "封存")
     root = os.path.join(_archive_root(project), dir_name)
-    return _list_markdown(root, f"找不到封存：{dir_name}")
+    if os.path.isdir(root):
+        return _sorted_markdown_files(root)
+
+    row = _find_unmerged_archive_row(project, dir_name)
+    if row is None:
+        raise NotFound(f"找不到封存：{dir_name}")
+    files, err = list_branch_files(project, row["branch"], f"openspec/changes/archive/{dir_name}")
+    if not files:
+        raise NotFound(f"找不到封存：{dir_name}")
+    return _sort_markdown_paths(files)
 
 
 def read_archive_file(project: str, dir_name: str, rel_path: str) -> str:
     _require_safe_name(dir_name, "封存")
     root = os.path.join(_archive_root(project), dir_name)
-    return _read_markdown(root, rel_path)
+    if os.path.isdir(root):
+        return _read_markdown(root, rel_path)
+
+    row = _find_unmerged_archive_row(project, dir_name)
+    if row is None:
+        raise NotFound(f"找不到封存：{dir_name}")
+    if rel_path not in list_archive_files(project, dir_name):
+        raise NotFound(f"找不到檔案：{rel_path}")
+    content, err = read_branch_file(
+        project, row["branch"], f"openspec/changes/archive/{dir_name}/{rel_path}"
+    )
+    if content is None:
+        raise NotFound(f"找不到檔案：{rel_path}（git：{err}）")
+    return content
 
 
 def list_specs(project: str) -> list[str]:

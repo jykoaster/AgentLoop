@@ -1,10 +1,15 @@
 import os
 import re
 from ..core import AgentState
-from ..lib import REPO_ROOT, archive_change, ensure_on_branch, interaction
+from ..lib import (
+    REPO_ROOT, archive_change, commit_all, ensure_worktree, interaction, remove_worktree,
+    worktree_dir,
+)
+from ..lib.openspec_runner import is_change_archived
 
 _BANNER = "\033[1;35m"
 _YELLOW = "\033[1;33m"
+_RED    = "\033[1;31m"
 _RESET  = "\033[0m"
 
 _KEBAB_INVALID_RE = re.compile(r"[^a-z0-9-]+")
@@ -83,10 +88,11 @@ def _ask_should_archive(project_dir: str, change_name: str) -> bool:
 
 def archive_node(state: AgentState) -> dict:
     """review 通過後的收尾動作：詢問是否要把這次的 OpenSpec change 併入目標專案持久的
-    openspec/specs/，同意才呼叫 openspec CLI archive；「該不該問、問完怎麼做」都是機械式
-    判斷，不需要 Claude 的判斷力。使用者選擇不 archive、或 archive 本身失敗，都只印警告、
-    不讓整個工作流程失敗——程式碼已經審查通過，archive 只是收尾動作，略過或失敗頂多之後
-    手動補跑。
+    openspec/specs/，同意才呼叫 openspec CLI archive，成功後在任務工作目錄 commit 全部
+    變更並移除該 worktree（工作分支保留）。使用者選擇不 archive、或 openspec CLI 本身
+    失敗，都只印警告、不讓整個工作流程失敗——程式碼已經審查通過，archive 只是收尾動作，
+    略過或失敗頂多之後手動補跑；但「已通過審查、同意 archive」之後，commit 訊息缺漏或
+    commit 失敗都代表任務工作目錄即將移除卻可能丟失成果，必須回報為 error 並保留 worktree。
 
     change_name 一律取自 state：完整工作流由 analyze_plan 寫入，`--node archive` 則來自
     使用者選定的 change 的 state.json。沒有 project_dir 的話，直接採用環境變數
@@ -103,46 +109,75 @@ def archive_node(state: AgentState) -> dict:
         print(f"{_YELLOW}  [Archive] {error}，略過{_RESET}\n", flush=True)
         return {}
 
-    print(
-        f"{_YELLOW}  定位：{project_dir}/openspec/changes/{change_name}/{_RESET}",
-        flush=True,
-    )
+    if not branch_name:
+        print(f"{_RED}  [Archive] 缺少 branch_name，無法定位任務工作目錄{_RESET}\n", flush=True)
+        return {"status": "error"}
 
-    if branch_name:
-        ok, msg = ensure_on_branch(project_dir, branch_name)
-        print(f"{_YELLOW}  [git] {msg}{_RESET}", flush=True)
-        if not ok:
-            print(f"{_YELLOW}  [Archive] 無法切換到指定分支，略過{_RESET}\n", flush=True)
-            return {}
+    ok, msg = ensure_worktree(project_dir, change_name, branch_name)
+    print(f"{_YELLOW}  [git] {msg}{_RESET}", flush=True)
+    if not ok:
+        return {"status": "error"}
+
+    work_dir_rel = worktree_dir(project_dir, change_name)
+    work_dir_abs = os.path.join(REPO_ROOT, work_dir_rel)
+
+    print(f"{_YELLOW}  定位：{work_dir_rel}/openspec/changes/{change_name}/{_RESET}", flush=True)
 
     if not _ask_should_archive(project_dir, change_name):
         print(
             f"{_YELLOW}  [Archive] 使用者選擇不 archive，略過。\n"
-            f"  可稍後手動執行：cd {project_dir} && openspec archive {change_name} --yes{_RESET}\n",
+            f"  可稍後手動執行：cd {work_dir_rel} && openspec archive {change_name} --yes{_RESET}\n",
             flush=True,
         )
         return {}
 
-    project_dir_abs = os.path.join(REPO_ROOT, project_dir)
-    result = archive_change(project_dir_abs, change_name)
-
-    if result.ok:
-        archived = result.data.get("archive", {})
-        vacated_as = result.data.get("vacated_as")
-        vacated_note = (
-            f"\n  既有 archive 已改名為 {vacated_as}，避免覆寫" if vacated_as else ""
-        )
+    if is_change_archived(work_dir_abs, change_name):
         print(
-            f"{_BANNER}  [Archive] 完成，已合併進 "
-            f"{project_dir}/openspec/specs/（{archived.get('archivedAs', change_name)}）"
-            f"{vacated_note}{_RESET}\n",
+            f"{_YELLOW}  [Archive] 前次已成功併入 specs/（commit 未完成），略過 openspec archive，"
+            f"直接補做 commit{_RESET}\n",
             flush=True,
         )
     else:
+        result = archive_change(work_dir_abs, change_name)
+        if not result.ok:
+            print(
+                f"{_YELLOW}  [Archive] 未完成：{result.error_text}\n"
+                f"  可稍後手動執行：cd {work_dir_rel} && openspec archive {change_name} --yes{_RESET}\n",
+                flush=True,
+            )
+            return {}
+
+        archived = result.data.get("archive", {})
+        vacated_as = result.data.get("vacated_as")
+        vacated_note = f"\n  既有 archive 已改名為 {vacated_as}，避免覆寫" if vacated_as else ""
         print(
-            f"{_YELLOW}  [Archive] 未完成：{result.error_text}\n"
-            f"  可稍後手動執行：cd {project_dir} && openspec archive {change_name} --yes{_RESET}\n",
+            f"{_BANNER}  [Archive] 已合併進 "
+            f"{work_dir_rel}/openspec/specs/（{archived.get('archivedAs', change_name)}）"
+            f"{vacated_note}{_RESET}\n",
             flush=True,
         )
 
-    return {}
+    commit_message = (state.get("commit_message") or "").strip()
+    if not commit_message:
+        note = (
+            f"沒有任務 commit 訊息，未 commit、保留任務工作目錄 {work_dir_rel}；"
+            "請重跑 execute 產生 commit 訊息後再重跑 archive"
+        )
+        print(f"{_RED}  [Archive] {note}{_RESET}\n", flush=True)
+        return {"status": "error", "stage_notes": {**(state.get("stage_notes") or {}), "archive": note}}
+
+    commit_ok, commit_msg = commit_all(project_dir, change_name, commit_message)
+    print(f"{_YELLOW}  [git] {commit_msg}{_RESET}", flush=True)
+    if not commit_ok:
+        return {"status": "error"}
+
+    remove_ok, remove_msg = remove_worktree(project_dir, change_name)
+    print(f"{_YELLOW}  [git] {remove_msg}{_RESET}", flush=True)
+    if not remove_ok:
+        print(
+            f"{_YELLOW}  [Archive] 任務工作目錄移除失敗，請手動清理：{work_dir_rel}{_RESET}\n",
+            flush=True,
+        )
+
+    print(f"{_BANNER}  [Archive] 完成，已 commit 到分支 {branch_name}{_RESET}\n", flush=True)
+    return {"archived": True}

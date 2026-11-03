@@ -49,8 +49,8 @@ def _base_state(**overrides) -> dict:
 
 
 def _make_openspec_dir(workspace: Path, project: str = "my-project", change: str = "feat-test") -> Path:
-    """建立 openspec change 目錄並回傳路徑。"""
-    d = workspace / project / "openspec" / "changes" / change
+    """建立任務工作目錄下的 openspec change 目錄並回傳路徑。"""
+    d = workspace / ".agentloop-worktrees" / project / change / "openspec" / "changes" / change
     d.mkdir(parents=True)
     (d / "tasks.md").write_text("- [ ] task 1")
     return d
@@ -85,7 +85,7 @@ class TestAnalyzePlanGuards:
             review_blocking=True,
         )
         with patch("AgentLoop.nodes.analyze_plan.call_claude", return_value=_mock_claude_result("規劃完成")), \
-             patch("AgentLoop.nodes.analyze_plan.ensure_on_branch", return_value=(True, "ok")), \
+             patch("AgentLoop.nodes.analyze_plan.ensure_worktree", return_value=(True, "ok")), \
              patch("AgentLoop.nodes.analyze_plan.rollback_except_openspec", return_value=(True, "ok")), \
              patch("AgentLoop.nodes.analyze_plan._run_with_validate", return_value=("", "")), \
              patch("AgentLoop.nodes.analyze_plan._read_change_artifacts", return_value=("analysis", ["- [x] t1"])):
@@ -109,7 +109,7 @@ class TestAnalyzePlanGuards:
             review_blocking=True,
         )
         with patch("AgentLoop.nodes.analyze_plan.call_claude", return_value=_mock_claude_result("規劃完成")), \
-             patch("AgentLoop.nodes.analyze_plan.ensure_on_branch", return_value=(True, "ok")), \
+             patch("AgentLoop.nodes.analyze_plan.ensure_worktree", return_value=(True, "ok")), \
              patch("AgentLoop.nodes.analyze_plan.rollback_except_openspec", return_value=(True, "ok")), \
              patch("AgentLoop.nodes.analyze_plan._run_with_validate", return_value=("", "")), \
              patch("AgentLoop.nodes.analyze_plan._read_change_artifacts", return_value=("analysis", ["- [x] t1"])):
@@ -131,7 +131,7 @@ class TestAnalyzePlanGuards:
         ok_result.error_text = ""
         with patch("AgentLoop.nodes.analyze_plan.call_claude", return_value=_mock_claude_result("規劃完成")), \
              patch("AgentLoop.nodes.analyze_plan.branch_exists", return_value=True), \
-             patch("AgentLoop.nodes.analyze_plan.ensure_on_branch", return_value=(True, "ok")), \
+             patch("AgentLoop.nodes.analyze_plan.ensure_worktree", return_value=(True, "ok")), \
              patch("AgentLoop.nodes.analyze_plan.ensure_initialized", return_value=ok_result), \
              patch("AgentLoop.nodes.analyze_plan.ensure_change_created", return_value=ok_result), \
              patch("AgentLoop.nodes.analyze_plan._ask_domain_selection", return_value=([], "")), \
@@ -157,7 +157,7 @@ class TestAnalyzePlanGuards:
         ok_result.error_text = ""
         with patch("AgentLoop.nodes.analyze_plan.call_claude", return_value=_mock_claude_result("規劃完成")), \
              patch("AgentLoop.nodes.analyze_plan.branch_exists", return_value=True), \
-             patch("AgentLoop.nodes.analyze_plan.ensure_on_branch", return_value=(True, "ok")), \
+             patch("AgentLoop.nodes.analyze_plan.ensure_worktree", return_value=(True, "ok")), \
              patch("AgentLoop.nodes.analyze_plan.ensure_initialized", return_value=ok_result), \
              patch("AgentLoop.nodes.analyze_plan.ensure_change_created", return_value=ok_result), \
              patch("AgentLoop.nodes.analyze_plan._ask_domain_selection") as mock_ask, \
@@ -193,7 +193,7 @@ class TestAnalyzePlanGuards:
 
         with patch("AgentLoop.nodes.analyze_plan.call_claude", side_effect=_capture), \
              patch("AgentLoop.nodes.analyze_plan.branch_exists", return_value=True), \
-             patch("AgentLoop.nodes.analyze_plan.ensure_on_branch", return_value=(True, "ok")), \
+             patch("AgentLoop.nodes.analyze_plan.ensure_worktree", return_value=(True, "ok")), \
              patch("AgentLoop.nodes.analyze_plan.ensure_initialized", return_value=ok_result), \
              patch("AgentLoop.nodes.analyze_plan.ensure_change_created", return_value=ok_result), \
              patch("AgentLoop.nodes.analyze_plan._ask_skip_specs") as mock_skip, \
@@ -226,7 +226,7 @@ class TestAnalyzePlanGuards:
         ok_result.error_text = ""
         with patch("AgentLoop.nodes.analyze_plan.call_claude", return_value=_mock_claude_result("規劃完成")), \
              patch("AgentLoop.nodes.analyze_plan.branch_exists", return_value=True), \
-             patch("AgentLoop.nodes.analyze_plan.ensure_on_branch", return_value=(True, "ok")), \
+             patch("AgentLoop.nodes.analyze_plan.ensure_worktree", return_value=(True, "ok")), \
              patch("AgentLoop.nodes.analyze_plan.ensure_initialized", return_value=ok_result), \
              patch("AgentLoop.nodes.analyze_plan.ensure_change_created", return_value=ok_result), \
              patch("AgentLoop.nodes.analyze_plan._recover_skip_specs", return_value=None), \
@@ -252,7 +252,7 @@ class TestAnalyzePlanGuards:
         ok_result.error_text = ""
         with patch("AgentLoop.nodes.analyze_plan.call_claude") as mock_claude, \
              patch("AgentLoop.nodes.analyze_plan.branch_exists", return_value=True), \
-             patch("AgentLoop.nodes.analyze_plan.ensure_on_branch", return_value=(True, "ok")), \
+             patch("AgentLoop.nodes.analyze_plan.ensure_worktree", return_value=(True, "ok")), \
              patch("AgentLoop.nodes.analyze_plan.ensure_initialized", return_value=ok_result), \
              patch("AgentLoop.nodes.analyze_plan._recover_skip_specs", return_value=None), \
              patch("AgentLoop.nodes.analyze_plan._ask_skip_specs", return_value=None):
@@ -280,7 +280,7 @@ class TestAnalyzePlanGuards:
             return _mock_claude_result("規劃完成")
 
         with patch("AgentLoop.nodes.analyze_plan.call_claude", side_effect=_capture), \
-             patch("AgentLoop.nodes.analyze_plan.ensure_on_branch", return_value=(True, "ok")), \
+             patch("AgentLoop.nodes.analyze_plan.ensure_worktree", return_value=(True, "ok")), \
              patch("AgentLoop.nodes.analyze_plan._ask_skip_specs") as mock_skip, \
              patch("AgentLoop.nodes.analyze_plan._run_with_validate", return_value=("", "")), \
              patch("AgentLoop.nodes.analyze_plan._read_change_artifacts", return_value=("analysis", ["- [x] t1"])):
@@ -307,7 +307,7 @@ class TestAnalyzePlanGuards:
         with patch("AgentLoop.nodes.analyze_plan.REPO_ROOT", str(tmp_path)), \
              patch("AgentLoop.nodes.analyze_plan.call_claude", return_value=_mock_claude_result("規劃完成")), \
              patch("AgentLoop.nodes.analyze_plan.branch_exists", return_value=True), \
-             patch("AgentLoop.nodes.analyze_plan.ensure_on_branch", return_value=(True, "ok")), \
+             patch("AgentLoop.nodes.analyze_plan.ensure_worktree", return_value=(True, "ok")), \
              patch("AgentLoop.nodes.analyze_plan.ensure_initialized", return_value=ok_result), \
              patch("AgentLoop.nodes.analyze_plan.ensure_change_created", return_value=ok_result), \
              patch("AgentLoop.nodes.analyze_plan._ask_skip_specs") as mock_skip, \
@@ -329,7 +329,8 @@ class TestExecuteNodeGuards:
         from AgentLoop.nodes import execute_node
 
         state = _base_state()
-        with patch("AgentLoop.nodes.execute.REPO_ROOT", str(tmp_path)):
+        with patch("AgentLoop.nodes.execute.REPO_ROOT", str(tmp_path)), \
+             patch("AgentLoop.nodes.execute.ensure_worktree", return_value=(True, "ok")):
             result = execute_node(state)
 
         assert result["status"] == "error"
@@ -341,11 +342,38 @@ class TestExecuteNodeGuards:
 
         _make_openspec_dir(tmp_path)
         with patch("AgentLoop.nodes.execute.REPO_ROOT", str(tmp_path)), \
-             patch("AgentLoop.nodes.execute.ensure_on_branch", return_value=(True, "ok")), \
+             patch("AgentLoop.nodes.execute.ensure_worktree", return_value=(True, "ok")), \
              patch("AgentLoop.nodes.execute.call_claude", return_value=_mock_claude_result("實作完成")):
             result = execute_node(state=_base_state())
 
         assert "OpenSpec change 目錄" not in result.get("execution_result", "")
+
+    def test_commit_message_line_is_parsed_into_state(self, tmp_path):
+        """Scenario: execute 輸出含 COMMIT_MESSAGE 時寫入 state"""
+        from AgentLoop.nodes import execute_node
+
+        _make_openspec_dir(tmp_path)
+        text = "實作完成\n\nCOMMIT_MESSAGE: feat: login page"
+        with patch("AgentLoop.nodes.execute.REPO_ROOT", str(tmp_path)), \
+             patch("AgentLoop.nodes.execute.ensure_worktree", return_value=(True, "ok")), \
+             patch("AgentLoop.nodes.execute.call_claude", return_value=_mock_claude_result(text)):
+            result = execute_node(state=_base_state())
+
+        assert result["status"] == "ok"
+        assert result["commit_message"] == "feat: login page"
+
+    def test_missing_commit_message_line_keeps_previous_value(self, tmp_path):
+        """Scenario: execute 輸出無 COMMIT_MESSAGE、state 已有舊訊息時保留舊值"""
+        from AgentLoop.nodes import execute_node
+
+        _make_openspec_dir(tmp_path)
+        with patch("AgentLoop.nodes.execute.REPO_ROOT", str(tmp_path)), \
+             patch("AgentLoop.nodes.execute.ensure_worktree", return_value=(True, "ok")), \
+             patch("AgentLoop.nodes.execute.call_claude", return_value=_mock_claude_result("實作完成，沒有輸出訊息")):
+            result = execute_node(state=_base_state(commit_message="feat: old message"))
+
+        assert result["status"] == "ok"
+        assert result["commit_message"] == "feat: old message"
 
 
 # ── review_node guards ────────────────────────────────────────────────────────
@@ -356,7 +384,8 @@ class TestReviewNodeGuards:
         from AgentLoop.nodes import review_node
 
         state = _base_state()
-        with patch("AgentLoop.nodes.review.REPO_ROOT", str(tmp_path)):
+        with patch("AgentLoop.nodes.review.REPO_ROOT", str(tmp_path)), \
+             patch("AgentLoop.nodes.review.ensure_worktree", return_value=(True, "ok")):
             result = review_node(state)
 
         assert result["status"] == "error"
@@ -382,7 +411,7 @@ class TestReviewNodeGuards:
         _make_openspec_dir(tmp_path)
         review_text = "## Standards\nok\n## Spec\nok\nReady to merge? Yes"
         with patch("AgentLoop.nodes.review.REPO_ROOT", str(tmp_path)), \
-             patch("AgentLoop.nodes.review.ensure_on_branch", return_value=(True, "ok")), \
+             patch("AgentLoop.nodes.review.ensure_worktree", return_value=(True, "ok")), \
              patch("AgentLoop.nodes.review.build_skills_block", return_value="skill"), \
              patch("AgentLoop.nodes.review.call_claude", return_value=_mock_claude_result(review_text)):
             result = review_node(state=_base_state())

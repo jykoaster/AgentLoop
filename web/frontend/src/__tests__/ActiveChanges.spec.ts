@@ -2,14 +2,14 @@ import { describe, test, expect, vi, beforeEach, afterEach } from 'vitest'
 import { mount, flushPromises, type VueWrapper } from '@vue/test-utils'
 import ActiveChanges from '../components/active-changes/ActiveChanges.vue'
 import * as api from '../api'
-import type { ChangeRow, RunStatus } from '../api'
+import type { ChangeRow, RunInfo } from '../api'
 
 vi.mock('../api', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../api')>()
   return {
     ...actual,
     getChanges: vi.fn(),
-    getRun: vi.fn(),
+    getRuns: vi.fn(),
     getStageDetail: vi.fn(),
     getChangeFiles: vi.fn(),
     getChangeFile: vi.fn(),
@@ -40,7 +40,16 @@ function makeRow(overrides: Partial<ChangeRow> = {}): ChangeRow {
   }
 }
 
-const IDLE_RUN: RunStatus = { active: false }
+function makeRun(overrides: Partial<RunInfo> = {}): RunInfo {
+  return {
+    run_id: 'r1',
+    change_name: '',
+    task: '',
+    stage: '',
+    question: null,
+    ...overrides,
+  }
+}
 
 async function expandRow(wrapper: VueWrapper, changeName = 'feat-login'): Promise<void> {
   const toggle = wrapper.find(`[data-change-name="${changeName}"] [aria-label="展開"]`)
@@ -52,7 +61,7 @@ async function expandRow(wrapper: VueWrapper, changeName = 'feat-login'): Promis
 beforeEach(() => {
   vi.clearAllMocks()
   mockedApi.getChanges.mockResolvedValue([])
-  mockedApi.getRun.mockResolvedValue(IDLE_RUN)
+  mockedApi.getRuns.mockResolvedValue([])
   mockedApi.getStageDetail.mockResolvedValue({ status: 'pending', note: '', fields: {}, log: '' })
 })
 
@@ -153,16 +162,17 @@ describe('ActiveChanges', () => {
       },
     })
     mockedApi.getChanges.mockResolvedValue([pendingRow])
-    mockedApi.getRun.mockResolvedValue({
-      active: true, change_name: 'feat-login', label: 'feat-login', task: '新增登入頁',
-      stage: 'analyze_plan',
-      question: {
-        id: 'q1', stage: 'analyze_plan', kind: 'choice',
-        prompt: '網頁服務要用什麼技術棧？',
-        options: ['1. FastAPI（建議）', '2. Flask', '3. Django'],
-        required: false, multiline: false,
-      },
-    })
+    mockedApi.getRuns.mockResolvedValue([
+      makeRun({
+        run_id: 'r1', change_name: 'feat-login', task: '新增登入頁', stage: 'analyze_plan',
+        question: {
+          id: 'q1', stage: 'analyze_plan', kind: 'choice',
+          prompt: '網頁服務要用什麼技術棧？',
+          options: ['1. FastAPI（建議）', '2. Flask', '3. Django'],
+          required: false, multiline: false,
+        },
+      }),
+    ])
     mockedApi.postAnswer.mockResolvedValue({ ok: true })
 
     const wrapper = mount(ActiveChanges)
@@ -181,12 +191,11 @@ describe('ActiveChanges', () => {
     expect(optionButtons).toHaveLength(3)
 
     await optionButtons[0].trigger('click')
-    expect(mockedApi.postAnswer).toHaveBeenCalledWith('q1', '1')
+    expect(mockedApi.postAnswer).toHaveBeenCalledWith('r1', 'q1', '1')
 
-    mockedApi.getRun.mockResolvedValue({
-      active: true, change_name: 'feat-login', label: 'feat-login', stage: 'analyze_plan',
-      question: null,
-    })
+    mockedApi.getRuns.mockResolvedValue([
+      makeRun({ run_id: 'r1', change_name: 'feat-login', stage: 'analyze_plan', question: null }),
+    ])
     await vi.advanceTimersByTimeAsync(2000)
     await flushPromises()
 
@@ -206,15 +215,17 @@ describe('ActiveChanges', () => {
       }),
       makeRow({ change_name: 'fix-css', branch_name: 'fix/css' }),
     ])
-    mockedApi.getRun.mockResolvedValue({
-      active: true, change_name: 'feat-login', label: 'feat-login', stage: 'analyze_plan',
-      question: {
-        id: 'q1', stage: 'analyze_plan', kind: 'choice',
-        prompt: '網頁服務要用什麼技術棧？',
-        options: ['1. FastAPI（建議）', '2. Flask', '3. Django'],
-        required: false, multiline: false,
-      },
-    })
+    mockedApi.getRuns.mockResolvedValue([
+      makeRun({
+        run_id: 'r1', change_name: 'feat-login', stage: 'analyze_plan',
+        question: {
+          id: 'q1', stage: 'analyze_plan', kind: 'choice',
+          prompt: '網頁服務要用什麼技術棧？',
+          options: ['1. FastAPI（建議）', '2. Flask', '3. Django'],
+          required: false, multiline: false,
+        },
+      }),
+    ])
 
     const wrapper = mount(ActiveChanges)
     await flushPromises()
@@ -232,10 +243,9 @@ describe('ActiveChanges', () => {
     const analyzeCard = featRow().findAll('.stage-card')[0]
     expect(analyzeCard.find('.question-mark').exists()).toBe(true)
 
-    mockedApi.getRun.mockResolvedValue({
-      active: true, change_name: 'feat-login', label: 'feat-login', stage: 'analyze_plan',
-      question: null,
-    })
+    mockedApi.getRuns.mockResolvedValue([
+      makeRun({ run_id: 'r1', change_name: 'feat-login', stage: 'analyze_plan', question: null }),
+    ])
     await vi.advanceTimersByTimeAsync(2000)
     await flushPromises()
 
@@ -248,15 +258,17 @@ describe('ActiveChanges', () => {
       makeRow(),
       makeRow({ change_name: 'fix-css', branch_name: 'fix/css' }),
     ])
-    mockedApi.getRun.mockResolvedValue({
-      active: true, change_name: 'fix-css', label: 'fix-css', stage: 'analyze_plan',
-      question: {
-        id: 'q1', stage: 'analyze_plan', kind: 'choice',
-        prompt: '網頁服務要用什麼技術棧？',
-        options: ['1. FastAPI（建議）', '2. Flask', '3. Django'],
-        required: false, multiline: false,
-      },
-    })
+    mockedApi.getRuns.mockResolvedValue([
+      makeRun({
+        run_id: 'r1', change_name: 'fix-css', stage: 'analyze_plan',
+        question: {
+          id: 'q1', stage: 'analyze_plan', kind: 'choice',
+          prompt: '網頁服務要用什麼技術棧？',
+          options: ['1. FastAPI（建議）', '2. Flask', '3. Django'],
+          required: false, multiline: false,
+        },
+      }),
+    ])
 
     const wrapper = mount(ActiveChanges)
     await flushPromises()
@@ -290,57 +302,43 @@ describe('ActiveChanges', () => {
     expect(mockedApi.postRerun).toHaveBeenCalledWith('feat-login', 'execute')
   })
 
-  test('已有執行進行中時其他啟動動作停用並顯示原因', async () => {
+  test('同一任務執行中時只有該任務的重跑按鈕停用，其他任務與新增任務可用', async () => {
     mockedApi.getChanges.mockResolvedValue([
-      makeRow({ change_name: 'fix-css', branch_name: 'fix/css', stages: makeRow().stages }),
+      makeRow({
+        stages: {
+          analyze_plan: 'done', human_confirm: 'done', execute: 'error',
+          review: 'pending', archive: 'pending',
+        },
+      }),
+      makeRow({ change_name: 'fix-css', branch_name: 'fix/css' }),
     ])
-    mockedApi.getRun.mockResolvedValue({ active: true, change_name: 'feat-login', label: 'feat-login' })
+    mockedApi.getRuns.mockResolvedValue([
+      makeRun({ run_id: 'r1', change_name: 'feat-login', stage: 'execute' }),
+    ])
 
     const wrapper = mount(ActiveChanges)
     await flushPromises()
+    await expandRow(wrapper, 'feat-login')
     await expandRow(wrapper, 'fix-css')
 
     const newTaskButton = wrapper.find('.new-task-button')
-    expect((newTaskButton.element as HTMLButtonElement).disabled).toBe(true)
+    expect((newTaskButton.element as HTMLButtonElement).disabled).toBe(false)
 
-    const rerunButtons = wrapper.findAll('[aria-label="重跑"]')
-    expect(rerunButtons.length).toBeGreaterThan(0)
-    for (const btn of rerunButtons) {
+    const featRerunButtons = wrapper.find('[data-change-name="feat-login"]').findAll('[aria-label="重跑"]')
+    expect(featRerunButtons.length).toBeGreaterThan(0)
+    for (const btn of featRerunButtons) {
       expect((btn.element as HTMLButtonElement).disabled).toBe(true)
-      expect(btn.attributes('title')).toBe('目前已有 feat-login 執行中')
+      expect(btn.attributes('title')).toBe('feat-login 執行中')
+    }
+
+    const cssRerunButtons = wrapper.find('[data-change-name="fix-css"]').findAll('[aria-label="重跑"]')
+    expect(cssRerunButtons.length).toBeGreaterThan(0)
+    for (const btn of cssRerunButtons) {
+      expect((btn.element as HTMLButtonElement).disabled).toBe(false)
     }
   })
 
-  test('重跑按鈕停用時滑鼠停留提示顯示停用原因', async () => {
-    mockedApi.getChanges.mockResolvedValue([
-      makeRow({ change_name: 'fix-css', branch_name: 'fix/css' }),
-    ])
-    mockedApi.getRun.mockResolvedValue({ active: true, change_name: 'feat-login', label: 'feat-login' })
-
-    const wrapper = mount(ActiveChanges)
-    await flushPromises()
-    await expandRow(wrapper, 'fix-css')
-
-    const reviewCard = wrapper.findAll('.stage-card')[3]
-    const rerunButton = reviewCard.find('[aria-label="重跑"]')
-    expect(rerunButton.attributes('title')).toBe('目前已有 feat-login 執行中')
-    expect(rerunButton.text()).toBe('')
-    expect((rerunButton.element as HTMLButtonElement).disabled).toBe(true)
-  })
-
-  test('執行進行中再送出啟動要求時系統拒絕', async () => {
-    mockedApi.getChanges.mockResolvedValue([makeRow()])
-    mockedApi.getRun.mockResolvedValue({ active: true, change_name: 'feat-login', label: 'feat-login' })
-    mockedApi.postNewTask.mockRejectedValue(new api.ApiError(409, '目前已有 feat-login 執行中'))
-
-    const wrapper = mount(ActiveChanges)
-    await flushPromises()
-
-    expect((wrapper.find('.new-task-button').element as HTMLButtonElement).disabled).toBe(true)
-  })
-
   test('新增任務後以 analyze_plan 卡片引導初始提問', async () => {
-    mockedApi.getRun.mockResolvedValue(IDLE_RUN)
     const wrapper = mount(ActiveChanges)
     await flushPromises()
 
@@ -349,16 +347,15 @@ describe('ActiveChanges', () => {
     const textarea = wrapper.find('.new-task-dialog textarea')
     await textarea.setValue('新增登入頁')
     mockedApi.postNewTask.mockResolvedValue({ run_id: 'r1' })
-    mockedApi.getRun.mockResolvedValue({
-      active: true, change_name: '', label: '新增登入頁', task: '新增登入頁', stage: 'analyze_plan',
-      question: null,
-    })
+    mockedApi.getRuns.mockResolvedValue([
+      makeRun({ run_id: 'r1', change_name: '', task: '新增登入頁', stage: 'analyze_plan' }),
+    ])
     await wrapper.find('.new-task-dialog button:not(:disabled)').trigger('click')
     await flushPromises()
 
     expect(mockedApi.postNewTask).toHaveBeenCalledWith('新增登入頁')
-    await expandRow(wrapper, '(temp)')
-    const tempRow = wrapper.find('.change-row[data-change-name="(temp)"]')
+    await expandRow(wrapper, 'r1')
+    const tempRow = wrapper.find('.change-row[data-change-name="r1"]')
     expect(tempRow.exists()).toBe(true)
     expect(tempRow.text()).toContain('新增登入頁')
     expect(tempRow.findAll('.stage-card')[0].attributes('data-status')).toBe('running')
@@ -366,18 +363,17 @@ describe('ActiveChanges', () => {
 
   test('新增任務的暫時列在 analyze_plan 執行中可中止並結束執行', async () => {
     vi.useFakeTimers()
-    mockedApi.getRun.mockResolvedValue({
-      active: true, change_name: '', label: '新增登入頁', task: '新增登入頁', stage: 'analyze_plan',
-      question: null,
-    })
+    mockedApi.getRuns.mockResolvedValue([
+      makeRun({ run_id: 'r1', change_name: '', task: '新增登入頁', stage: 'analyze_plan' }),
+    ])
     mockedApi.postAbort.mockResolvedValue(undefined)
     const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
 
     const wrapper = mount(ActiveChanges)
     await flushPromises()
-    await expandRow(wrapper, '(temp)')
+    await expandRow(wrapper, 'r1')
 
-    const tempRow = () => wrapper.find('.change-row[data-change-name="(temp)"]')
+    const tempRow = () => wrapper.find('.change-row[data-change-name="r1"]')
     await tempRow().findAll('.stage-card')[0].trigger('click') // analyze_plan
     await flushPromises()
 
@@ -389,14 +385,14 @@ describe('ActiveChanges', () => {
     await flushPromises()
 
     expect(confirmSpy).toHaveBeenCalledWith('確定要中止這個階段嗎？')
-    expect(mockedApi.postAbort).toHaveBeenCalledTimes(1)
+    expect(mockedApi.postAbort).toHaveBeenCalledWith('r1')
 
-    mockedApi.getRun.mockResolvedValue(IDLE_RUN)
+    mockedApi.getRuns.mockResolvedValue([])
     mockedApi.getChanges.mockResolvedValue([])
     await vi.advanceTimersByTimeAsync(2000)
     await flushPromises()
 
-    expect(wrapper.find('.change-row[data-change-name="(temp)"]').exists()).toBe(false)
+    expect(wrapper.find('.change-row[data-change-name="r1"]').exists()).toBe(false)
     const addTaskButton = wrapper
       .findAll('button')
       .find((b) => b.text().includes('新增任務'))!
@@ -404,17 +400,16 @@ describe('ActiveChanges', () => {
   })
 
   test('暫時列按中止但取消確認時不呼叫中止 API', async () => {
-    mockedApi.getRun.mockResolvedValue({
-      active: true, change_name: '', label: '新增登入頁', task: '新增登入頁', stage: 'analyze_plan',
-      question: null,
-    })
+    mockedApi.getRuns.mockResolvedValue([
+      makeRun({ run_id: 'r1', change_name: '', task: '新增登入頁', stage: 'analyze_plan' }),
+    ])
     vi.spyOn(window, 'confirm').mockReturnValue(false)
 
     const wrapper = mount(ActiveChanges)
     await flushPromises()
-    await expandRow(wrapper, '(temp)')
+    await expandRow(wrapper, 'r1')
 
-    const tempRow = wrapper.find('.change-row[data-change-name="(temp)"]')
+    const tempRow = wrapper.find('.change-row[data-change-name="r1"]')
     await tempRow.findAll('.stage-card')[0].trigger('click') // analyze_plan
     await flushPromises()
 
@@ -423,6 +418,86 @@ describe('ActiveChanges', () => {
     await flushPromises()
 
     expect(mockedApi.postAbort).not.toHaveBeenCalled()
+  })
+
+  test('兩個無 change 名稱的執行各顯示一列暫時列', async () => {
+    mockedApi.getRuns.mockResolvedValue([
+      makeRun({ run_id: 'r1', change_name: '', task: '新增登入頁', stage: 'analyze_plan' }),
+      makeRun({ run_id: 'r2', change_name: '', task: '修正樣式', stage: 'analyze_plan' }),
+    ])
+
+    const wrapper = mount(ActiveChanges)
+    await flushPromises()
+
+    const row1 = wrapper.find('[data-change-name="r1"]')
+    const row2 = wrapper.find('[data-change-name="r2"]')
+    expect(row1.exists()).toBe(true)
+    expect(row2.exists()).toBe(true)
+    expect(row1.text()).toContain('新增登入頁')
+    expect(row2.text()).toContain('修正樣式')
+  })
+
+  test('兩列各自有待回覆提問、回覆時帶各自 run_id', async () => {
+    mockedApi.getRuns.mockResolvedValue([
+      makeRun({
+        run_id: 'r1', change_name: '', task: '新增登入頁', stage: 'analyze_plan',
+        question: {
+          id: 'q1', stage: 'analyze_plan', kind: 'text',
+          prompt: '分支名稱？', options: [], required: true, multiline: false,
+        },
+      }),
+      makeRun({
+        run_id: 'r2', change_name: '', task: '修正樣式', stage: 'analyze_plan',
+        question: {
+          id: 'q2', stage: 'analyze_plan', kind: 'text',
+          prompt: '分支名稱？', options: [], required: true, multiline: false,
+        },
+      }),
+    ])
+
+    const wrapper = mount(ActiveChanges)
+    await flushPromises()
+    await expandRow(wrapper, 'r1')
+    await expandRow(wrapper, 'r2')
+
+    await wrapper.find('[data-change-name="r1"]').findAll('.stage-card')[0].trigger('click')
+    await wrapper.find('[data-change-name="r2"]').findAll('.stage-card')[0].trigger('click')
+    await flushPromises()
+
+    await wrapper.find('[data-change-name="r1"] .question-form input[type="text"]').setValue('feat/login')
+    await wrapper.find('[data-change-name="r1"] .question-form button').trigger('click')
+    await flushPromises()
+    expect(mockedApi.postAnswer).toHaveBeenCalledWith('r1', 'q1', 'feat/login')
+
+    await wrapper.find('[data-change-name="r2"] .question-form input[type="text"]').setValue('fix/css')
+    await wrapper.find('[data-change-name="r2"] .question-form button').trigger('click')
+    await flushPromises()
+    expect(mockedApi.postAnswer).toHaveBeenCalledWith('r2', 'q2', 'fix/css')
+  })
+
+  test('中止時帶該列 run_id', async () => {
+    mockedApi.getRuns.mockResolvedValue([
+      makeRun({ run_id: 'r1', change_name: '', task: '新增登入頁', stage: 'analyze_plan' }),
+      makeRun({ run_id: 'r2', change_name: '', task: '修正樣式', stage: 'analyze_plan' }),
+    ])
+    mockedApi.postAbort.mockResolvedValue(undefined)
+    vi.spyOn(window, 'confirm').mockReturnValue(true)
+
+    const wrapper = mount(ActiveChanges)
+    await flushPromises()
+    await expandRow(wrapper, 'r2')
+
+    await wrapper.find('[data-change-name="r2"]').findAll('.stage-card')[0].trigger('click')
+    await flushPromises()
+
+    const abortButton = wrapper
+      .find('[data-change-name="r2"]')
+      .findAll('button')
+      .find((b) => b.text().includes('中止'))!
+    await abortButton.trigger('click')
+    await flushPromises()
+
+    expect(mockedApi.postAbort).toHaveBeenCalledWith('r2')
   })
 
   test('點擊階段卡片後詳情展開在該任務列卡片下方且各列可各自展開一個', async () => {
@@ -560,13 +635,15 @@ describe('ActiveChanges', () => {
         },
       }),
     ])
-    mockedApi.getRun.mockResolvedValue({
-      active: true, change_name: 'feat-login', label: 'feat-login', stage: 'analyze_plan',
-      question: {
-        id: 'q1', stage: 'analyze_plan', kind: 'text',
-        prompt: '分支名稱？', options: [], required: false, multiline: false,
-      },
-    })
+    mockedApi.getRuns.mockResolvedValue([
+      makeRun({
+        run_id: 'r1', change_name: 'feat-login', stage: 'analyze_plan',
+        question: {
+          id: 'q1', stage: 'analyze_plan', kind: 'text',
+          prompt: '分支名稱？', options: [], required: false, multiline: false,
+        },
+      }),
+    ])
 
     const wrapper = mount(ActiveChanges)
     await flushPromises()
@@ -589,7 +666,9 @@ describe('ActiveChanges', () => {
     mockedApi.getChanges.mockResolvedValue([
       makeRow({ change_name: 'fix-css', branch_name: 'fix/css' }),
     ])
-    mockedApi.getRun.mockResolvedValue({ active: true, change_name: 'feat-login', label: 'feat-login' })
+    mockedApi.getRuns.mockResolvedValue([
+      makeRun({ run_id: 'r1', change_name: 'fix-css', stage: 'execute' }),
+    ])
     const confirmSpy = vi.spyOn(window, 'confirm')
 
     const wrapper = mount(ActiveChanges)

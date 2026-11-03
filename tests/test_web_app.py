@@ -146,6 +146,17 @@ class TestActiveChangesListing:
             "review": "pending", "archive": "pending",
         }
 
+    def test_archived_flag_excludes_from_active_changes(self, client, workspace):
+        """state `archived: True` 的任務不出現在執行中任務（API）"""
+        _write_state(
+            workspace, "feat-login",
+            branch_name="feat/login", task="新增登入頁", archived=True,
+        )
+        _write_state(workspace, "fix-css", branch_name="fix/css", task="修正樣式")
+
+        data = client.get("/api/changes").json()
+        assert [row["change_name"] for row in data] == ["fix-css"]
+
 
 class TestStageDetail:
     def test_stage_detail_returns_result_and_log(self, client, workspace):
@@ -192,18 +203,57 @@ class TestRerunStage:
 
         resp = client.post("/api/changes/feat-login/rerun", json={"stage": "execute"})
         assert resp.status_code == 200
+        run_id = resp.json()["run_id"]
         assert resp.json()["change_name"] == "feat-login"
         assert resp.json()["stage"] == "execute"
 
-        run = client.get("/api/run").json()
-        assert run["active"] is True
-        assert run["change_name"] == "feat-login"
+        runs = client.get("/api/runs").json()
+        assert len(runs) == 1
+        assert runs[0]["change_name"] == "feat-login"
 
-        client.post("/api/run/abort")
+        client.post(f"/api/runs/{run_id}/abort")
 
     def test_rejects_invalid_stage(self, client, workspace):
         resp = client.post("/api/changes/feat-login/rerun", json={"stage": "human_confirm"})
         assert resp.status_code == 422
+
+    def test_same_task_rerun_conflicts_other_task_succeeds(self, client, workspace, monkeypatch):
+        """同一任務已有執行進行中時重跑回 409，其他任務重跑成功回 200（API）"""
+        _write_state(
+            workspace, "feat-login",
+            stages={"analyze_plan": "done", "human_confirm": "done", "execute": "error",
+                    "review": "pending", "archive": "pending"},
+        )
+        _write_state(
+            workspace, "fix-css",
+            stages={"analyze_plan": "done", "human_confirm": "done", "execute": "error",
+                    "review": "pending", "archive": "pending"},
+        )
+        script = workspace / "fake_rerun.py"
+        script.write_text(
+            "import os, time\n"
+            "print('@@AGENTLOOP_STAGE execute@@', flush=True)\n"
+            "time.sleep(60)\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(runner_module, "MAIN_CMD", [sys.executable, str(script)])
+
+        resp1 = client.post("/api/changes/feat-login/rerun", json={"stage": "execute"})
+        assert resp1.status_code == 200
+        run_id1 = resp1.json()["run_id"]
+
+        conflict = client.post("/api/changes/feat-login/rerun", json={"stage": "execute"})
+        assert conflict.status_code == 409
+        assert conflict.json()["detail"] == "feat-login 執行中"
+
+        resp2 = client.post("/api/changes/fix-css/rerun", json={"stage": "execute"})
+        assert resp2.status_code == 200
+        run_id2 = resp2.json()["run_id"]
+
+        assert len(client.get("/api/runs").json()) == 2
+
+        client.post(f"/api/runs/{run_id1}/abort")
+        client.post(f"/api/runs/{run_id2}/abort")
 
 
 FAKE_NEW_TASK_SCRIPT = """\
@@ -214,6 +264,7 @@ import time
 
 workspace = os.environ["FAKE_WORKSPACE_ROOT"]
 target = os.environ.get("TARGET_PROJECT", "my-project")
+run_dir = os.environ["AGENTLOOP_RUN_DIR"]
 task = sys.argv[1]
 
 print("@@AGENTLOOP_STAGE analyze_plan@@", flush=True)
@@ -226,6 +277,8 @@ with open(os.path.join(change_dir, "state.json"), "w", encoding="utf-8") as f:
         "task": task, "change_name": "feat-login", "branch_name": "feat/login",
         "stages": {"analyze_plan": "running"}, "stage_notes": {},
     }, f)
+with open(os.path.join(run_dir, "change.json"), "w", encoding="utf-8") as f:
+    json.dump({"change_name": "feat-login"}, f)
 
 time.sleep(60)
 """
@@ -241,18 +294,20 @@ class TestNewTaskChangeDetection:
 
         resp = client.post("/api/runs", json={"task": "新增登入頁"})
         assert resp.status_code == 201
+        run_id = resp.json()["run_id"]
 
-        run = client.get("/api/run").json()
-        assert run["active"] is True
-        assert run["task"] == "新增登入頁"
-        assert run["label"] == "新增登入頁"
-        assert run["change_name"] == ""
+        runs = client.get("/api/runs").json()
+        assert len(runs) == 1
+        assert runs[0]["task"] == "新增登入頁"
+        assert runs[0]["change_name"] == ""
 
-        _wait_until(lambda: client.get("/api/run").json().get("change_name") == "feat-login")
-        run2 = client.get("/api/run").json()
-        assert run2["label"] == "feat-login"
+        def _change_name_set():
+            runs = client.get("/api/runs").json()
+            return runs and runs[0].get("change_name") == "feat-login"
 
-        client.post("/api/run/abort")
+        _wait_until(_change_name_set)
+
+        client.post(f"/api/runs/{run_id}/abort")
 
     def test_blank_task_is_rejected(self, client, workspace):
         """任務描述為空白時無法送出新增任務（API 422 部分）"""
@@ -271,14 +326,73 @@ class TestArchiveListing:
         (feat_b / "tasks.md").write_text("# tasks", encoding="utf-8")
 
         rows = client.get("/api/archive").json()
-        assert rows[0] == {"dir": "2026-10-01-feat-b", "date": "2026-10-01", "name": "feat-b"}
-        assert rows[1] == {"dir": "2026-09-01-feat-a", "date": "2026-09-01", "name": "feat-a"}
+        assert rows[0] == {"dir": "2026-10-01-feat-b", "date": "2026-10-01", "name": "feat-b", "branch": ""}
+        assert rows[1] == {"dir": "2026-09-01-feat-a", "date": "2026-09-01", "name": "feat-a", "branch": ""}
 
         files = client.get("/api/archive/2026-10-01-feat-b/files").json()
         assert files == ["proposal.md", "tasks.md"]
 
         content = client.get("/api/archive/2026-10-01-feat-b/files/proposal.md").json()
         assert content["content"] == "# proposal"
+
+    def test_unmerged_archived_change_lists_with_branch_and_mixed_with_regular(self, client, workspace):
+        """design 測試矩陣：state archived=True 且工作分支有封存資料夾，與一般封存混排並含 branch 欄位（API）"""
+        project = _init_git_project(workspace)
+        archive_root = workspace / "my-project" / "openspec" / "changes" / "archive"
+        (archive_root / "2026-09-01-feat-a").mkdir(parents=True)
+
+        _git(project, "checkout", "-b", "feat/login")
+        unmerged_dir = project / "openspec" / "changes" / "archive" / "2026-10-19-feat-login"
+        unmerged_dir.mkdir(parents=True)
+        (unmerged_dir / "proposal.md").write_text("# login proposal", encoding="utf-8")
+        _git(project, "add", "openspec")
+        _git(project, "commit", "-m", "archive feat-login")
+        _git(project, "checkout", "main")
+
+        _write_state(workspace, "feat-login", branch_name="feat/login", archived=True)
+
+        rows = client.get("/api/archive").json()
+        assert rows[0] == {
+            "dir": "2026-10-19-feat-login", "date": "2026-10-19", "name": "feat-login",
+            "branch": "feat/login",
+        }
+        assert rows[1] == {"dir": "2026-09-01-feat-a", "date": "2026-09-01", "name": "feat-a", "branch": ""}
+
+        files = client.get("/api/archive/2026-10-19-feat-login/files").json()
+        assert files == ["proposal.md"]
+
+        content = client.get("/api/archive/2026-10-19-feat-login/files/proposal.md").json()
+        assert content["content"] == "# login proposal"
+
+    def test_merged_unmerged_archive_appears_once_without_branch_label(self, client, workspace):
+        """工作分支已合併（主工作目錄已有同名封存資料夾）時只出現一次、branch 為空（API）"""
+        project = _init_git_project(workspace)
+
+        _git(project, "checkout", "-b", "feat/login")
+        unmerged_dir = project / "openspec" / "changes" / "archive" / "2026-10-19-feat-login"
+        unmerged_dir.mkdir(parents=True)
+        (unmerged_dir / "proposal.md").write_text("# login proposal", encoding="utf-8")
+        _git(project, "add", "openspec")
+        _git(project, "commit", "-m", "archive feat-login")
+        _git(project, "checkout", "main")
+        _git(project, "merge", "feat/login", "--no-edit")
+
+        _write_state(workspace, "feat-login", branch_name="feat/login", archived=True)
+
+        rows = client.get("/api/archive").json()
+        assert len(rows) == 1
+        assert rows[0] == {
+            "dir": "2026-10-19-feat-login", "date": "2026-10-19", "name": "feat-login", "branch": "",
+        }
+
+    def test_deleted_branch_is_not_listed_and_does_not_error(self, client, workspace):
+        """state archived=True 但工作分支已被刪除時不列出、不拋錯（API）"""
+        _init_git_project(workspace)
+        _write_state(workspace, "feat-login", branch_name="feat/deleted", archived=True)
+
+        resp = client.get("/api/archive")
+        assert resp.status_code == 200
+        assert resp.json() == []
 
 
 class TestSpecsListing:
@@ -351,8 +465,8 @@ class TestChangeFilesFromOtherBranch:
         assert resp.status_code == 404
         assert resp.json()["detail"] == "找不到 change：feat-login"
 
-    def test_change_files_prefer_worktree_when_branch_also_has_change(self, client, workspace):
-        """工作樹與工作分支同時有該 change 時回工作樹內容（API）"""
+    def test_change_files_prefer_legacy_main_dir_when_branch_also_has_change(self, client, workspace):
+        """沒有任務工作目錄時，主工作目錄（舊任務）與工作分支同時有該 change 時回主工作目錄內容（API）"""
         project = _init_git_project(workspace)
         _git(project, "checkout", "-b", "feat/login")
         _write_openspec_change(workspace, "feat-login", {"proposal.md": "# old proposal"})
@@ -418,6 +532,42 @@ class TestChangeFilesFromOtherBranch:
         assert detail != "找不到檔案：proposal.md（git：）"
 
 
+def _write_worktree_change(workspace: Path, project: str, change_name: str, files: dict) -> Path:
+    root = (
+        workspace / ".agentloop-worktrees" / project / change_name
+        / "openspec" / "changes" / change_name
+    )
+    for rel, content in files.items():
+        path = root / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+    return root
+
+
+class TestChangeFilesPreferTaskWorktree:
+    def test_prefers_task_worktree_over_legacy_main_dir(self, client, workspace):
+        """design §7：任務工作目錄存在時優先讀取，即使主工作目錄也有同名資料夾（API）"""
+        _write_openspec_change(workspace, "feat-login", {"proposal.md": "# legacy proposal"})
+        _write_worktree_change(workspace, "my-project", "feat-login", {"proposal.md": "# worktree proposal"})
+        _write_state(workspace, "feat-login", branch_name="feat/login")
+
+        content = client.get("/api/changes/feat-login/files/proposal.md").json()
+        assert content["content"] == "# worktree proposal"
+
+    def test_two_parallel_tasks_each_read_their_own_uncommitted_worktree(self, client, workspace):
+        """design 測試矩陣範例 5：兩個任務各有任務工作目錄，各自讀到自己尚未 commit 的規格文件（API）"""
+        _write_worktree_change(workspace, "my-project", "feat-login", {"proposal.md": "# feat-login proposal"})
+        _write_worktree_change(workspace, "my-project", "fix-css", {"proposal.md": "# fix-css proposal"})
+        _write_state(workspace, "feat-login", branch_name="feat/login")
+        _write_state(workspace, "fix-css", branch_name="fix/css")
+
+        login_content = client.get("/api/changes/feat-login/files/proposal.md").json()
+        css_content = client.get("/api/changes/fix-css/files/proposal.md").json()
+
+        assert login_content["content"] == "# feat-login proposal"
+        assert css_content["content"] == "# fix-css proposal"
+
+
 class TestSpecSearch:
     def test_search_returns_answer_and_references(self, client, monkeypatch):
         """輸入問題搜尋規格後顯示回答與參考檔案（API）"""
@@ -471,12 +621,12 @@ class TestSettings:
         script = workspace / "fake_sleep.py"
         script.write_text("import time\ntime.sleep(60)\n", encoding="utf-8")
         monkeypatch.setattr(runner_module, "MAIN_CMD", [sys.executable, str(script)])
-        client.post("/api/runs", json={"task": "t"})
+        run_id = client.post("/api/runs", json={"task": "t"}).json()["run_id"]
 
         resp = client.put("/api/settings", json={"target_project": "other"})
         assert resp.status_code == 409
 
-        client.post("/api/run/abort")
+        client.post(f"/api/runs/{run_id}/abort")
 
 
 class TestFolderPicker:
