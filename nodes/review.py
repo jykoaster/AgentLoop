@@ -59,11 +59,11 @@ fixed point 與 spec 來源見下方「依 code-review skill 執行時的具體�
 1. 確認 TASK 清單完整性：Read `<<CHANGE_LOCATION>>/tasks.md`，依其 checkbox 狀態
    （`- [x]` 已完成／`- [ ]` 未完成）逐項核對，列出未完成的 TASK 編號
 2. 依目標專案的 CLAUDE.md / AGENT.md 中列出的測試指令並實際用 Bash 執行測試
-   （若說明檔未列出，探索 package.json / pyproject.toml 等設定檔判斷）；測試失敗計入 Standards 軸的問題
+   （若說明檔未列出，探索該專案自己的設定檔判斷）；測試失敗計入 Standards 軸的問題
 3. **Spec ↔ 測試追溯（引用上方事前自動檢查結果）**：直接使用上方「Spec 測試追溯（事前自動檢查結果）」
    區塊的資訊，將其納入 `## Spec` 軸報告。若上方結果顯示有 ❌ 項目（Scenario 缺少對應測試），
    **必須**計入 Spec 軸的阻塞性問題，結論為 Ready to merge? No，此規則優先於所有其他判斷。
-   同時用你的判斷檢查本次修改新增或改動的測試是否與現有測試重複或情境可合併：
+   同時只在 `<<WORK_DIR_VALUE>>/openspec/specs/<domain>/spec.md` 存在時，檢查本次測試是否與該 domain 既有測試重複或可合併；不存在就不要找：
    - 若有重複或可覆蓋的情境，計入 Spec 軸建議事項，以 SUGGESTION 格式列出應合併或移除的測試
    - 若重複情境已導致某 Scenario 有超過一個幾乎相同的測試（覆蓋範圍高度重疊），視為冗餘，
      同樣以 SUGGESTION 列出；但**不得建議刪除到讓任何 Scenario 完全沒有對應測試**

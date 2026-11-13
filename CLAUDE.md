@@ -48,3 +48,9 @@ Before adding or rewording a sentence, read the prompt you are about to change *
 - the other nodes' prompts, so the same instruction is not copied into `execute` and `review` independently
 
 Delete or merge the overlap in the same change. Do not append a new section to "make sure the model sees it" when an existing sentence or the injected skill already covers it.
+
+## Prompts stay stack-neutral
+
+AgentLoop is a workflow tool for any tech stack. A prompt states the workflow and the method: read that project's own docs, follow its commands, and when something blocks the run, diagnose it from those docs. It does not prescribe a target project's solution — how its dependencies are produced, which package manager or container to use, or any other stack-specific fix.
+
+When a run is slow or stuck because of the target project, change that project. Do not add a one-stack workaround to these prompts.

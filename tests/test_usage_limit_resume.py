@@ -163,6 +163,7 @@ class TestRunClaudeOnceDoesNotLeakWebInteractionEnv:
         assert "AGENTLOOP_INTERACTION" not in env
         assert "AGENTLOOP_RUN_DIR" not in env
         assert env.get("PATH") == "/usr/bin:/bin"
+        assert env.get("CLAUDE_CODE_DISABLE_BACKGROUND_TASKS") == "1"
 
 
 # ── session 插槽 ──────────────────────────────────────────────────────────────
@@ -325,8 +326,13 @@ class TestAnalyzePlanSessionResume:
         _make_change_dir(tmp_path)
         limit = _claude_result(_REAL_SESSION_LIMIT_TEXT, is_error=True, session_id="sess-plan")
 
-        result, _ = self._run(self._replan_state(), [limit], tmp_path)
+        result, mock_call = self._run(
+            self._replan_state(),
+            [_claude_result("檔：login.js"), limit],
+            tmp_path,
+        )
 
+        assert mock_call.call_count == 2
         assert result["status"] == "error"
         assert result["session_node"] == "analyze_plan"
         assert result["session_id"] == "sess-plan"
@@ -381,7 +387,11 @@ class TestAnalyzePlanSessionResume:
 
         _make_change_dir(tmp_path)
         limit = _claude_result(_REAL_SESSION_LIMIT_TEXT, is_error=True, session_id="sess-fix")
-        mock_call = MagicMock(side_effect=[_claude_result("規劃完成", session_id="sess-plan"), limit])
+        mock_call = MagicMock(side_effect=[
+            _claude_result("檔：login.js"),
+            _claude_result("規劃完成", session_id="sess-plan"),
+            limit,
+        ])
         with patch("AgentLoop.nodes.analyze_plan.REPO_ROOT", str(tmp_path)), \
              patch("AgentLoop.nodes.analyze_plan.ensure_worktree", return_value=(True, "ok")), \
              patch("AgentLoop.nodes.analyze_plan.build_skills_block", return_value="skill"), \

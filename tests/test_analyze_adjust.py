@@ -163,7 +163,10 @@ class TestAdjustInterruptedResume:
             task="新增登入頁\n\n調整 1：登入失敗三次後鎖定帳號 5 分鐘",
             start_from="analyze_plan",
         )
-        with patch("AgentLoop.nodes.analyze_plan.call_claude", return_value=interrupted_result), \
+        with patch(
+            "AgentLoop.nodes.analyze_plan.call_claude",
+            side_effect=[_mock_claude_result("檔：login.js"), interrupted_result],
+        ), \
              patch("AgentLoop.nodes.analyze_plan.ensure_worktree", return_value=(True, "ok")), \
              patch("AgentLoop.nodes.analyze_plan.interaction.is_interactive", return_value=True), \
              patch("AgentLoop.nodes.analyze_plan.interaction.ask", return_value="鎖定時間改為 10 分鐘"):

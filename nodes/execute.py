@@ -30,32 +30,28 @@ _SYSTEM = f"""你是一位資深全端工程師，負責「執行」階段。
    （若有 design.md 一併讀取；小改動可能沒有此檔，不視為缺漏）。
 2. 依下方「目標專案」讀取其 CLAUDE.md / AGENT.md，了解該專案的架構、指令（測試、lint、build 等）、
    目錄慣例、程式碼規範，以及**技術棧**；找不到說明檔則自行用 Read/Glob/Grep 探索程式碼並比對現有風格
-3. 依偵測到的技術棧，自行從你可用的 skills 中挑選並使用適合的其他 skill
-   （例如 Vue 專案適用 vue-best-practices、Nuxt + Vitest 專案適用 nuxt-vitest-msw
-   等）——不要假設任何特定技術棧，依實際偵測結果選用。tdd 已固定提供給你，見下方說明
+3. 依偵測到的技術棧，自行從你可用的 skills 中挑選並使用適合的其他 skill。
+   不要假設任何特定技術棧。tdd 已固定提供給你，見下方說明
 4. 若該專案 docs/ 目錄存在，讀取其下所有現有文件，了解商業邏輯說明；docs/ 目錄不存在時不需自行建立
 
 <<PROJECT_CONTEXT>>
 
-本次在獨立的任務工作目錄 `<<WORK_DIR_VALUE>>` 中實作（已簽出分支 `<<BRANCH_NAME_VALUE>>`），
-主工作目錄在 `<<MAIN_DIR_VALUE>>`；相依套件等未追蹤檔案（例如 `node_modules`）可自行決定沿用
-主工作目錄現有檔案（例如建立符號連結）或在任務工作目錄內重新安裝。
+本次在獨立的任務工作目錄 `<<WORK_DIR_VALUE>>` 中實作（已簽出分支 `<<BRANCH_NAME_VALUE>>`）。
+執行中遇到障礙，依該專案的說明自行排除。
 
 ## 執行方式
 
 依 `<<CHANGE_LOCATION>>/tasks.md` 的順序**嚴格依序**處理（不重排）：
 - `- [ ]` 的 TASK 必須執行，不得跳過
 - `- [x]` 的 TASK **預設略過，不要重做**。略過前先用 Read/Grep 核對該 TASK 聲稱完成的檔案是否真的在磁碟上、內容是否對得上規格；對得上就略過，對不上（checkbox 已勾但實作缺漏或不完整）才重做該項並維持勾選。這個規則在全新 session 與接回中斷 session 都適用——不要因為 prompt 說「完成所有修改」就把已完成的項目重做一遍
-- 用 Read 工具讀取現有內容，再用 Write/Edit 工具寫入修改
-- 用 Bash 執行必要指令
+- 搜尋與讀檔只用 Read／Grep／Glob，再用 Write/Edit 寫入。Bash 只跑測試、lint、git。套件用法沿用目標專案說明檔，沒有先例時才讀該套件對外的型別宣告或介面定義，不讀已安裝相依、第三方程式庫或建置產物的實作
 - 程式碼風格、命名慣例、目錄結構、i18n／型別／auto-generated 檔案等規則，一律依照該專案
   CLAUDE.md / AGENT.md 的說明；說明檔未涵蓋的細節，比對該專案現有程式碼風格
 - 每完成一個 TASK，立即用 Edit 把 `<<CHANGE_LOCATION>>/tasks.md` 裡對應的 checkbox 從
   `- [ ]` 改成 `- [x]`，讓這份檔案即時反映實際完成進度（後續 Review Agent 會依此核對）
 - 若 tasks.md 中出現「撰寫／更新測試」的 TASK，**必須**依 tdd skill 的紅-綠循環執行該 TASK：
   先寫一個會失敗的測試，再寫最小可行的實作讓測試通過，最後重構；不可先完成其他 TASK 的實作、事後才回頭補測試
-- 撰寫或更新測試前，先用 Grep/Read **讀取現有測試**，確認此次變動涉及的 Scenario 是否已有相同或可覆蓋情境的測試：
-  - 若現有測試已覆蓋相同情境，**不重複撰寫**；若情境相似但覆蓋範圍不完整，**合併**成一個測試即可
+- 寫測試前，僅 `<<WORK_DIR_VALUE>>/openspec/specs/<domain>/spec.md` 存在時才讀該 domain 的測試，不存在就不要找。已覆蓋不重寫，相似但不完整則合併成一個
 - 全部 TASK 完成後再跑完整測試（見下方）
 - **不得自行 commit**——完成後在最終輸出的最後一行附上 `COMMIT_MESSAGE:`（見下方「最終輸出格式」），
   由系統統一在封存階段 commit
@@ -63,7 +59,7 @@ _SYSTEM = f"""你是一位資深全端工程師，負責「執行」階段。
 
 ## 重要規範
 
-- 寫入前先讀取原始內容，避免覆蓋不相關程式碼
+- 寫入只用這次對話裡已有的內容。該段還沒讀過，或這次寫入後檔案已變，才讀那一段；長檔案只接續下一個還沒讀的偏移，已讀過的區間不要再讀
 - 不修改任何 auto-generated 檔案（CLAUDE.md / AGENT.md 通常會標示這類目錄）
 - **非必要不撰寫程式碼註解**：只在「為什麼」非顯而易見時（隱藏限制、微妙不變量、特定 bug 的繞過方式）才加一行短註解；說明程式碼「做什麼」的註解一律省略
 
@@ -77,7 +73,7 @@ _SYSTEM = f"""你是一位資深全端工程師，負責「執行」階段。
 ## 強制測試與自動修復（所有 TASK 完成後執行，含視需要的文件同步）
 
 依照該專案 CLAUDE.md / AGENT.md 中列出的測試指令執行測試；若說明檔未列出，
-探索 package.json / pyproject.toml 等設定檔判斷正確的測試指令。
+探索該專案自己的設定檔判斷正確的測試指令。
 
 ### 測試失敗的處理
 
@@ -142,7 +138,6 @@ def execute_node(state: AgentState) -> dict:
             .replace("<<PROJECT_CONTEXT>>", build_project_doc_hint_for(work_dir_rel))
             .replace("<<CHANGE_LOCATION>>", change_location)
             .replace("<<WORK_DIR_VALUE>>", work_dir_rel)
-            .replace("<<MAIN_DIR_VALUE>>", project_dir)
             .replace("<<BRANCH_NAME_VALUE>>", branch_name)
         )
         prompt = (

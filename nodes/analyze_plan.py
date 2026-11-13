@@ -14,6 +14,16 @@ from ..lib import (
 )
 
 
+def _bound_tools(tools: str) -> list[str]:
+    """`--tools` 與 `--disallowedTools`。`--allowedTools` 在 skip-permissions 下擋不住未列出的工具。"""
+    listed = {part.strip() for part in tools.split(",") if part.strip()}
+    denied = [name for name in ("Grep", "Bash", "Glob", "Write", "Edit") if name not in listed]
+    args = ["--tools", tools]
+    if denied:
+        args += ["--disallowedTools", ",".join(denied)]
+    return args
+
+
 def _work_dir_abs(project_dir: str, change_name: str) -> str:
     """任務工作目錄的絕對路徑：這個 change 所有 `openspec/` 讀寫都在這裡進行，
     而不是主工作目錄（`project_dir`，只用來存 `.agentloop/` 執行狀態紀錄）。"""
@@ -107,7 +117,7 @@ _ANALYZE_PROHIBITIONS = """## 嚴格禁止事項
 以下事項**嚴格禁止**，違反即為執行錯誤：
 
 - **不得修改任何應用程式原始碼**（`.py`、`.ts`、`.vue`、`.go` 等實作檔案）——程式碼修改由 execute node 負責；
-  此階段僅允許讀取程式碼（Read/Glob/Grep），以及寫入 OpenSpec change 資料夾下的規格文件
+  此階段僅允許讀取程式碼（<<SEARCH>>），以及寫入 OpenSpec change 資料夾下的規格文件
 - **不得變更 `tasks.md` 任何勾選狀態**——完成標記由 execute node 在實作後即時更新；
   既有 `- [x]` 維持原文，所需工作以新增或改寫 `- [ ]` 呈現"""
 
@@ -117,7 +127,7 @@ _SYSTEM_INITIAL = f"""你是一位資深全端工程師，負責「分析與規�
 
 ## 執行步驟
 
-1. 用 Read/Glob/Grep 閱讀相關程式碼，找出需修改的位置與潛在衝突（<<CONFIRMED_SCOPE>>，見下方）
+1. 用 <<SEARCH>> 閱讀相關程式碼，找出需修改的位置與潛在衝突（<<CONFIRMED_SCOPE>>，見下方）
 2. 依 grilling 對本任務進行互動式釐清（見下方「提問規則」），過程中依 domain-modeling 即時記錄詞彙與 ADR；
    grill 結果須能支撐強制三項（見下方「OpenSpec 產出規則」）
 3. 共識達成後，依下方「OpenSpec 產出規則」完成規格文件（change 資料夾已由系統建立，見下方
@@ -154,12 +164,12 @@ _SYSTEM_REPLAN = f"""你是一位資深全端工程師，負責「重新分析�
 ## 根據審查等級採取行動
 
 ### 若為「重寫」（系統已還原目標專案未提交的程式碼變更，openspec/ 不受影響）：
-1. 重新閱讀現有程式碼；依下方「提問規則」針對審查結果逐點 grill 確認，不需重新進行完整的 grilling 釐清或文件同步
+1. 用 <<SEARCH>> 重新閱讀現有程式碼；依下方「提問規則」針對審查結果逐點 grill 確認，不需重新進行完整的 grilling 釐清或文件同步
 2. 依下方「更新既有的 OpenSpec Change」與「OpenSpec 產出規則」重新撰寫規格文件
 
 ### 若為「修補」：
 1. 不需要 rollback，保留已完成的修改
-2. 閱讀現有程式碼，精確定位需要修正的地方；依下方「提問規則」針對審查結果逐點 grill 確認
+2. 用 <<SEARCH>> 閱讀現有程式碼，精確定位需要修正的地方；依下方「提問規則」針對審查結果逐點 grill 確認
 3. 依下方「更新既有的 OpenSpec Change」與「OpenSpec 產出規則」更新規格文件相關段落（不必整份重寫，但維持章節結構，不可整段刪除某章節）
 
 {_CHANGE_SETUP_EXISTING}
@@ -190,7 +200,7 @@ _SYSTEM_HUMAN_REVISE = f"""你是一位資深全端工程師，負責「根據�
 ## 執行步驟
 
 1. 仔細理解使用者的修改意見；若意見不夠明確，依下方「提問規則」提問確認，不要自行臆測
-2. 視需要用 Read/Glob/Grep 重新閱讀相關程式碼
+2. 視需要用 <<SEARCH>> 重新閱讀相關程式碼
 3. 若修改意見牽涉到詞彙或架構決策的變更，依 domain-modeling 更新 CONTEXT.md / docs/adr/
 4. 依下方「更新既有的 OpenSpec Change」與「OpenSpec 產出規則」更新規格文件（維持章節結構，不可整段刪除某章節）；
    強制三項若被意見改到就一併改寫，沒被改到也不可刪掉
@@ -209,6 +219,17 @@ _SYSTEM_HUMAN_REVISE = f"""你是一位資深全端工程師，負責「根據�
 
 {LANGUAGE_POLICY}
 """
+
+# 查程式那一次結束後，只把筆記帶進新 session。
+_CODE_NOTE_PROMPT = """任務：<<TASK>>
+工作目錄：<<DIR>>
+
+用 Grep 找位置，再 Read 那些檔。
+最終回應只寫程式筆記，路徑要是工作目錄裡真實存在的檔。不要提問、不要寫檔：
+- 要改的檔與符號，每個符號只留相關幾行
+- 程式無法決定、要使用者拍板的點
+筆記用繁體中文。"""
+_NOTE_WRITE_TOOLS = {"plan": "Read,Write", "revise": "Read,Write,Edit"}
 
 _BANNER = "\033[1;34m"
 _RED    = "\033[1;31m"
@@ -304,7 +325,10 @@ def _is_question(text: str) -> bool:
     return bool(_QUESTION_LINE_RE.search(text))
 
 
-def _run_with_grilling(prompt: str, tools: str, model: str, timeout: int, resume: str | None = None):
+def _run_with_grilling(
+    prompt: str, tools: str, model: str, timeout: int,
+    resume: str | None = None, extra_args: list[str] | None = None,
+):
     """執行 call_claude；遇到 QUESTION: 提問時（已由 claude_runner 即時印出）
     立即等待使用者回覆，並以 --resume 延續同一 session 把回答帶回去。
 
@@ -314,7 +338,10 @@ def _run_with_grilling(prompt: str, tools: str, model: str, timeout: int, resume
     session_id = resume
     rounds = 0
     while True:
-        result = call_claude(prompt, tools=tools, model=model, timeout=timeout, resume=session_id)
+        result = call_claude(
+            prompt, tools=tools, model=model, timeout=timeout,
+            resume=session_id, extra_args=extra_args,
+        )
         session_id = result.session_id or session_id
 
         if result.is_error or not _is_question(result.text):
@@ -349,7 +376,8 @@ def _run_with_grilling(prompt: str, tools: str, model: str, timeout: int, resume
 
 
 def _run_with_validate(
-    result, project_dir: str, change_name: str, tools: str, model: str
+    result, project_dir: str, change_name: str, tools: str, model: str,
+    extra_args: list[str] | None = None,
 ) -> tuple[str, str]:
     """驗證迴圈：`openspec validate` 有 error 就把錯誤訊息回傳給同一個 session 修正，
     重試到通過或達上限為止（取代原本要求 Claude 自己在 Bash 裡跑 validate 迴圈）。
@@ -380,7 +408,10 @@ def _run_with_validate(
             "`openspec validate --strict` 發現以下 error，請修正對應檔案後我會重新驗證：\n\n"
             + validation.error_text
         )
-        result = _run_with_grilling(fix_prompt, tools=tools, model=model, timeout=300, resume=session_id)
+        result = _run_with_grilling(
+            fix_prompt, tools=tools, model=model, timeout=300,
+            resume=session_id, extra_args=extra_args,
+        )
         session_id = result.session_id or session_id
         if result.is_error:
             return result.text, session_id
@@ -1083,6 +1114,8 @@ def analyze_plan_node(state: AgentState) -> dict:
         if not ok:
             return _fail(f"rollback 失敗：{msg}")
 
+    work_dir_for_note = _work_dir_abs(project_dir, change_name) if project_dir else ""
+
     if not is_replan and not is_human_revise:
         work_dir_abs = _work_dir_abs(project_dir, change_name)
 
@@ -1171,6 +1204,34 @@ def analyze_plan_node(state: AgentState) -> dict:
 
         work_dir_rel = worktree_dir(project_dir, change_name)
         project_context = build_project_doc_hint_for(work_dir_rel)
+        note = ""
+        if not prior_session:
+            note_tools = "Read,Grep"
+            note_result = call_claude(
+                _CODE_NOTE_PROMPT
+                .replace("<<TASK>>", task)
+                .replace("<<DIR>>", work_dir_for_note),
+                tools=note_tools,
+                model=model,
+                timeout=300,
+                extra_args=_bound_tools(note_tools),
+            )
+            note = note_result.text.strip()
+            if note_result.is_error or not note:
+                reason = note_result.text or "程式筆記是空的"
+                print(
+                    f"{_RED}  [分析+規劃 Agent] 程式筆記失敗：{reason}{_RESET}\n",
+                    flush=True,
+                )
+                return _fail(reason)
+            print(
+                f"{_YELLOW}  [分析+規劃 Agent] 程式筆記完成，提問與寫規格另開 session{_RESET}",
+                flush=True,
+            )
+            print(format_usage_stats(note_result, time.monotonic() - start), flush=True)
+        search = "下方「程式筆記」"
+        tools = _NOTE_WRITE_TOOLS[tools]
+        extra_args = _bound_tools(tools)
 
         if is_replan:
             review_ctx = review_result
@@ -1185,6 +1246,7 @@ def analyze_plan_node(state: AgentState) -> dict:
                 .replace("<<CHANGE_NAME_VALUE>>", change_name)
                 .replace("<<BRANCH_NAME_VALUE>>", branch_name)
                 .replace("<<SKIP_SPECS_CONTEXT>>", _skip_specs_context(bool(skip_specs)))
+                .replace("<<SEARCH>>", search)
             )
         elif is_human_revise:
             system = (
@@ -1195,6 +1257,7 @@ def analyze_plan_node(state: AgentState) -> dict:
                 .replace("<<CHANGE_NAME_VALUE>>", change_name)
                 .replace("<<BRANCH_NAME_VALUE>>", branch_name)
                 .replace("<<SKIP_SPECS_CONTEXT>>", _skip_specs_context(bool(skip_specs)))
+                .replace("<<SEARCH>>", search)
             )
         else:
             system = (
@@ -1213,15 +1276,21 @@ def analyze_plan_node(state: AgentState) -> dict:
                 .replace("<<CHANGE_NAME_VALUE>>", change_name)
                 .replace("<<BRANCH_NAME_VALUE>>", branch_name)
                 .replace("<<SKIP_SPECS_CONTEXT>>", _skip_specs_context(bool(skip_specs)))
+                .replace("<<SEARCH>>", search)
             )
 
         prompt = f"{system}\n\n{skills_block}\n\n任務：{task}"
+        if note:
+            prompt += f"\n\n## 程式筆記\n\n{note}"
 
         last_session = prior_session
 
         def _run(p: str, resume: str | None):
             nonlocal last_session
-            r = _run_with_grilling(p, tools=tools, model=model, timeout=300, resume=resume)
+            r = _run_with_grilling(
+                p, tools=tools, model=model, timeout=300,
+                resume=resume, extra_args=extra_args,
+            )
             last_session = r.session_id or last_session
             return r
 
@@ -1246,7 +1315,9 @@ def analyze_plan_node(state: AgentState) -> dict:
             )
         return _fail(result.text, last_session)
 
-    validate_error, validate_session = _run_with_validate(result, project_dir, change_name, tools, model)
+    validate_error, validate_session = _run_with_validate(
+        result, project_dir, change_name, tools, model, extra_args,
+    )
     if validate_error:
         print(f"{_RED}  [分析+規劃 Agent] {validate_error}{_RESET}\n", flush=True)
         return _fail(validate_error, validate_session or last_session)
