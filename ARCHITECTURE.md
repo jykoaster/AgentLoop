@@ -96,9 +96,7 @@ change/spec-delta 規則；review 通過後由 `archive` 節點呼叫 `openspec 
 - **`.agentloop/` 執行狀態紀錄仍在主工作目錄**：`state.json`、`logs/<stage>.log` 不隨 worktree
   移動，見下方「檔案系統作為共享記憶」。
 - **`execute`／`review` 都在任務工作目錄操作**：`git diff HEAD`、`openspec` CLI 的 cwd、
-  `build_project_doc_hint_for()` 與 prompt 裡「目標專案目錄」都指向任務工作目錄；`execute` 的
-  prompt 另外告知主工作目錄路徑，由 Agent 自行決定沿用其中的未追蹤相依檔（例如符號連結
-  `node_modules`）或在任務工作目錄內重新安裝。
+  `build_project_doc_hint_for()` 與 prompt 裡「目標專案目錄」都指向任務工作目錄。執行中遇到障礙時依目標專案自己的說明處理，本專案不規定相依如何準備。
 - **execute 不 commit，只擬訊息**：`execute` 最後輸出一行 `COMMIT_MESSAGE: <訊息>`
   （`^COMMIT_MESSAGE:\s*(.+)$`，多行模式取最後一個），寫入 `AgentState["commit_message"]`；沒有
   這行則保留 state 原值。真正的 commit 延後到 `archive` 成功之後才做——worktree 移除前必須先
@@ -468,7 +466,7 @@ validate 的錯誤修正也接到同一套「有問題就等使用者、否則�
 
 | 版本                   | 用途                                                                                                                                                                                                                                                                                                                               |
 | ---------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `_SYSTEM_INITIAL`      | 全新任務規劃：Read/Glob/Grep 探索 → grilling 互動釐清（同步 domain-modeling；grill 結果須含 Specine 強制三項）→ 依「OpenSpec 產出規則」撰寫 proposal.md / specs delta / tasks.md（非小改動時另寫 design.md）於系統已建好的 change 資料夾（目標專案／domain／`openspec init`／`new change` 皆已由 Python 事先確認並附在 prompt 裡） |
+| `_SYSTEM_INITIAL`      | 全新任務規劃：先另一次呼叫取得程式筆記（Grep 找位置再 Read；grilling 與寫規格的 session 只附筆記，兩次都可 Read 原始碼）→ grilling 互動釐清（同步 domain-modeling；grill 結果須含 Specine 強制三項）→ 依「OpenSpec 產出規則」撰寫 proposal.md / specs delta / tasks.md（非小改動時另寫 design.md）於系統已建好的 change 資料夾（目標專案／domain／`openspec init`／`new change` 皆已由 Python 事先確認並附在 prompt 裡） |
 | `_SYSTEM_REPLAN`       | 帶入 `<<REVIEW_CONTEXT>>`（`review_result`，截斷至最後 3000 字）與 `<<REVIEW_LEVEL>>`；依「重寫／修補」分流見上（rollback 已由 Python 事先完成），並用專屬的 `_REVIEW_QUESTION_PROTOCOL` 針對 review 結果逐點 grill；沿用既有 change，不重新 `openspec new change`                                                                 |
 | `_SYSTEM_HUMAN_REVISE` | 帶入 `<<HUMAN_FEEDBACK>>`（`human_confirm` 收到的使用者修改意見，或重跑 analyze_plan 取得的調整內容）：理解意見（不夠明確則提問）→ 視需要重讀程式碼 → 視需要更新 domain-modeling → 更新既有 change 的規格文件                                                                                                                   |
 
@@ -564,7 +562,7 @@ growing」），不在個別 `_SYSTEM` 裡重複描述。
 1. Python 先用 `git_ops.ensure_worktree()` 建立或簽出任務工作目錄（已存在則沿用，不存在則從主工作目錄 HEAD 建立）；失敗則 `status: "error"`，不呼叫 Claude
 2. Read `openspec/changes/<change_name>/` 下的 proposal.md、specs/**/\*.md、tasks.md（若有 design.md 一併讀取）。規格、驗收條件與任務清單以這些檔案為準，**不**把 `state["plan"]` 扁平清單貼進 prompt，也 **不\*\*注入 `state["task"]`（原始使用者描述只給規劃用；execute 的工作範圍就是 change 資料夾，再貼一次會讓它重新診斷原始問題、略過 tasks.md 已收斂的剩餘項）
 3. 依 `project_context.build_project_doc_hint_for()` 指名的任務工作目錄，Read 讀取其 `CLAUDE.md` / `AGENT.md`，了解架構、指令（測試、lint、build 等）、目錄慣例、程式碼規範與技術棧；找不到說明檔則自行 Read/Glob/Grep 探索並比對現有風格
-4. 依偵測到的技術棧，**自行**從可用的 skills 中挑選並使用適合的其他 skill（例如 Vue 專案適用 `vue-best-practices`、Nuxt + Vitest 專案適用 `nuxt-vitest-msw`）——不寫死任何特定技術棧的 skill 清單。這些完全不經過 `skill_loader.py`，靠 Claude Code 自己原生的 skill 探索機制（只認執行者 `$HOME/.claude/skills/`，見下方「Skill 系統作為知識注入」）；`tdd` 已固定完整注入（見下方「注入的 Skills」），不需要另外挑選
+4. 依偵測到的技術棧，**自行**從可用的 skills 中挑選並使用適合的其他 skill，不假設任何特定技術棧。這些完全不經過 `skill_loader.py`，靠 Claude Code 自己原生的 skill 探索機制（只認執行者 `$HOME/.claude/skills/`，見下方「Skill 系統作為知識注入」）；`tdd` 已固定完整注入（見下方「注入的 Skills」），不需要另外挑選
 5. 若該專案 `docs/` 目錄存在，讀取其下所有現有文件，了解商業邏輯說明；`docs/` 目錄不存在時不需自行建立
 
 **執行方式：** 依 change 資料夾內 `tasks.md` 的順序嚴格依序處理（不重排）：
@@ -572,14 +570,14 @@ growing」），不在個別 `_SYSTEM` 裡重複描述。
 - `- [ ]` 必須執行；`- [x]` **預設略過**，略過前先 Read/Grep 核對該項聲稱完成的檔案是否真的在磁碟上、內容是否對得上規格——對得上才略過，對不上才重做該項。這條寫在 `_SYSTEM` 裡，所以即使 session 失效、冷啟動重送完整 prompt，也不會把已完成的實作重做一遍（`RESUME_AFTER_INTERRUPT_PROMPT` 另外保住「做到一半」的脈絡）
 - **不得自行 commit**——完成後在最終輸出最後一行附上 `COMMIT_MESSAGE:`，由 archive 節點在成功封存後統一 commit（見上方「任務工作目錄」）
 - **不**自行呼叫 `/code-review`——後續有獨立的 Review Agent 依專案規格審查本次修改
-- tasks.md 中若有「撰寫／更新測試」的 TASK，**必須**依 `tdd` skill 的紅-綠循環執行：先寫會失敗的測試，再寫最小可行實作讓測試通過，最後重構；不可先完成其他 TASK 的實作、事後才回頭補測試
+- tasks.md 中若有「撰寫／更新測試」的 TASK，**必須**依 `tdd` skill 的紅-綠循環執行：先寫會失敗的測試，再寫最小可行實作讓測試通過，最後重構；不可先完成其他 TASK 的實作、事後才回頭補測試。寫測試前只在該 domain 的 `openspec/specs/<domain>/spec.md` 已存在時讀該 domain 的測試，不存在就不找
 - 過程中定期執行型別檢查與單一測試檔案，全部 TASK 完成後執行完整測試
 
-未完成項嚴格依序做完；搜尋與讀檔只用 Read／Grep／Glob，再用 Write/Edit 寫入。寫入只用這次對話裡已有的內容；該段還沒讀過，或這次寫入後檔案已變，才讀那一段。長檔案只接續下一個還沒讀的偏移，已讀過的區間不要再讀。Bash 只跑測試、lint、git。套件用法沿用目標專案既有測試與說明檔，沒有先例時才讀該套件對外的型別宣告或介面定義，不讀已安裝相依、第三方程式庫或建置產物的實作。風格、命名、目錄結構、i18n／型別／auto-generated 檔案等規則，一律依該專案 `CLAUDE.md` / `AGENT.md` 的說明判斷，不硬編碼在 prompt 裡。每完成一個 TASK，立即用 Edit 把該任務對應的 OpenSpec change（`<project_dir>/openspec/changes/<change_name>/tasks.md`，路徑由 `AgentState["project_dir"]`/`["change_name"]` 組成）裡對應的 checkbox 從 `- [ ]` 改成 `- [x]`，讓這份檔案即時反映實際完成進度，供 `review` 節點核對。
+未完成項嚴格依序做完；搜尋與讀檔只用 Read／Grep／Glob，再用 Write/Edit 寫入。寫入只用這次對話裡已有的內容；該段還沒讀過，或這次寫入後檔案已變，才讀那一段。長檔案只接續下一個還沒讀的偏移，已讀過的區間不要再讀。Bash 只跑測試、lint、git。套件用法沿用目標專案說明檔，沒有先例時才讀該套件對外的型別宣告或介面定義，不讀已安裝相依、第三方程式庫或建置產物的實作。風格、命名、目錄結構、i18n／型別／auto-generated 檔案等規則，一律依該專案 `CLAUDE.md` / `AGENT.md` 的說明判斷，不硬編碼在 prompt 裡。每完成一個 TASK，立即用 Edit 把該任務對應的 OpenSpec change（`<project_dir>/openspec/changes/<change_name>/tasks.md`，路徑由 `AgentState["project_dir"]`/`["change_name"]` 組成）裡對應的 checkbox 從 `- [ ]` 改成 `- [x]`，讓這份檔案即時反映實際完成進度，供 `review` 節點核對。
 
 **文件同步要求：** 是否需要同步更新文件，依該任務所屬專案的 `CLAUDE.md` / `AGENT.md` 判斷——說明檔要求同步維護 `docs/` 商業邏輯說明文件才需處理（依 `tasks.md` 中對應的文件更新 TASK 執行，或在說明檔明確要求但 `tasks.md` 未包含時主動補上）；說明檔未提及此類慣例時不需要主動撰寫或更新文件。
 
-**強制測試與自動修復：** 依該專案 `CLAUDE.md` / `AGENT.md` 中列出的測試指令執行測試；若說明檔未列出，探索 `package.json` / `pyproject.toml` 等設定檔判斷正確指令。測試失敗時分析錯誤並修復、重跑，最多重試 3 次；3 次後不論結果如何都繼續輸出最終摘要。
+**強制測試與自動修復：** 依該專案 `CLAUDE.md` / `AGENT.md` 中列出的測試指令執行測試；若說明檔未列出，探索該專案自己的設定檔判斷正確指令。測試失敗時分析錯誤並修復、重跑，最多重試 3 次；3 次後不論結果如何都繼續輸出最終摘要。測試指令不能丟到背景：`claude -p` 的子行程設了 `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1`（見下方「Claude Runner」），Bash 沒有 `run_in_background` 參數，工具會阻塞到指令結束、把輸出放進 tool result，這一輪才繼續。
 
 **最終輸出格式（文字摘要，不含測試輸出）：**
 
@@ -632,8 +630,10 @@ growing」），不在個別 `_SYSTEM` 裡重複描述。
 或 Bash 測試指令視為可以延後處理，寫下「等測試結果回來後整合最終報告」之類的話就提前結束這輪回應，
 而不是真的等到 tool_result。從實際失敗的 log 來看，兩個 sub-agent 本身確實是同步等到結果才繼續的，
 斷點出現在後續「額外操作指示」要求跑的實際測試指令——Claude 在尚未拿到該指令的 tool_result 前就
-寫出總結文字並結束回應。`_SYSTEM` 裡加了一段「完整性要求」明講不可以背景執行、不可以用「稍後」之類
-的話結束回應，但這只是自然語言指示：實測證明**單靠這段指示不足以可靠防止問題**——一個經過完整
+寫出總結文字並結束回應。Bash／Task 的 `run_in_background` 已由 runner 的
+`CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1` 從工具參數拿掉，模型不能再把測試丟到背景後結束這輪。
+`_SYSTEM` 裡仍有一段「完整性要求」明講不可以用「稍後」之類的話結束回應，但這只是自然語言指示：
+實測證明**單靠這段指示不足以可靠防止問題**——一個經過完整
 skill 全文、兩輪 sub-agent 往返、額外驗證步驟之後的深層決策點，指示的影響力會被稀釋，且 Claude
 當下往往已經主觀認定「答案已經確認」而不覺得需要真的等測試跑完，所以指示留著只當作便宜的第一道
 防線，不能單獨依賴。
@@ -666,8 +666,8 @@ skill 全文、兩輪 sub-agent 往返、額外驗證步驟之後的深層決策
 **額外操作指示：**
 
 1. 確認 TASK 清單完整性：Read `tasks.md`，依其 checkbox 狀態（`- [x]` 已完成／`- [ ]` 未完成）逐項核對，列出未完成的 TASK 編號
-2. 依偵測到的專案讀取其說明檔中列出的測試指令並實際用 Bash 執行測試（找不到則探索 `package.json` / `pyproject.toml`）；測試失敗計入 Standards 軸的問題
-3. Spec ↔ 測試追溯：**直接引用** `<<SPEC_TRACE_RESULT>>` 的事前檢查結果納入 Spec 軸報告，不要自己再 grep（見上方「Spec ↔ 測試追溯」）。另外用自己的判斷檢查本次新增或改動的測試有無重複、情境可否合併，重複或高度重疊的以 `SUGGESTION` 列出——但**不得建議刪到讓任何 Scenario 完全沒有對應測試**
+2. 依偵測到的專案讀取其說明檔中列出的測試指令並實際用 Bash 執行測試（找不到則探索該專案自己的設定檔）；測試失敗計入 Standards 軸的問題
+3. Spec ↔ 測試追溯：**直接引用** `<<SPEC_TRACE_RESULT>>` 的事前檢查結果納入 Spec 軸報告，不要自己再 grep（見上方「Spec ↔ 測試追溯」）。另外只在該 domain 的 `openspec/specs/<domain>/spec.md` 存在時，檢查本次測試與該 domain 既有測試有無重複、可否合併；不存在就不找。重複或高度重疊的以 `SUGGESTION` 列出——但**不得建議刪到讓任何 Scenario 完全沒有對應測試**
 
 （原本還有一步「確認 docs/ 商業邏輯說明文件是否同步更新」，已從 `_SYSTEM` 移除——`execute`
 自己已經有「文件同步要求」，review 端再重複檢查一次不是必要步驟，且步驟越多，Claude 在深層
@@ -870,19 +870,21 @@ Iteration 2:
 | 名稱       | 工具                                | 用途                                                                       |
 | ---------- | ----------------------------------- | -------------------------------------------------------------------------- |
 | `readonly` | Read, Glob, Grep                    | 安全探索                                                                   |
-| `plan`     | Read, Write, Glob, Grep             | 建立文件（`analyze_plan` 初始規劃，只新增檔案）                            |
-| `revise`   | Read, Write, Edit, Glob, Grep       | 編輯既有文件（`analyze_plan` 重新規劃／依人工意見調整，不需要 `Bash`）     |
+| `plan`     | Read, Write, Glob, Grep             | 建立文件（`analyze_plan` 初始規劃，只新增檔案）。查程式那次 `--tools` 為 Read, Grep，拒絕 Bash、Glob、Write、Edit。提問與寫規格那次為 Read, Write，拒絕 Grep、Bash、Glob，仍可 Read 原始碼 |
+| `revise`   | Read, Write, Edit, Glob, Grep       | 編輯既有文件（`analyze_plan` 重新規劃／依人工意見調整）。提問與寫規格那次為 Read, Write, Edit，仍可 Read 原始碼 |
 | `full`     | Read, Write, Edit, Bash, Glob, Grep | 完整程式碼修改（`execute`）                                                |
 | `check`    | Read, Glob, Grep, Bash              | 驗證，不修改檔案                                                           |
 | `review`   | Read, Glob, Grep, Bash, Task        | 審查；`Task` 供 code-review skill 平行呼叫 Standards / Spec 兩個 sub-agent |
 
 ### 執行流程
 
-1. 組合指令：`claude -p --allowedTools {tools} --output-format stream-json --verbose --dangerously-skip-permissions`
+1. 組合指令：`claude -p --allowedTools {tools} --output-format stream-json --verbose --dangerously-skip-permissions`。`analyze_plan` 的筆記與寫規格兩次另附 `--tools` 與 `--disallowedTools`（`--allowedTools` 在 skip-permissions 下擋不住未列出的工具）
 2. 以 subprocess 啟動，即時串流 stdout JSON 事件
 3. 解析 `assistant`、`tool_use`、`tool_result` 事件並即時印出（dimmed 格式）
 4. 解析最終 `result` 事件取得文字輸出與 token 用量
 5. 回傳 `ClaudeResult`（含文字、`session_id`、token 統計、快取統計）
+
+子行程環境固定帶 `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1`。Claude Code 因此從 Bash 與 Task 的工具參數拿掉 `run_in_background`。`claude -p` 這輪一結束行程就退出，背景任務的完成通知不會再送回來；測試指令與 sub-agent 改為在同一輪阻塞到工具回傳結果。Bash 預設最多等 120 秒（模型可在該次呼叫提高 `timeout`，上限 10 分鐘）。
 
 ### 語言政策
 
@@ -988,7 +990,7 @@ AgentLoop 容器本身不跑 Docker daemon，而是讓容器內的 Docker CLI �
 
 | 技術                            | 說明                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
 | ------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Docker**                      | 以 `python:3.11-slim` 為基底，加裝 Node.js 22 執行 Claude Code CLI（`@anthropic-ai/claude-code@2.1.285`；`claude-opus-5-5` 等新模型要求 CLI ≥ 2.1.280，該版宣告 Node ≥ 22），並加裝 `docker-ce-cli` + `docker-compose-plugin`（僅 CLI，不含 daemon）                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| **Docker**                      | 以 `python:3.11-slim` 為基底，加裝 Node.js 22 執行 Claude Code CLI（`@anthropic-ai/claude-code@2.1.285`；`claude-opus-5-5` 等新模型要求 CLI ≥ 2.1.280，該版宣告 Node ≥ 22）、OpenSpec CLI，並加裝 `docker-ce-cli` + `docker-compose-plugin`（僅 CLI，不含 daemon）                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
 | **Docker Compose 路徑掛載**     | 自 v0.5.0 起改掛載**整個工作區根目錄**（`${HOST_WORKSPACE_ROOT}:${HOST_WORKSPACE_ROOT}`），而非只掛 `AgentLoop/` 與單一 `TARGET_PROJECT`，讓網頁控制台能切換目標專案、用資料夾選擇器看到其他專案，不需要為此重建容器；路徑同樣用「與 host 相同的絕對路徑」，原因不變：宿主 daemon 幫目標專案建立 bind mount 時，用的是掛載路徑「字串本身」，該字串必須在宿主上真實存在，否則會掛到空目錄。目標專案改由網頁設定（`web/settings.py`，優先於 `.env` 的 `TARGET_PROJECT`）決定，`project_context.py` 的動態偵測邏輯本身不寫死任何專案名稱。同一目標專案可多任務並行（見上方「任務工作目錄」），仍只支援單一目標專案                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | **`/var/run/docker.sock` 掛載** | `- /var/run/docker.sock:/var/run/docker.sock`，讓容器內 Docker CLI 連上宿主 daemon（DooD 的核心）                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
 | **對外埠**                      | `ports: ["127.0.0.1:8000:8000"]`：網頁控制台只綁 host 的 `127.0.0.1`，不對外開放；容器內 `command` 為 `python -m uvicorn AgentLoop.web.app:app --host 0.0.0.0 --port 8000`，前端由映像的 `WEB_DIST_DIR` 建置產物提供                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |

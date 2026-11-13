@@ -252,6 +252,10 @@ def _run_claude_once(
         k: v for k, v in os.environ.items()
         if k not in ("AGENTLOOP_INTERACTION", "AGENTLOOP_RUN_DIR")
     }
+    # claude -p 結束這輪就退出，背景任務的完成通知不會再進來。
+    # 設了這個變數，Bash 與 Task 的參數裡就沒有 run_in_background，
+    # 測試與 sub-agent 都在這一輪阻塞到工具回傳結果。
+    child_env["CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"] = "1"
     with subprocess.Popen(
         cmd,
         stdin=subprocess.DEVNULL,
@@ -338,6 +342,7 @@ def call_claude(
     timeout: int = 300,
     model: str | None = None,
     resume: str | None = None,
+    extra_args: list[str] | None = None,
 ) -> ClaudeResult:
     """以非互動模式執行 `claude -p`，回傳結果及 token 用量。
     偵測到 token / rate limit 錯誤時暫停，等人工確認 token 已更新後再重試。
@@ -364,6 +369,8 @@ def call_claude(
             c += ["--model", MODEL_IDS.get(model, model)]
         if resume_id:
             c += ["--resume", resume_id]
+        if extra_args:
+            c += extra_args
         return c
 
     cmd = _build_cmd(prompt, resume)
